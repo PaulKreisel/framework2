@@ -17,6 +17,7 @@ import (
 	"framework2/internal/agent"
 	"framework2/internal/dir"
 	"framework2/internal/env"
+	"framework2/internal/finish"
 	"framework2/internal/next"
 )
 
@@ -39,7 +40,11 @@ subcommands:
   agent relaunch [<id>] [extra-args...]   from inside a session: ask the running
                                           wrapper to re-exec claude with --continue
                                           (use after a dir link/worktree)
-  next [<id>]                             show ready descendants of a ticket`
+  next [<id>]                             show ready descendants of a ticket
+  finish [<id>]                           wrap up: FF-rebase the ticket's worktrees
+                                          onto their parent branch, close the bead,
+                                          remove the worktrees, and delete the env
+                                          folder. One-way; never invoked automatically.`
 
 // Run executes the ticket command-line with the given args, writing normal
 // output to stdout and errors to stderr. Returns the process exit code.
@@ -68,6 +73,8 @@ func dispatch(args []string, stdout, stderr io.Writer) error {
 		return runAgent(db, ticket, rest[1:])
 	case "next":
 		return runNext(db, ticket, rest[1:], stdout, stderr)
+	case "finish":
+		return runFinish(db, ticket, rest[1:], stdout)
 	case "-h", "--help", "help":
 		fmt.Fprintln(stdout, usage)
 		return nil
@@ -138,6 +145,14 @@ func runAgent(db, ticket string, args []string) error {
 		return err
 	}
 	return agent.Run(db, os.Getenv("BEADS_DIR"), id)
+}
+
+func runFinish(db, ticket string, args []string, stdout io.Writer) error {
+	id, _, err := resolveID(ticket, args, 0, "usage: ticket finish [<id>]")
+	if err != nil {
+		return err
+	}
+	return finish.Run(db, os.Getenv("BEADS_DIR"), id, stdout)
 }
 
 func runNext(db, ticket string, args []string, stdout, stderr io.Writer) error {

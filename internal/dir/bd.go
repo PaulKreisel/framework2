@@ -36,6 +36,11 @@ func load(db, ticketID string) ([]Entry, error) {
 	return entries, nil
 }
 
+// ParentID returns the immediate parent bead id, or "" if the bead is a root.
+func ParentID(db, ticketID string) (string, error) {
+	return parentID(db, ticketID)
+}
+
 // parentID returns the immediate parent bead id, or "" if the bead is a root.
 func parentID(db, ticketID string) (string, error) {
 	row, err := showTicket(db, ticketID)

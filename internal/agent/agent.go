@@ -173,6 +173,18 @@ func writeClaudeMD(envPath string, issue *bdIssue, dirs []dir.Entry) error {
 	b.WriteString("  the refreshed `additionalDirectories`. Extra args after `relaunch`\n")
 	b.WriteString("  are appended to the claude command.\n\n")
 
+	b.WriteString("## Ending the session\n\n")
+	b.WriteString("Commit progress along the way with plain `git commit` in each linked\n")
+	b.WriteString("worktree — that's safe and repeatable.\n\n")
+	b.WriteString("When the work is truly done, the wrap-up is:\n\n")
+	b.WriteString("- `this finish` — fast-forward-rebases each worktree onto its parent\n")
+	b.WriteString("  ticket's branch, closes the bead, removes the worktrees, and deletes\n")
+	b.WriteString("  this env folder. It is a one-way door: refuses if any worktree has\n")
+	b.WriteString("  uncommitted changes or has diverged from its parent.\n\n")
+	b.WriteString("`this finish` is never invoked automatically. Before running it, the\n")
+	b.WriteString("agent must explicitly ask the user to confirm, since it destroys this\n")
+	b.WriteString("session's env folder and removes the worktree the agent is sitting in.\n\n")
+
 	return os.WriteFile(filepath.Join(envPath, "CLAUDE.md"), []byte(b.String()), 0o644)
 }
 
