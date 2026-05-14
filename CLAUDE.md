@@ -7,7 +7,7 @@ Read [initial_prompt.md](initial_prompt.md) before starting work in this repo. I
 - **Beads are the source of truth.** Every TODO is a bead in `~/ai/.beads/`. Do not maintain `TODO.md` files or in-conversation task lists for persistent work.
 - **Talk to `bd` via the CLI, with `--json` for parsing.** Do not import bd as a Go library.
 - **Go for everything new.** No new shell scripts.
-- **Tests are realistic.** Use a real `bd` and real git repos in tmpdirs. No mocks.
+- **Tests are realistic.** Use a real `bd` and real git repos in tmpdirs. No mocks. See [TESTING.md](TESTING.md) for the test framework and patterns.
 
 ## Working with beads
 
