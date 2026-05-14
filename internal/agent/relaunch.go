@@ -24,9 +24,18 @@ const (
 	PIDFile = ".claude.pid"
 )
 
+// DefaultRelaunchPrompt is the initial prompt passed to claude when `ticket
+// agent relaunch` is invoked with no extra args. It gives the relaunched
+// session something to respond to so the user sees a visible signal that the
+// relaunch actually happened (and that any newly linked dirs are in scope).
+const DefaultRelaunchPrompt = "Relaunch successful"
+
 // Relaunch asks a running `ticket agent` wrapper to re-exec claude with
 // `--continue` plus extraArgs. It writes [SignalFile] in the ticket's env
 // folder, then signals the claude process whose pid is in [PIDFile].
+//
+// When extraArgs is empty, [DefaultRelaunchPrompt] is passed as the prompt
+// instead so the relaunched session has something to acknowledge.
 //
 // Returns an error if no pid file exists (i.e. not running inside a wrapped
 // session) or if the recorded pid is no longer alive.
@@ -41,6 +50,9 @@ func Relaunch(beadsDir, ticketID string, extraArgs []string) error {
 	pid, err := readPIDFile(filepath.Join(envPath, PIDFile))
 	if err != nil {
 		return err
+	}
+	if len(extraArgs) == 0 {
+		extraArgs = []string{DefaultRelaunchPrompt}
 	}
 	if err := writeSignal(filepath.Join(envPath, SignalFile), extraArgs); err != nil {
 		return err

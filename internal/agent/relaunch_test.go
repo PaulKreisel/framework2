@@ -56,7 +56,7 @@ func TestRelaunchWritesSignalAndKillsTarget(t *testing.T) {
 	}
 }
 
-func TestRelaunchWithNoExtraArgsWritesEmptySignal(t *testing.T) {
+func TestRelaunchWithNoExtraArgsWritesDefaultPrompt(t *testing.T) {
 	beadsDir := testutil.SharedBdDB(t)
 	ticket, _ := createBeadWithDescription(t, "agent-relaunch-empty", "x")
 	envPath := mustEnv(t, beadsDir, ticket)
@@ -77,8 +77,9 @@ func TestRelaunchWithNoExtraArgsWritesEmptySignal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read signal file: %v", err)
 	}
-	if len(body) != 0 {
-		t.Errorf("signal body = %q, want empty (no extra args)", string(body))
+	want := agent.DefaultRelaunchPrompt + "\n"
+	if string(body) != want {
+		t.Errorf("signal body = %q, want %q (default prompt)", string(body), want)
 	}
 	_ = cmd.Wait()
 }
