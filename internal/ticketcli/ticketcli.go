@@ -28,12 +28,15 @@ global flags:
   --ticket <id>    ticket id (alternative to per-subcommand positional)
 
 subcommands:
-  dir link [<id>] <path>          link a path to a ticket
-  dir remove [<id>] <path>        unlink a path from a ticket
-  dir list [<id>]                 list paths linked to a ticket
-  env [<id>]                      create on-disk env folder for a ticket
-  agent [<id>]                    launch claude from a ticket's env folder
-  next [<id>]                     show ready descendants of a ticket`
+  dir link [<id>] <path>             link a path to a ticket
+  dir remove [<id>] <path>           unlink a path from a ticket
+  dir list [<id>]                    list paths linked to a ticket
+  dir worktree [<id>] <bare-repo>    create a worktree off <bare-repo> for the
+                                     ticket and link it (cascades through
+                                     parents so ancestors gain the worktree too)
+  env [<id>]                         create on-disk env folder for a ticket
+  agent [<id>]                       launch claude from a ticket's env folder
+  next [<id>]                        show ready descendants of a ticket`
 
 // Run executes the ticket command-line with the given args, writing normal
 // output to stdout and errors to stderr. Returns the process exit code.
@@ -94,6 +97,12 @@ func runDir(db, ticket string, args []string, stdout io.Writer) error {
 			return err
 		}
 		return dir.List(db, id, stdout)
+	case "worktree":
+		id, tail, err := resolveID(ticket, rest, 1, "usage: ticket dir worktree [<id>] <bare-repo>")
+		if err != nil {
+			return err
+		}
+		return dir.Worktree(db, id, tail[0])
 	default:
 		return fmt.Errorf("unknown dir subcommand %q", sub)
 	}

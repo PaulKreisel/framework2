@@ -13,10 +13,20 @@ type Entry struct {
 	Repo      string `json:"repo,omitempty"`
 	LocalRepo string `json:"localRepo,omitempty"`
 	Branch    string `json:"branch,omitempty"`
+	// BareRepo is set when this worktree was created by `dir worktree` from a
+	// bare repo; it stores the absolute path of that bare so cascading
+	// worktree calls can locate ancestor entries pointing at the same bare.
+	BareRepo string `json:"bareRepo,omitempty"`
 }
 
 // Link appends an entry for path to the ticket's dirs metadata.
 func Link(db, ticketID, path string) error {
+	return link(db, ticketID, path, "")
+}
+
+// link is the shared append-an-entry path used by Link and the worktree flow.
+// bareRepo is recorded on the new entry when non-empty.
+func link(db, ticketID, path, bareRepo string) error {
 	entries, err := load(db, ticketID)
 	if err != nil {
 		return err
@@ -30,6 +40,7 @@ func Link(db, ticketID, path string) error {
 	if err != nil {
 		return err
 	}
+	entry.BareRepo = bareRepo
 	entries = append(entries, *entry)
 	return save(db, ticketID, entries)
 }

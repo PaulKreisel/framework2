@@ -21,20 +21,11 @@ func Load(db, ticketID string) ([]Entry, error) {
 }
 
 func load(db, ticketID string) ([]Entry, error) {
-	out, err := exec.Command("bd", bdArgs(db, "--json", "show", ticketID)...).Output()
+	row, err := showTicket(db, ticketID)
 	if err != nil {
-		return nil, fmt.Errorf("look up ticket %s: %w", ticketID, withStderr(err))
+		return nil, err
 	}
-	var rows []struct {
-		Metadata map[string]json.RawMessage `json:"metadata"`
-	}
-	if err := json.Unmarshal(out, &rows); err != nil {
-		return nil, fmt.Errorf("parse ticket store output: %w", err)
-	}
-	if len(rows) == 0 {
-		return nil, fmt.Errorf("ticket not found: %s", ticketID)
-	}
-	raw, ok := rows[0].Metadata["dirs"]
+	raw, ok := row.Metadata["dirs"]
 	if !ok || len(raw) == 0 || string(raw) == "null" {
 		return nil, nil
 	}
@@ -43,6 +34,35 @@ func load(db, ticketID string) ([]Entry, error) {
 		return nil, fmt.Errorf("parse dir entries: %w", err)
 	}
 	return entries, nil
+}
+
+// parentID returns the immediate parent bead id, or "" if the bead is a root.
+func parentID(db, ticketID string) (string, error) {
+	row, err := showTicket(db, ticketID)
+	if err != nil {
+		return "", err
+	}
+	return row.Parent, nil
+}
+
+type ticketRow struct {
+	Metadata map[string]json.RawMessage `json:"metadata"`
+	Parent   string                     `json:"parent"`
+}
+
+func showTicket(db, ticketID string) (*ticketRow, error) {
+	out, err := exec.Command("bd", bdArgs(db, "--json", "show", ticketID)...).Output()
+	if err != nil {
+		return nil, fmt.Errorf("look up ticket %s: %w", ticketID, withStderr(err))
+	}
+	var rows []ticketRow
+	if err := json.Unmarshal(out, &rows); err != nil {
+		return nil, fmt.Errorf("parse ticket store output: %w", err)
+	}
+	if len(rows) == 0 {
+		return nil, fmt.Errorf("ticket not found: %s", ticketID)
+	}
+	return &rows[0], nil
 }
 
 func save(db, ticketID string, entries []Entry) error {
