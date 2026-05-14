@@ -34,9 +34,12 @@ subcommands:
   dir worktree [<id>] <bare-repo>    create a worktree off <bare-repo> for the
                                      ticket and link it (cascades through
                                      parents so ancestors gain the worktree too)
-  env [<id>]                         create on-disk env folder for a ticket
-  agent [<id>]                       launch claude from a ticket's env folder
-  next [<id>]                        show ready descendants of a ticket`
+  env [<id>]                              create on-disk env folder for a ticket
+  agent [<id>]                            launch claude from a ticket's env folder
+  agent relaunch [<id>] [extra-args...]   from inside a session: ask the running
+                                          wrapper to re-exec claude with --continue
+                                          (use after a dir link/worktree)
+  next [<id>]                             show ready descendants of a ticket`
 
 // Run executes the ticket command-line with the given args, writing normal
 // output to stdout and errors to stderr. Returns the process exit code.
@@ -122,6 +125,14 @@ func runEnv(db, ticket string, args []string, stdout io.Writer) error {
 }
 
 func runAgent(db, ticket string, args []string) error {
+	if len(args) > 0 && args[0] == "relaunch" {
+		// `ticket agent relaunch [<id>] [extra-args...]`
+		id, extra, err := resolveIDVariadic(ticket, args[1:], "usage: ticket agent relaunch [<id>] [extra-args...]")
+		if err != nil {
+			return err
+		}
+		return agent.Relaunch(os.Getenv("BEADS_DIR"), id, extra)
+	}
 	id, _, err := resolveID(ticket, args, 0, "usage: ticket agent [<id>]")
 	if err != nil {
 		return err
@@ -150,6 +161,18 @@ func resolveID(ticket string, args []string, extra int, usage string) (string, [
 		return ticket, args, nil
 	}
 	if len(args) != extra+1 {
+		return "", nil, errors.New(usage)
+	}
+	return args[0], args[1:], nil
+}
+
+// resolveIDVariadic is like resolveID but accepts a variable number of
+// trailing positionals (zero or more). Used by `relaunch`.
+func resolveIDVariadic(ticket string, args []string, usage string) (string, []string, error) {
+	if ticket != "" {
+		return ticket, args, nil
+	}
+	if len(args) == 0 {
 		return "", nil, errors.New(usage)
 	}
 	return args[0], args[1:], nil
