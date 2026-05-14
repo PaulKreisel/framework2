@@ -145,17 +145,12 @@ func readFile(t *testing.T, p string) string {
 	return string(b)
 }
 
-// readSettings reads <env>/.claude/settings.json, strips the leading JSONC
-// header comment, and returns additionalDirectories.
+// readSettings reads <env>/.claude/settings.json and returns
+// additionalDirectories. The file is strict JSON (Claude Code's settings
+// parser rejects JSONC), so parse it as such.
 func readSettings(t *testing.T, envPath string) []string {
 	t.Helper()
 	raw := readFile(t, filepath.Join(envPath, ".claude", "settings.json"))
-	// Strip a leading `// ...\n` JSONC header if present.
-	if strings.HasPrefix(raw, "//") {
-		if i := strings.IndexByte(raw, '\n'); i >= 0 {
-			raw = raw[i+1:]
-		}
-	}
 	var payload agent.SettingsPayload
 	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
 		t.Fatalf("parse settings.json: %v\n--- body ---\n%s", err, raw)

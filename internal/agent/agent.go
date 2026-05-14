@@ -170,9 +170,6 @@ func writeSettings(envPath string, dirs []dir.Entry) error {
 	if err != nil {
 		return fmt.Errorf("marshal settings: %w", err)
 	}
-	var out strings.Builder
-	fmt.Fprintf(&out, "// %s\n", autoGenMarker)
-	out.Write(body)
-	out.WriteString("\n")
-	return os.WriteFile(filepath.Join(settingsDir, "settings.json"), []byte(out.String()), 0o644)
+	body = append(body, '\n')
+	return os.WriteFile(filepath.Join(settingsDir, "settings.json"), body, 0o644)
 }
