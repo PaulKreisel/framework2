@@ -7,12 +7,14 @@ import (
 	"strings"
 
 	"framework2/internal/dir"
+	"framework2/internal/next"
 )
 
 const usage = `usage:
   ticket [--db <path>] dir link <id> <path>
   ticket [--db <path>] dir remove <id> <path>
-  ticket [--db <path>] dir list <id>`
+  ticket [--db <path>] dir list <id>
+  ticket [--db <path>] next [<id>]`
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -32,6 +34,8 @@ func run(args []string) error {
 	switch rest[0] {
 	case "dir":
 		return runDir(db, rest[1:])
+	case "next":
+		return runNext(db, rest[1:])
 	case "-h", "--help", "help":
 		fmt.Println(usage)
 		return nil
@@ -63,6 +67,18 @@ func runDir(db string, args []string) error {
 	default:
 		return fmt.Errorf("unknown dir subcommand %q", args[0])
 	}
+}
+
+func runNext(db string, args []string) error {
+	id := ""
+	switch len(args) {
+	case 0:
+	case 1:
+		id = args[0]
+	default:
+		return errors.New("usage: ticket next [<id>]")
+	}
+	return next.Run(db, id, os.Stdout, os.Stderr)
 }
 
 func extractDB(args []string) (string, []string, error) {
