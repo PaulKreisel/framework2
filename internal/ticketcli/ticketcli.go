@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"syscall"
 
 	"framework2/internal/agent"
 	"framework2/internal/dir"
@@ -128,7 +129,39 @@ func runEnv(db, ticket string, args []string, stdout io.Writer) error {
 		return err
 	}
 	fmt.Fprintln(stdout, envPath)
-	return nil
+	return enterEnvShell(stdout, envPath)
+}
+
+// enterEnvShell drops the caller into an interactive $SHELL rooted at envPath
+// so they end up inside the env folder after `ticket env`. A binary cannot cd
+// its parent shell, so we exec a child shell instead — `exit` returns them.
+//
+// Gated on stdout being an *os.File terminal so tests and pipelines (which
+// pass a bytes.Buffer or redirect) keep the plain print-and-return behavior.
+func enterEnvShell(stdout io.Writer, envPath string) error {
+	if !isTerminalWriter(stdout) {
+		return nil
+	}
+	shell := os.Getenv("SHELL")
+	if shell == "" {
+		return nil
+	}
+	if err := os.Chdir(envPath); err != nil {
+		return fmt.Errorf("chdir to env: %w", err)
+	}
+	return syscall.Exec(shell, []string{shell}, os.Environ())
+}
+
+func isTerminalWriter(w io.Writer) bool {
+	f, ok := w.(*os.File)
+	if !ok {
+		return false
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
 }
 
 func runAgent(db, ticket string, args []string) error {
