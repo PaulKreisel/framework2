@@ -14,6 +14,7 @@ import (
 	"os"
 	"strings"
 
+	"framework2/internal/agent"
 	"framework2/internal/dir"
 	"framework2/internal/env"
 	"framework2/internal/next"
@@ -30,7 +31,8 @@ subcommands:
   dir link [<id>] <path>          link a path to a ticket
   dir remove [<id>] <path>        unlink a path from a ticket
   dir list [<id>]                 list paths linked to a ticket
-  env [<id>] [--root <path>]      create on-disk env folder for a ticket
+  env [<id>]                      create on-disk env folder for a ticket
+  agent [<id>]                    launch claude from a ticket's env folder
   next [<id>]                     show ready descendants of a ticket`
 
 // Run executes the ticket command-line with the given args, writing normal
@@ -56,6 +58,8 @@ func dispatch(args []string, stdout, stderr io.Writer) error {
 		return runDir(db, ticket, rest[1:], stdout)
 	case "env":
 		return runEnv(db, ticket, rest[1:], stdout)
+	case "agent":
+		return runAgent(ticket, rest[1:])
 	case "next":
 		return runNext(db, ticket, rest[1:], stdout, stderr)
 	case "-h", "--help", "help":
@@ -96,34 +100,24 @@ func runDir(db, ticket string, args []string, stdout io.Writer) error {
 }
 
 func runEnv(db, ticket string, args []string, stdout io.Writer) error {
-	const usageMsg = "usage: ticket env [<id>] [--root <path>]"
-	rootOverride := ""
-	var positional []string
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		switch {
-		case a == "--root":
-			if i+1 >= len(args) {
-				return errors.New("--root requires a value")
-			}
-			rootOverride = args[i+1]
-			i++
-		case strings.HasPrefix(a, "--root="):
-			rootOverride = strings.TrimPrefix(a, "--root=")
-		default:
-			positional = append(positional, a)
-		}
-	}
-	id, _, err := resolveID(ticket, positional, 0, usageMsg)
+	id, _, err := resolveID(ticket, args, 0, "usage: ticket env [<id>]")
 	if err != nil {
 		return err
 	}
-	envPath, err := env.Create(db, os.Getenv("BEADS_DIR"), id, rootOverride)
+	envPath, err := env.Create(db, os.Getenv("BEADS_DIR"), id)
 	if err != nil {
 		return err
 	}
 	fmt.Fprintln(stdout, envPath)
 	return nil
+}
+
+func runAgent(ticket string, args []string) error {
+	id, _, err := resolveID(ticket, args, 0, "usage: ticket agent [<id>]")
+	if err != nil {
+		return err
+	}
+	return agent.Run(os.Getenv("BEADS_DIR"), id)
 }
 
 func runNext(db, ticket string, args []string, stdout, stderr io.Writer) error {

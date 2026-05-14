@@ -15,7 +15,7 @@ func TestCreateUnderBeadsDir(t *testing.T) {
 	beadsDir := testutil.SharedBdDB(t)
 	ticket := createBead(t, "env-default-root")
 
-	got, err := env.Create("", beadsDir, ticket, "")
+	got, err := env.Create("", beadsDir, ticket)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -27,32 +27,15 @@ func TestCreateUnderBeadsDir(t *testing.T) {
 	t.Cleanup(func() { _ = os.RemoveAll(filepath.Join(beadsDir, "envs", ticket)) })
 }
 
-func TestCreateWithRootOverride(t *testing.T) {
-	testutil.SharedBdDB(t)
-	ticket := createBead(t, "env-root-override")
-	root := t.TempDir()
-
-	got, err := env.Create("", "", ticket, root)
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	want := filepath.Join(root, ticket)
-	if got != want {
-		t.Errorf("path = %q, want %q", got, want)
-	}
-	assertMarker(t, got, ticket)
-}
-
 func TestCreateIdempotent(t *testing.T) {
-	testutil.SharedBdDB(t)
+	beadsDir := testutil.SharedBdDB(t)
 	ticket := createBead(t, "env-idempotent")
-	root := t.TempDir()
 
-	first, err := env.Create("", "", ticket, root)
+	first, err := env.Create("", beadsDir, ticket)
 	if err != nil {
 		t.Fatalf("Create #1: %v", err)
 	}
-	second, err := env.Create("", "", ticket, root)
+	second, err := env.Create("", beadsDir, ticket)
 	if err != nil {
 		t.Fatalf("Create #2: %v", err)
 	}
@@ -60,18 +43,18 @@ func TestCreateIdempotent(t *testing.T) {
 		t.Errorf("paths differ: %q vs %q", first, second)
 	}
 	assertMarker(t, second, ticket)
+	t.Cleanup(func() { _ = os.RemoveAll(filepath.Join(beadsDir, "envs", ticket)) })
 }
 
 func TestCreateUnknownTicketErrors(t *testing.T) {
-	testutil.SharedBdDB(t)
-	root := t.TempDir()
+	beadsDir := testutil.SharedBdDB(t)
 
-	_, err := env.Create("", "", "tst-doesnotexist", root)
+	_, err := env.Create("", beadsDir, "tst-doesnotexist")
 	if err == nil {
 		t.Fatal("Create succeeded, want error")
 	}
 	// Folder must not have been created.
-	if _, statErr := os.Stat(filepath.Join(root, "tst-doesnotexist")); statErr == nil {
+	if _, statErr := os.Stat(filepath.Join(beadsDir, "envs", "tst-doesnotexist")); statErr == nil {
 		t.Error("env directory created despite failed ticket lookup")
 	}
 }
@@ -80,7 +63,7 @@ func TestCreateMissingBeadsDir(t *testing.T) {
 	testutil.SharedBdDB(t)
 	ticket := createBead(t, "env-missing-beadsdir")
 
-	_, err := env.Create("", "", ticket, "")
+	_, err := env.Create("", "", ticket)
 	if err == nil {
 		t.Fatal("Create succeeded, want error about missing BEADS_DIR")
 	}
@@ -90,45 +73,44 @@ func TestCreateMissingBeadsDir(t *testing.T) {
 }
 
 func TestEnvSubcommand(t *testing.T) {
-	testutil.SharedBdDB(t)
+	beadsDir := testutil.SharedBdDB(t)
 	ticket := createBead(t, "env-subcommand")
-	root := t.TempDir()
 
-	stdout, stderr, code := testutil.RunTicket(t, "env", ticket, "--root", root)
+	stdout, stderr, code := testutil.RunTicket(t, "env", ticket)
 	if code != 0 {
 		t.Fatalf("exit=%d stderr=%q", code, stderr)
 	}
 	got := strings.TrimSpace(stdout)
-	want := filepath.Join(root, ticket)
+	want := filepath.Join(beadsDir, "envs", ticket)
 	if got != want {
 		t.Errorf("stdout = %q, want %q", got, want)
 	}
 	assertMarker(t, got, ticket)
+	t.Cleanup(func() { _ = os.RemoveAll(filepath.Join(beadsDir, "envs", ticket)) })
 }
 
 func TestEnvViaGlobalTicketFlag(t *testing.T) {
-	testutil.SharedBdDB(t)
+	beadsDir := testutil.SharedBdDB(t)
 	ticket := createBead(t, "env-global-flag")
-	root := t.TempDir()
 
-	stdout, stderr, code := testutil.RunTicket(t, "--ticket", ticket, "env", "--root", root)
+	stdout, stderr, code := testutil.RunTicket(t, "--ticket", ticket, "env")
 	if code != 0 {
 		t.Fatalf("exit=%d stderr=%q", code, stderr)
 	}
 	got := strings.TrimSpace(stdout)
-	want := filepath.Join(root, ticket)
+	want := filepath.Join(beadsDir, "envs", ticket)
 	if got != want {
 		t.Errorf("stdout = %q, want %q", got, want)
 	}
 	assertMarker(t, got, ticket)
+	t.Cleanup(func() { _ = os.RemoveAll(filepath.Join(beadsDir, "envs", ticket)) })
 }
 
 func TestEnvConflictingIDForms(t *testing.T) {
 	testutil.SharedBdDB(t)
 	ticket := createBead(t, "env-conflict")
-	root := t.TempDir()
 
-	_, stderr, code := testutil.RunTicket(t, "--ticket", ticket, "env", ticket, "--root", root)
+	_, stderr, code := testutil.RunTicket(t, "--ticket", ticket, "env", ticket)
 	if code == 0 {
 		t.Fatalf("succeeded with both --ticket and positional, want usage error; stderr=%q", stderr)
 	}

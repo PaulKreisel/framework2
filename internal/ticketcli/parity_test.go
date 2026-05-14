@@ -50,7 +50,6 @@ func TestSubcommandFormParity(t *testing.T) {
 		{
 			name: "env",
 			sub:  []string{"env"},
-			// --root pinned to a per-call tmpdir below.
 			wantOut: func(t *testing.T, out string) {
 				if strings.TrimSpace(out) == "" {
 					t.Error("expected env path on stdout, got empty")
@@ -69,19 +68,10 @@ func TestSubcommandFormParity(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			ticket := createBead(t, "parity-"+strings.ReplaceAll(tc.name, " ", "-"))
+			t.Cleanup(func() { _ = os.RemoveAll(filepath.Join(beadsDir, "envs", ticket)) })
 
-			// Stable per-invocation extras (e.g., --root for `env`) so the
-			// three forms write to the same destination and assert the same
-			// stdout. For non-env, this is empty.
-			extras := []string{}
-			if tc.sub[0] == "env" {
-				root := t.TempDir()
-				extras = []string{"--root", root}
-				t.Cleanup(func() { _ = os.RemoveAll(root) })
-			}
-
-			form1 := buildArgs(tc.sub, ticket, tc.tail, extras, "")
-			form2 := buildArgs(tc.sub, "", tc.tail, extras, ticket)
+			form1 := buildArgs(tc.sub, ticket, tc.tail, "")
+			form2 := buildArgs(tc.sub, "", tc.tail, ticket)
 			out1, err1, code1 := testutil.RunTicket(t, form1...)
 			if code1 != 0 {
 				t.Fatalf("form 1 (positional) failed: exit=%d stderr=%q args=%v", code1, err1, form1)
@@ -93,14 +83,12 @@ func TestSubcommandFormParity(t *testing.T) {
 
 			thisArgs := append([]string{}, tc.sub...)
 			thisArgs = append(thisArgs, tc.tail...)
-			thisArgs = append(thisArgs, extras...)
 
 			// For form 3 we need an env folder with the .ticket-id marker.
-			envPath, cerr := env.Create("", beadsDir, ticket, "")
+			envPath, cerr := env.Create("", beadsDir, ticket)
 			if cerr != nil {
 				t.Fatalf("env.Create for form 3: %v", cerr)
 			}
-			t.Cleanup(func() { _ = os.RemoveAll(filepath.Join(beadsDir, "envs", ticket)) })
 			out3, err3, code3 := testutil.RunThisFrom(t, envPath, thisArgs...)
 			if code3 != 0 {
 				t.Fatalf("form 3 (this) failed: exit=%d stderr=%q args=%v", code3, err3, thisArgs)
@@ -121,7 +109,7 @@ func TestSubcommandFormParity(t *testing.T) {
 // `--ticket <ticketFlag>` globally and omits the id positional. When
 // positionalID is set, places the id in the per-subcommand positional slot.
 // Exactly one of ticketFlag/positionalID must be set.
-func buildArgs(sub []string, positionalID string, tail, extras []string, ticketFlag string) []string {
+func buildArgs(sub []string, positionalID string, tail []string, ticketFlag string) []string {
 	var out []string
 	if ticketFlag != "" {
 		out = append(out, "--ticket", ticketFlag)
@@ -131,7 +119,6 @@ func buildArgs(sub []string, positionalID string, tail, extras []string, ticketF
 		out = append(out, positionalID)
 	}
 	out = append(out, tail...)
-	out = append(out, extras...)
 	return out
 }
 

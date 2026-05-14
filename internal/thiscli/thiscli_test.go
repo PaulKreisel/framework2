@@ -81,7 +81,7 @@ func TestThisForwardsToTicketcli(t *testing.T) {
 	beadsDir := testutil.SharedBdDB(t)
 	ticket := createBead(t, "this-forwards")
 
-	envPath, err := env.Create("", beadsDir, ticket, "")
+	envPath, err := env.Create("", beadsDir, ticket)
 	if err != nil {
 		t.Fatalf("env.Create: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestThisForwardsToTicketcli(t *testing.T) {
 func TestThisRejectsTicketFlag(t *testing.T) {
 	beadsDir := testutil.SharedBdDB(t)
 	ticket := createBead(t, "this-rejects-flag")
-	envPath, err := env.Create("", beadsDir, ticket, "")
+	envPath, err := env.Create("", beadsDir, ticket)
 	if err != nil {
 		t.Fatalf("env.Create: %v", err)
 	}
