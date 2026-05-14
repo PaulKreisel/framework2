@@ -11,13 +11,15 @@ Agents working in this repo: see [CLAUDE.md](CLAUDE.md) for the working rules.
 ## Layout
 
 ```
-cmd/bdir/    bdir CLI (link/remove/list dirs onto a bead)
+cmd/         one directory per binary
 internal/    shared internals (added as needed)
 ```
+
+For per-command usage, run the binary with `--help` — this README intentionally does not duplicate it.
 
 ## Build
 
 ```
-make install     # builds and installs ~/bin/bdir
+make install
 make test
 ```

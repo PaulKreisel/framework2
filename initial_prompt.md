@@ -18,7 +18,7 @@ framework2 is a clean restart. No code is being ported from the old framework. T
 
 ## Beads and worktrees
 
-A bead can reference one or more directories on disk. Some are git worktrees of work repos, some aren't git at all. The `bdir` CLI records these as `bead.metadata.dirs = [{ path, repo?, localRepo?, branch? }]`.
+A bead can reference one or more directories on disk. Some are git worktrees of work repos, some aren't git at all. The `ticket dir` subcommand records these as `bead.metadata.dirs = [{ path, repo?, localRepo?, branch? }]`.
 
 framework2 deliberately does *not* create worktrees as part of linking. A colleague may have already created the branch; the bead only needs to know which directory to point at. Worktree creation, if and when it's automated, will be a separate tool.
 
@@ -46,10 +46,10 @@ Cross-DB dependencies do not exist in bd. That's accepted: a knime bead cannot `
 
 ## Tooling notes
 
-- **`bd worktree` is the wrong fit for our model.** It assumes bd lives inside the same repo whose worktrees it manages. Our model has bd global, with worktrees spawned across many unrelated repos. `bdir` does the dir-tracking instead.
+- **`bd worktree` is the wrong fit for our model.** It assumes bd lives inside the same repo whose worktrees it manages. Our model has bd global, with worktrees spawned across many unrelated repos. `ticket dir` does the dir-tracking instead.
 - **Shell out to `bd`.** All bd interaction goes via `bd <verb> --json` on the command line. Do not import bd as a Go library — keeps the dependency surface tiny and the failure modes obvious.
 - **`bd init` flags worth knowing.** `BD_NON_INTERACTIVE=1`, `--skip-agents`, `--skip-hooks` — needed in fixtures to keep init from creating an `AGENTS.md` or installing git hooks.
 
 ## Testing philosophy
 
-Each test spins up a throwaway bd database in a tmpdir and real git repos in tmpdirs, then runs the real `bdir` binary against them. No mocks. `bd init` is slow (10–30s for embedded Dolt) — that cost is paid honestly, either per-test or once per package via `TestMain`. The choice is left to whoever builds the test harness; it should be documented in code.
+Each test spins up a throwaway bd database in a tmpdir and real git repos in tmpdirs, then runs the real `ticket` binary against them. No mocks. `bd init` is slow (10–30s for embedded Dolt) — that cost is paid honestly, either per-test or once per package via `TestMain`. The choice is left to whoever builds the test harness; it should be documented in code.

@@ -24,7 +24,7 @@ Read [initial_prompt.md](initial_prompt.md) before starting work in this repo. I
 
 - Source: `~/ai/framework2/`
 - bd DB (auto-resolved via cwd walk-up): `~/ai/.beads/`
-- Binary install target: `~/bin/bdir`
+- Binaries install to `~/bin/` via `make install` (see the Makefile)
 
 ## Commit discipline
 
