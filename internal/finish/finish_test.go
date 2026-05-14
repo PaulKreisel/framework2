@@ -112,6 +112,34 @@ func TestFinishFastForwardsOntoAdvancedParent(t *testing.T) {
 	}
 }
 
+func TestFinishAdvancesParentBranchToChildTip(t *testing.T) {
+	testutil.SharedBdDB(t)
+	parent := createBead(t, "finish-advance-parent")
+	child := createChildBead(t, "finish-advance-child", parent)
+	bare := bareRepo(t, "main")
+
+	mustRunTicket(t, "dir", "worktree", child, bare)
+	parentWT := worktreePath(bare, parent)
+	childWT := worktreePath(bare, child)
+
+	// Child makes a commit; parent branch stays put.
+	advanceBranch(t, childWT)
+	childTip := gitOut(t, childWT, "rev-parse", "HEAD")
+
+	if _, stderr, code := testutil.RunTicket(t, "finish", child); code != 0 {
+		t.Fatalf("finish exit=%d stderr=%q", code, stderr)
+	}
+
+	parentBranchTip := gitOut(t, bare, "rev-parse", "refs/heads/"+parent)
+	if parentBranchTip != childTip {
+		t.Errorf("parent branch tip %q != child tip %q (expected FF-advance)", parentBranchTip, childTip)
+	}
+	parentHeadTip := gitOut(t, parentWT, "rev-parse", "HEAD")
+	if parentHeadTip != childTip {
+		t.Errorf("parent worktree HEAD %q != child tip %q (expected FF-advance in worktree)", parentHeadTip, childTip)
+	}
+}
+
 func TestFinishRefusesDivergedBranch(t *testing.T) {
 	testutil.SharedBdDB(t)
 	parent := createBead(t, "finish-diverge-parent")

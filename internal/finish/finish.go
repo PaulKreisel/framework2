@@ -128,8 +128,41 @@ func rebaseWorktrees(db, ticketID, parent string, worktrees []dir.Entry) error {
 		if err := ffRebase(e.Path, pe.Branch); err != nil {
 			return err
 		}
+		if err := ffAdvance(pe.Path, pe.Branch, e.Branch); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+// ffAdvance fast-forwards the parent worktree's checked-out branch
+// (expected to be parentBranch) to the tip of childBranch. After the
+// ticket branch has been FF-rebased onto the parent, the parent branch
+// is by construction an ancestor of the ticket branch, so a plain
+// fast-forward catches it up. If the parent worktree is on a different
+// branch, detached, or the FF would not be clean (e.g. the parent
+// branch was advanced concurrently), bail out rather than fall back to
+// a merge — same posture as ffRebase.
+func ffAdvance(parentWT, parentBranch, childBranch string) error {
+	childSHA, ok := runGit(parentWT, "rev-parse", childBranch)
+	if !ok {
+		return fmt.Errorf("rev-parse %s failed in %s", childBranch, parentWT)
+	}
+	parentSHA, ok := runGit(parentWT, "rev-parse", "HEAD")
+	if !ok {
+		return fmt.Errorf("rev-parse HEAD failed in %s", parentWT)
+	}
+	if parentSHA == childSHA {
+		return nil
+	}
+	curBranch, ok := runGit(parentWT, "rev-parse", "--abbrev-ref", "HEAD")
+	if !ok || curBranch == "HEAD" {
+		return fmt.Errorf("parent worktree %s is on a detached HEAD: cannot fast-forward %s", parentWT, parentBranch)
+	}
+	if curBranch != parentBranch {
+		return fmt.Errorf("parent worktree %s is on branch %s, expected %s — cannot fast-forward", parentWT, curBranch, parentBranch)
+	}
+	return runGitChecked(parentWT, "merge", "--ff-only", childBranch)
 }
 
 // ffRebase rebases the current branch in wt onto upstream, refusing
