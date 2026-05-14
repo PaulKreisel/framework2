@@ -13,31 +13,57 @@ import (
 	"framework2/internal/testutil"
 )
 
-func TestRegenerateClaudeMDContainsTicketFields(t *testing.T) {
+func TestRegenerateWritesDescriptionMD(t *testing.T) {
 	beadsDir := testutil.SharedBdDB(t)
-	ticket, title := createBeadWithDescription(t, "agent-claudemd-fields",
+	ticket, _ := createBeadWithDescription(t, "agent-descmd-fields",
 		"a short description for the agent regen test")
 	envPath := mustEnv(t, beadsDir, ticket)
 
-	if err := agent.Regenerate("", envPath, ticket); err != nil {
+	prompt, err := agent.Regenerate("", envPath, ticket, agent.ModeAgent)
+	if err != nil {
 		t.Fatalf("Regenerate: %v", err)
 	}
 
-	body := readFile(t, filepath.Join(envPath, "CLAUDE.md"))
-	if !strings.Contains(body, ticket) {
-		t.Errorf("CLAUDE.md missing ticket id %q\n--- body ---\n%s", ticket, body)
+	desc := readFile(t, filepath.Join(envPath, agent.DescriptionFile))
+	if !strings.Contains(desc, "a short description for the agent regen test") {
+		t.Errorf("description.md missing body\n--- desc ---\n%s", desc)
 	}
-	if !strings.Contains(body, title) {
-		t.Errorf("CLAUDE.md missing title %q\n--- body ---\n%s", title, body)
+	// description.md is the description verbatim; it should NOT carry the
+	// ticket id, title, or auto-gen banners.
+	if strings.Contains(desc, ticket) {
+		t.Errorf("description.md should not contain ticket id %q\n--- desc ---\n%s", ticket, desc)
 	}
-	if !strings.Contains(body, "a short description for the agent regen test") {
-		t.Errorf("CLAUDE.md missing description\n--- body ---\n%s", body)
+	if !strings.Contains(prompt, ticket) {
+		t.Errorf("system prompt missing ticket id %q\n--- prompt ---\n%s", ticket, prompt)
 	}
-	if !strings.Contains(body, "## Linked directories") {
-		t.Errorf("CLAUDE.md missing Linked directories section\n--- body ---\n%s", body)
+	if !strings.Contains(prompt, "description.md") {
+		t.Errorf("system prompt missing reference to description.md\n--- prompt ---\n%s", prompt)
 	}
-	if !strings.Contains(body, "## Linking more directories into this session") {
-		t.Errorf("CLAUDE.md missing 'Linking more directories' placeholder section\n--- body ---\n%s", body)
+}
+
+func TestBuildSystemPromptModes(t *testing.T) {
+	agentP := agent.BuildSystemPrompt("bd-1", "do the thing", agent.ModeAgent)
+	specP := agent.BuildSystemPrompt("bd-1", "do the thing", agent.ModeSpec)
+
+	for _, p := range []string{agentP, specP} {
+		if !strings.Contains(p, "bd-1") || !strings.Contains(p, "do the thing") {
+			t.Errorf("prompt missing ticket id or title:\n%s", p)
+		}
+		if !strings.Contains(p, "description.md") {
+			t.Errorf("prompt missing description.md reference:\n%s", p)
+		}
+	}
+	if !strings.Contains(specP, "spec'ing") {
+		t.Errorf("spec-mode prompt missing spec-mode guidance:\n%s", specP)
+	}
+	if !strings.Contains(specP, "ticket create") {
+		t.Errorf("spec-mode prompt missing ticket create reference:\n%s", specP)
+	}
+	if strings.Contains(agentP, "spec'ing") {
+		t.Errorf("agent-mode prompt should not mention spec'ing:\n%s", agentP)
+	}
+	if !strings.Contains(agentP, "this agent relaunch") {
+		t.Errorf("agent-mode prompt missing relaunch hint:\n%s", agentP)
 	}
 }
 
@@ -47,7 +73,7 @@ func TestRegenerateSettingsMatchesLinkedDirs(t *testing.T) {
 	envPath := mustEnv(t, beadsDir, ticket)
 
 	// Empty: settings.json must still be written with an empty array.
-	if err := agent.Regenerate("", envPath, ticket); err != nil {
+	if _, err := agent.Regenerate("", envPath, ticket, agent.ModeAgent); err != nil {
 		t.Fatalf("Regenerate (empty): %v", err)
 	}
 	got := readSettings(t, envPath)
@@ -67,7 +93,7 @@ func TestRegenerateSettingsMatchesLinkedDirs(t *testing.T) {
 	if _, _, code := testutil.RunTicket(t, "dir", "link", ticket, d2); code != 0 {
 		t.Fatalf("link d2: exit=%d", code)
 	}
-	if err := agent.Regenerate("", envPath, ticket); err != nil {
+	if _, err := agent.Regenerate("", envPath, ticket, agent.ModeAgent); err != nil {
 		t.Fatalf("Regenerate (two dirs): %v", err)
 	}
 	got = readSettings(t, envPath)
@@ -80,7 +106,7 @@ func TestRegenerateSettingsMatchesLinkedDirs(t *testing.T) {
 	if _, _, code := testutil.RunTicket(t, "dir", "remove", ticket, d1); code != 0 {
 		t.Fatalf("remove d1: exit=%d", code)
 	}
-	if err := agent.Regenerate("", envPath, ticket); err != nil {
+	if _, err := agent.Regenerate("", envPath, ticket, agent.ModeAgent); err != nil {
 		t.Fatalf("Regenerate (after remove): %v", err)
 	}
 	got = readSettings(t, envPath)
@@ -90,26 +116,74 @@ func TestRegenerateSettingsMatchesLinkedDirs(t *testing.T) {
 	}
 }
 
-func TestRegenerateOverwritesStaleClaudeMD(t *testing.T) {
+func TestRegenerateOverwritesStaleDescriptionMD(t *testing.T) {
 	beadsDir := testutil.SharedBdDB(t)
-	ticket, _ := createBeadWithDescription(t, "agent-stale-claudemd", "real description")
+	ticket, _ := createBeadWithDescription(t, "agent-stale-descmd", "real description")
 	envPath := mustEnv(t, beadsDir, ticket)
 
-	// Plant stale content.
-	stale := "# stale stale stale\n\nhand-written content that must vanish\n"
-	if err := os.WriteFile(filepath.Join(envPath, "CLAUDE.md"), []byte(stale), 0o644); err != nil {
+	stale := "hand-written content that must vanish\n"
+	if err := os.WriteFile(filepath.Join(envPath, agent.DescriptionFile), []byte(stale), 0o644); err != nil {
 		t.Fatalf("plant stale: %v", err)
 	}
 
-	if err := agent.Regenerate("", envPath, ticket); err != nil {
+	if _, err := agent.Regenerate("", envPath, ticket, agent.ModeAgent); err != nil {
 		t.Fatalf("Regenerate: %v", err)
 	}
-	body := readFile(t, filepath.Join(envPath, "CLAUDE.md"))
+	body := readFile(t, filepath.Join(envPath, agent.DescriptionFile))
 	if strings.Contains(body, "hand-written content that must vanish") {
 		t.Errorf("stale content survived regen\n--- body ---\n%s", body)
 	}
 	if !strings.Contains(body, "real description") {
 		t.Errorf("regenerated content missing description\n--- body ---\n%s", body)
+	}
+}
+
+func TestRegenerateDoesNotWriteClaudeMD(t *testing.T) {
+	beadsDir := testutil.SharedBdDB(t)
+	ticket, _ := createBeadWithDescription(t, "agent-no-claudemd", "x")
+	envPath := mustEnv(t, beadsDir, ticket)
+
+	if _, err := agent.Regenerate("", envPath, ticket, agent.ModeAgent); err != nil {
+		t.Fatalf("Regenerate: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(envPath, "CLAUDE.md")); !os.IsNotExist(err) {
+		t.Errorf("CLAUDE.md should not be written (err=%v)", err)
+	}
+}
+
+func TestSyncbackPushesDescription(t *testing.T) {
+	beadsDir := testutil.SharedBdDB(t)
+	ticket, _ := createBeadWithDescription(t, "agent-syncback", "original")
+	envPath := mustEnv(t, beadsDir, ticket)
+
+	if _, err := agent.Regenerate("", envPath, ticket, agent.ModeAgent); err != nil {
+		t.Fatalf("Regenerate: %v", err)
+	}
+	newBody := "edited via spec session\n\nwith a second paragraph\n"
+	if err := os.WriteFile(filepath.Join(envPath, agent.DescriptionFile), []byte(newBody), 0o644); err != nil {
+		t.Fatalf("write description.md: %v", err)
+	}
+
+	if err := agent.Syncback("", beadsDir, ticket); err != nil {
+		t.Fatalf("Syncback: %v", err)
+	}
+
+	// Read bead description back via bd --json show.
+	out, err := exec.Command("bd", "--json", "show", ticket).Output()
+	if err != nil {
+		t.Fatalf("bd show: %v", err)
+	}
+	var rows []struct {
+		Description string `json:"description"`
+	}
+	if err := json.Unmarshal(out, &rows); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(rows) == 0 {
+		t.Fatal("bd show returned no rows")
+	}
+	if !strings.Contains(rows[0].Description, "edited via spec session") {
+		t.Errorf("description was not synced back. got:\n%s", rows[0].Description)
 	}
 }
 

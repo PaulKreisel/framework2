@@ -16,6 +16,7 @@ import (
 	"syscall"
 
 	"framework2/internal/agent"
+	"framework2/internal/create"
 	"framework2/internal/dir"
 	"framework2/internal/env"
 	"framework2/internal/finish"
@@ -37,10 +38,20 @@ subcommands:
                                      ticket and link it (cascades through
                                      parents so ancestors gain the worktree too)
   env [<id>]                              create on-disk env folder for a ticket
+  env syncback [<id>]                     push <env>/description.md back to the
+                                          bead description (one-way file → bead)
   agent [<id>]                            launch claude from a ticket's env folder
+                                          in coding mode
   agent relaunch [<id>] [extra-args...]   from inside a session: ask the running
                                           wrapper to re-exec claude with --continue
                                           (use after a dir link/worktree)
+  spec [<id>]                             launch claude from a ticket's env folder
+                                          in spec mode (edits description.md and
+                                          spawns related beads; does not code)
+  create child <title>                    new bead as a child of the current ticket
+  create followup <title>                 new bead blocked by the current ticket
+  create sibling <title>                  new bead under the current ticket's parent
+                                          (top-level if current has no parent)
   next [<id>]                             show ready descendants of a ticket
   finish [<id>]                           wrap up: rebase the ticket's worktrees
                                           onto their parent branch (FF when no
@@ -77,7 +88,11 @@ func dispatch(args []string, stdout, stderr io.Writer) error {
 	case "env":
 		return runEnv(db, ticket, rest[1:], stdout)
 	case "agent":
-		return runAgent(db, ticket, rest[1:])
+		return runAgent(db, ticket, rest[1:], agent.ModeAgent)
+	case "spec":
+		return runAgent(db, ticket, rest[1:], agent.ModeSpec)
+	case "create":
+		return runCreate(db, ticket, rest[1:], stdout)
 	case "next":
 		return runNext(db, ticket, rest[1:], stdout, stderr)
 	case "finish":
@@ -126,6 +141,13 @@ func runDir(db, ticket string, args []string, stdout io.Writer) error {
 }
 
 func runEnv(db, ticket string, args []string, stdout io.Writer) error {
+	if len(args) > 0 && args[0] == "syncback" {
+		id, _, err := resolveID(ticket, args[1:], 0, "usage: ticket env syncback [<id>]")
+		if err != nil {
+			return err
+		}
+		return agent.Syncback(db, os.Getenv("BEADS_DIR"), id)
+	}
 	id, _, err := resolveID(ticket, args, 0, "usage: ticket env [<id>]")
 	if err != nil {
 		return err
@@ -170,8 +192,8 @@ func isTerminalWriter(w io.Writer) bool {
 	return fi.Mode()&os.ModeCharDevice != 0
 }
 
-func runAgent(db, ticket string, args []string) error {
-	if len(args) > 0 && args[0] == "relaunch" {
+func runAgent(db, ticket string, args []string, mode agent.Mode) error {
+	if mode == agent.ModeAgent && len(args) > 0 && args[0] == "relaunch" {
 		// `ticket agent relaunch [<id>] [extra-args...]`
 		id, extra, err := resolveIDVariadic(ticket, args[1:], "usage: ticket agent relaunch [<id>] [extra-args...]")
 		if err != nil {
@@ -179,11 +201,39 @@ func runAgent(db, ticket string, args []string) error {
 		}
 		return agent.Relaunch(os.Getenv("BEADS_DIR"), id, extra)
 	}
-	id, _, err := resolveID(ticket, args, 0, "usage: ticket agent [<id>]")
+	usage := "usage: ticket agent [<id>]"
+	if mode == agent.ModeSpec {
+		usage = "usage: ticket spec [<id>]"
+	}
+	id, _, err := resolveID(ticket, args, 0, usage)
 	if err != nil {
 		return err
 	}
-	return agent.Run(db, os.Getenv("BEADS_DIR"), id)
+	return agent.Run(db, os.Getenv("BEADS_DIR"), id, mode)
+}
+
+func runCreate(db, ticket string, args []string, stdout io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("usage: ticket create <child|followup|sibling> <title>")
+	}
+	var rel create.Relation
+	switch args[0] {
+	case "child":
+		rel = create.Child
+	case "followup":
+		rel = create.Followup
+	case "sibling":
+		rel = create.Sibling
+	default:
+		return fmt.Errorf("unknown create relation %q (want child|followup|sibling)", args[0])
+	}
+	// The current ticket id is required (via --ticket or positional). Title
+	// is the only true positional.
+	id, tail, err := resolveID(ticket, args[1:], 1, fmt.Sprintf("usage: ticket create %s [<id>] <title>", args[0]))
+	if err != nil {
+		return err
+	}
+	return create.Run(db, id, tail[0], rel, stdout)
 }
 
 func runFinish(db, ticket string, args []string, stdout io.Writer) error {

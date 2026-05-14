@@ -127,17 +127,23 @@ func TestRunLoopRelaunchesOnSignal(t *testing.T) {
 	counter := filepath.Join(workDir, "counter")
 
 	// Fake claude:
-	//   - appends $1 (which is "" on the first run, "--continue" on relaunch)
+	//   - appends one line per invocation: "CONT" if --continue is present
+	//     in argv (as its own arg, so the system-prompt text can't false-match),
+	//     "PLAIN" otherwise.
 	//   - on the first run, writes the signal file (empty body → no extra
 	//     args) to ask for a relaunch
 	//   - exits 0
 	script := fmt.Sprintf(`
-echo "$1" >> %q
-if [ ! -f %q ]; then
+if printf "%%s\n" "$@" | grep -q -- "^--continue$"; then
+  echo "CONT" >> %q
+else
+  echo "PLAIN" >> %q
+fi
+if [ ! -f %q.firstrun ]; then
   : > %q.firstrun
   : > %q
 fi
-`, counter, fmt.Sprintf("%s.firstrun", counter), counter, filepath.Join(envPath, agent.SignalFile))
+`, counter, counter, counter, counter, filepath.Join(envPath, agent.SignalFile))
 
 	prevCmd, prevArgs := agent.AgentCommand, agent.AgentDefaultArgs
 	t.Cleanup(func() { agent.AgentCommand, agent.AgentDefaultArgs = prevCmd, prevArgs })
@@ -147,7 +153,7 @@ fi
 	agent.AgentDefaultArgs = []string{"-c", script, "fake-claude"}
 
 	done := make(chan error, 1)
-	go func() { done <- agent.Run("", beadsDir, ticket) }()
+	go func() { done <- agent.Run("", beadsDir, ticket, agent.ModeAgent) }()
 
 	select {
 	case err := <-done:
@@ -166,11 +172,11 @@ fi
 	if len(lines) != 2 {
 		t.Fatalf("counter has %d lines, want 2; body=%q", len(lines), string(body))
 	}
-	if lines[0] != "" {
-		t.Errorf("first invocation $1 = %q, want empty (no relaunch yet)", lines[0])
+	if lines[0] != "PLAIN" {
+		t.Errorf("first invocation = %q, want PLAIN (no --continue yet)", lines[0])
 	}
-	if lines[1] != "--continue" {
-		t.Errorf("second invocation $1 = %q, want %q", lines[1], "--continue")
+	if lines[1] != "CONT" {
+		t.Errorf("second invocation = %q, want CONT (--continue present)", lines[1])
 	}
 
 	if _, err := os.Stat(filepath.Join(envPath, agent.SignalFile)); !os.IsNotExist(err) {
@@ -194,7 +200,8 @@ func TestRunLoopClearsStaleSignalFile(t *testing.T) {
 
 	workDir := t.TempDir()
 	counter := filepath.Join(workDir, "counter")
-	script := fmt.Sprintf(`echo "$1" >> %q`, counter)
+	// One line per invocation, content irrelevant — we only count.
+	script := fmt.Sprintf(`echo X >> %q`, counter)
 
 	prevCmd, prevArgs := agent.AgentCommand, agent.AgentDefaultArgs
 	t.Cleanup(func() { agent.AgentCommand, agent.AgentDefaultArgs = prevCmd, prevArgs })
@@ -202,7 +209,7 @@ func TestRunLoopClearsStaleSignalFile(t *testing.T) {
 	agent.AgentDefaultArgs = []string{"-c", script, "fake-claude"}
 
 	done := make(chan error, 1)
-	go func() { done <- agent.Run("", beadsDir, ticket) }()
+	go func() { done <- agent.Run("", beadsDir, ticket, agent.ModeAgent) }()
 	select {
 	case err := <-done:
 		if err != nil {
