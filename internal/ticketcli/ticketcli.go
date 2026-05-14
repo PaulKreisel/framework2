@@ -1,24 +1,37 @@
 // Package ticketcli implements the `ticket` command-line dispatcher.
 //
 // It is extracted from cmd/ticket so tests can invoke subcommands in-process
-// via [Run] without forking a subprocess.
+// via [Run] without forking a subprocess. The `this` binary shares this
+// dispatcher: it resolves a ticket id from a .ticket-id marker and forwards
+// the call via the global `--ticket` flag, so there is no `this`-side
+// subcommand knowledge to drift against `ticket`.
 package ticketcli
 
 import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	"framework2/internal/dir"
+	"framework2/internal/env"
 	"framework2/internal/next"
 )
 
 const usage = `usage:
-  ticket [--db <path>] dir link <id> <path>
-  ticket [--db <path>] dir remove <id> <path>
-  ticket [--db <path>] dir list <id>
-  ticket [--db <path>] next [<id>]`
+  ticket [global-flags] <subcommand> [args...]
+
+global flags:
+  --db <path>      bd database path
+  --ticket <id>    ticket id (alternative to per-subcommand positional)
+
+subcommands:
+  dir link [<id>] <path>          link a path to a ticket
+  dir remove [<id>] <path>        unlink a path from a ticket
+  dir list [<id>]                 list paths linked to a ticket
+  env [<id>] [--root <path>]      create on-disk env folder for a ticket
+  next [<id>]                     show ready descendants of a ticket`
 
 // Run executes the ticket command-line with the given args, writing normal
 // output to stdout and errors to stderr. Returns the process exit code.
@@ -31,7 +44,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 }
 
 func dispatch(args []string, stdout, stderr io.Writer) error {
-	db, rest, err := extractDB(args)
+	db, ticket, rest, err := extractGlobal(args)
 	if err != nil {
 		return err
 	}
@@ -40,9 +53,11 @@ func dispatch(args []string, stdout, stderr io.Writer) error {
 	}
 	switch rest[0] {
 	case "dir":
-		return runDir(db, rest[1:], stdout)
+		return runDir(db, ticket, rest[1:], stdout)
+	case "env":
+		return runEnv(db, ticket, rest[1:], stdout)
 	case "next":
-		return runNext(db, rest[1:], stdout, stderr)
+		return runNext(db, ticket, rest[1:], stdout, stderr)
 	case "-h", "--help", "help":
 		fmt.Fprintln(stdout, usage)
 		return nil
@@ -51,60 +66,134 @@ func dispatch(args []string, stdout, stderr io.Writer) error {
 	}
 }
 
-func runDir(db string, args []string, stdout io.Writer) error {
+func runDir(db, ticket string, args []string, stdout io.Writer) error {
 	if len(args) == 0 {
 		return errors.New("usage: ticket dir <link|remove|list> ...")
 	}
-	switch args[0] {
+	sub, rest := args[0], args[1:]
+	switch sub {
 	case "link":
-		if len(args) != 3 {
-			return errors.New("usage: ticket dir link <id> <path>")
+		id, tail, err := resolveID(ticket, rest, 1, "usage: ticket dir link [<id>] <path>")
+		if err != nil {
+			return err
 		}
-		return dir.Link(db, args[1], args[2])
+		return dir.Link(db, id, tail[0])
 	case "remove":
-		if len(args) != 3 {
-			return errors.New("usage: ticket dir remove <id> <path>")
+		id, tail, err := resolveID(ticket, rest, 1, "usage: ticket dir remove [<id>] <path>")
+		if err != nil {
+			return err
 		}
-		return dir.Remove(db, args[1], args[2])
+		return dir.Remove(db, id, tail[0])
 	case "list":
-		if len(args) != 2 {
-			return errors.New("usage: ticket dir list <id>")
+		id, _, err := resolveID(ticket, rest, 0, "usage: ticket dir list [<id>]")
+		if err != nil {
+			return err
 		}
-		return dir.List(db, args[1], stdout)
+		return dir.List(db, id, stdout)
 	default:
-		return fmt.Errorf("unknown dir subcommand %q", args[0])
+		return fmt.Errorf("unknown dir subcommand %q", sub)
 	}
 }
 
-func runNext(db string, args []string, stdout, stderr io.Writer) error {
-	id := ""
-	switch len(args) {
-	case 0:
-	case 1:
-		id = args[0]
-	default:
-		return errors.New("usage: ticket next [<id>]")
+func runEnv(db, ticket string, args []string, stdout io.Writer) error {
+	const usageMsg = "usage: ticket env [<id>] [--root <path>]"
+	rootOverride := ""
+	var positional []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--root":
+			if i+1 >= len(args) {
+				return errors.New("--root requires a value")
+			}
+			rootOverride = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--root="):
+			rootOverride = strings.TrimPrefix(a, "--root=")
+		default:
+			positional = append(positional, a)
+		}
+	}
+	id, _, err := resolveID(ticket, positional, 0, usageMsg)
+	if err != nil {
+		return err
+	}
+	envPath, err := env.Create(db, os.Getenv("BEADS_DIR"), id, rootOverride)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(stdout, envPath)
+	return nil
+}
+
+func runNext(db, ticket string, args []string, stdout, stderr io.Writer) error {
+	id, _, err := resolveOptionalID(ticket, args, 0, "usage: ticket next [<id>]")
+	if err != nil {
+		return err
 	}
 	return next.Run(db, id, stdout, stderr)
 }
 
-func extractDB(args []string) (string, []string, error) {
-	db := ""
-	var rest []string
+// resolveID pulls the ticket id from either the global --ticket flag or the
+// first positional. extra is the number of remaining positionals expected
+// after the id is consumed. Returns the resolved id and the tail of
+// positionals (length == extra). Errors if both forms are supplied or if no
+// id is available.
+func resolveID(ticket string, args []string, extra int, usage string) (string, []string, error) {
+	if ticket != "" {
+		if len(args) != extra {
+			return "", nil, errors.New(usage)
+		}
+		return ticket, args, nil
+	}
+	if len(args) != extra+1 {
+		return "", nil, errors.New(usage)
+	}
+	return args[0], args[1:], nil
+}
+
+// resolveOptionalID is like resolveID but tolerates a missing id (returns
+// the empty string in that case). Used by `next`.
+func resolveOptionalID(ticket string, args []string, extra int, usage string) (string, []string, error) {
+	if ticket != "" {
+		if len(args) != extra {
+			return "", nil, errors.New(usage)
+		}
+		return ticket, args, nil
+	}
+	switch len(args) {
+	case extra:
+		return "", args, nil
+	case extra + 1:
+		return args[0], args[1:], nil
+	default:
+		return "", nil, errors.New(usage)
+	}
+}
+
+func extractGlobal(args []string) (db, ticket string, rest []string, err error) {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
 		case a == "--db":
 			if i+1 >= len(args) {
-				return "", nil, errors.New("--db requires a value")
+				return "", "", nil, errors.New("--db requires a value")
 			}
 			db = args[i+1]
 			i++
 		case strings.HasPrefix(a, "--db="):
 			db = strings.TrimPrefix(a, "--db=")
+		case a == "--ticket":
+			if i+1 >= len(args) {
+				return "", "", nil, errors.New("--ticket requires a value")
+			}
+			ticket = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--ticket="):
+			ticket = strings.TrimPrefix(a, "--ticket=")
 		default:
 			rest = append(rest, a)
 		}
 	}
-	return db, rest, nil
+	return db, ticket, rest, nil
 }

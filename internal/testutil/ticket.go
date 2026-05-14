@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"testing"
 
+	"framework2/internal/thiscli"
 	"framework2/internal/ticketcli"
 )
 
@@ -17,5 +18,14 @@ func RunTicket(t testing.TB, args ...string) (stdout, stderr string, exitCode in
 	t.Helper()
 	var sout, serr bytes.Buffer
 	code := ticketcli.Run(args, &sout, &serr)
+	return sout.String(), serr.String(), code
+}
+
+// RunThisFrom invokes the `this` command in-process as if cwd were the given
+// directory. Returns captured stdout, stderr, and exit code.
+func RunThisFrom(t testing.TB, cwd string, args ...string) (stdout, stderr string, exitCode int) {
+	t.Helper()
+	var sout, serr bytes.Buffer
+	code := thiscli.RunFrom(cwd, args, &sout, &serr)
 	return sout.String(), serr.String(), code
 }
