@@ -14,6 +14,12 @@ func bdArgs(db string, rest ...string) []string {
 	return append(args, rest...)
 }
 
+// Load returns the linked-dir entries stored under the ticket's metadata.dirs
+// key. Returns nil (no error) when the ticket has no entries yet.
+func Load(db, ticketID string) ([]Entry, error) {
+	return load(db, ticketID)
+}
+
 func load(db, ticketID string) ([]Entry, error) {
 	out, err := exec.Command("bd", bdArgs(db, "--json", "show", ticketID)...).Output()
 	if err != nil {

@@ -59,7 +59,7 @@ func dispatch(args []string, stdout, stderr io.Writer) error {
 	case "env":
 		return runEnv(db, ticket, rest[1:], stdout)
 	case "agent":
-		return runAgent(ticket, rest[1:])
+		return runAgent(db, ticket, rest[1:])
 	case "next":
 		return runNext(db, ticket, rest[1:], stdout, stderr)
 	case "-h", "--help", "help":
@@ -112,12 +112,12 @@ func runEnv(db, ticket string, args []string, stdout io.Writer) error {
 	return nil
 }
 
-func runAgent(ticket string, args []string) error {
+func runAgent(db, ticket string, args []string) error {
 	id, _, err := resolveID(ticket, args, 0, "usage: ticket agent [<id>]")
 	if err != nil {
 		return err
 	}
-	return agent.Run(os.Getenv("BEADS_DIR"), id)
+	return agent.Run(db, os.Getenv("BEADS_DIR"), id)
 }
 
 func runNext(db, ticket string, args []string, stdout, stderr io.Writer) error {
