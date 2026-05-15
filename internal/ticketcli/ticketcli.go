@@ -62,6 +62,12 @@ subcommands:
                                           (with --resume) for an exited one. macOS
                                           only; missing/unknown session id errors
                                           with the list of valid ids.
+  agent delete [<id>] <session-id>...     remove agent record(s) from the ticket's
+                                          agent list. Operates on the record, not
+                                          the process — refuses to delete a record
+                                          whose wrapper is still running/waiting
+                                          unless --force is passed. Unknown id
+                                          errors with the list of valid ids.
   agent set-status <running|waiting> [--session <id>]
                                           update an agent record's running/waiting
                                           status. Driven by Claude Code Stop /
@@ -373,6 +379,10 @@ func runAgent(db, beadsDir, ticket string, args []string, mode agent.Mode, stdou
 		}
 		return agent.Attach(db, beadsDir, id, tail[0])
 	}
+	if mode == agent.ModeAgent && len(args) > 0 && args[0] == "delete" {
+		// `ticket agent delete [<id>] <session-id>... [--force]`
+		return runAgentDelete(db, beadsDir, ticket, args[1:])
+	}
 	// --resume <session-id> turns `ticket agent` into the resume path used by
 	// `ticket agent attach` to re-launch an exited wrapper. It's only valid in
 	// ModeAgent (spec sessions don't share a transcript with a coding agent).
@@ -405,6 +415,30 @@ func runAgent(db, beadsDir, ticket string, args []string, mode agent.Mode, stdou
 		return err
 	}
 	return agent.RunWithResume(db, beadsDir, id, resume, mode)
+}
+
+// runAgentDelete handles `ticket agent delete [<id>] <session-id>... [--force]`.
+// At least one session id is required. With --force a still-running record can
+// be deleted (the underlying process is untouched either way).
+func runAgentDelete(db, beadsDir, ticket string, args []string) error {
+	usage := "usage: ticket agent delete [<id>] <session-id>... [--force]"
+	var force bool
+	positional := make([]string, 0, len(args))
+	for _, a := range args {
+		if a == "--force" {
+			force = true
+			continue
+		}
+		positional = append(positional, a)
+	}
+	id, tail, err := resolveIDVariadic(ticket, positional, usage)
+	if err != nil {
+		return err
+	}
+	if len(tail) == 0 {
+		return errors.New(usage)
+	}
+	return agent.DeleteAgents(db, beadsDir, id, tail, force)
 }
 
 // runAgentSetStatus handles `ticket agent set-status <state> [--session <id>]`.
