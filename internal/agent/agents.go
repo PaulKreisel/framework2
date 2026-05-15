@@ -88,6 +88,28 @@ func RegisterAgent(db, beadsDir, ticketID string, entry AgentEntry) error {
 	return saveAgents(db, beadsDir, ticketID, entries)
 }
 
+// UpsertAgent replaces the existing entry with the same SessionID, or appends
+// entry if no match exists. Used by the resume path so a re-launched wrapper
+// updates the previous (exited) record in place rather than producing a
+// duplicate that would shadow the live wrapper's status updates.
+func UpsertAgent(db, beadsDir, ticketID string, entry AgentEntry) error {
+	if ticketID == "" {
+		return errors.New("ticket id required")
+	}
+	entries, err := LoadAgents(db, beadsDir, ticketID)
+	if err != nil {
+		return err
+	}
+	for i, e := range entries {
+		if e.SessionID == entry.SessionID {
+			entries[i] = entry
+			return saveAgents(db, beadsDir, ticketID, entries)
+		}
+	}
+	entries = append(entries, entry)
+	return saveAgents(db, beadsDir, ticketID, entries)
+}
+
 // LoadAgents returns the agent records stored under the ticket's
 // metadata.agents key, oldest first (insertion order). Nil when no agent has
 // ever been launched against the ticket.

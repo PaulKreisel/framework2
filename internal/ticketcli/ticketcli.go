@@ -49,10 +49,19 @@ subcommands:
   env [<id>]                              create on-disk env folder for a ticket
   env syncback [<id>]                     push <env>/description.md back to the
                                           bead description (one-way file → bead)
-  agent [<id>]                            launch claude from a ticket's env folder
-                                          in coding mode
+  agent [<id>] [--resume <session-id>]    launch claude from a ticket's env folder
+                                          in coding mode. With --resume, claude
+                                          reattaches to the named transcript
+                                          instead of starting a fresh session;
+                                          the existing agent record is updated
+                                          in place.
   agent list [<id>] [--json]              list agents that have been launched on a
                                           ticket (newest first)
+  agent attach [<id>] <session-id>        focus the terminal hosting a running or
+                                          waiting agent, or spawn a fresh wrapper
+                                          (with --resume) for an exited one. macOS
+                                          only; missing/unknown session id errors
+                                          with the list of valid ids.
   agent set-status <running|waiting> [--session <id>]
                                           update an agent record's running/waiting
                                           status. Driven by Claude Code Stop /
@@ -356,15 +365,46 @@ func runAgent(db, beadsDir, ticket string, args []string, mode agent.Mode, stdou
 		// `ticket agent set-status <running|waiting> [--session <id>] [--ticket <id>]`
 		return runAgentSetStatus(db, beadsDir, ticket, args[1:])
 	}
-	usage := "usage: ticket agent [<id>]"
+	if mode == agent.ModeAgent && len(args) > 0 && args[0] == "attach" {
+		// `ticket agent attach [<id>] <session-id>`
+		id, tail, err := resolveID(ticket, args[1:], 1, "usage: ticket agent attach [<id>] <session-id>")
+		if err != nil {
+			return err
+		}
+		return agent.Attach(db, beadsDir, id, tail[0])
+	}
+	// --resume <session-id> turns `ticket agent` into the resume path used by
+	// `ticket agent attach` to re-launch an exited wrapper. It's only valid in
+	// ModeAgent (spec sessions don't share a transcript with a coding agent).
+	var resume string
+	positional := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--resume":
+			if i+1 >= len(args) {
+				return errors.New("--resume requires a session id")
+			}
+			resume = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--resume="):
+			resume = strings.TrimPrefix(a, "--resume=")
+		default:
+			positional = append(positional, a)
+		}
+	}
+	usage := "usage: ticket agent [<id>] [--resume <session-id>]"
 	if mode == agent.ModeSpec {
+		if resume != "" {
+			return errors.New("--resume is not supported in spec mode")
+		}
 		usage = "usage: ticket spec [<id>]"
 	}
-	id, _, err := resolveID(ticket, args, 0, usage)
+	id, _, err := resolveID(ticket, positional, 0, usage)
 	if err != nil {
 		return err
 	}
-	return agent.Run(db, beadsDir, id, mode)
+	return agent.RunWithResume(db, beadsDir, id, resume, mode)
 }
 
 // runAgentSetStatus handles `ticket agent set-status <state> [--session <id>]`.

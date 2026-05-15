@@ -46,16 +46,34 @@ const (
 // by `this env syncback` / `ticket env syncback`.
 const DescriptionFile = "description.md"
 
-// Run resolves the env folder for ticketID — creating it via [env.Create] if
-// it doesn't exist yet — regenerates the auto-managed context files
-// (description.md, .claude/settings.json), and then execs AgentCommand from
-// inside the env folder in a loop: after each exit, if a [SignalFile] is
+// Run is the fresh-launch variant of [RunWithResume]: it generates a new
+// session id, claims the bead, and lets claude allocate the session via
+// `--session-id`. See [RunWithResume] for the resume-on-existing-transcript
+// path used by [Attach].
+func Run(db, beadsDir, ticketID string, mode Mode) error {
+	return RunWithResume(db, beadsDir, ticketID, "", mode)
+}
+
+// RunWithResume resolves the env folder for ticketID — creating it via
+// [env.Create] if it doesn't exist yet — regenerates the auto-managed context
+// files (description.md, .claude/settings.json), and then execs AgentCommand
+// from inside the env folder in a loop: after each exit, if a [SignalFile] is
 // present, the loop regenerates context and re-execs AgentCommand with
 // `--continue` plus the signal's args appended.
 //
+// When resumeSessionID is empty (the common path used by `ticket agent`), a
+// fresh session id is generated, the bead is claimed, and the first claude
+// invocation passes `--session-id <newID>` so the id is stable from the start.
+//
+// When resumeSessionID is non-empty (the path used by [Attach] for an exited
+// agent), the bead is NOT re-claimed (it's already in_progress from the prior
+// wrapper), the existing agent record for that session id is updated in
+// place, and the first claude invocation passes `--resume <sessionID>` so it
+// reattaches to the same transcript instead of starting a new one.
+//
 // While AgentCommand is running, its pid is recorded at <env>/[PIDFile] so
 // [Relaunch] can target it.
-func Run(db, beadsDir, ticketID string, mode Mode) error {
+func RunWithResume(db, beadsDir, ticketID, resumeSessionID string, mode Mode) error {
 	if ticketID == "" {
 		return errors.New("ticket id required")
 	}
@@ -67,8 +85,10 @@ func Run(db, beadsDir, ticketID string, mode Mode) error {
 		return fmt.Errorf("create env dir: %w", err)
 	}
 
-	if err := Claim(db, beadsDir, ticketID); err != nil {
-		return err
+	if resumeSessionID == "" {
+		if err := Claim(db, beadsDir, ticketID); err != nil {
+			return err
+		}
 	}
 
 	sigPath := filepath.Join(envPath, SignalFile)
@@ -78,12 +98,15 @@ func Run(db, beadsDir, ticketID string, mode Mode) error {
 	_ = os.Remove(sigPath)
 	_ = os.Remove(pidPath)
 
-	sessionID, err := NewSessionID()
-	if err != nil {
-		return fmt.Errorf("generate session id: %w", err)
+	sessionID := resumeSessionID
+	if sessionID == "" {
+		sessionID, err = NewSessionID()
+		if err != nil {
+			return fmt.Errorf("generate session id: %w", err)
+		}
 	}
 	startedAt := time.Now().UTC().Format(time.RFC3339)
-	if err := RegisterAgent(db, beadsDir, ticketID, AgentEntry{
+	if err := UpsertAgent(db, beadsDir, ticketID, AgentEntry{
 		SessionID:       sessionID,
 		PID:             os.Getpid(),
 		Mode:            mode.String(),
@@ -106,11 +129,17 @@ func Run(db, beadsDir, ticketID string, mode Mode) error {
 		}
 		argv := append([]string{}, AgentDefaultArgs...)
 		argv = append(argv, "--append-system-prompt", prompt)
-		// First iteration: claude allocates the session under our chosen id
-		// so `agent list` can surface a stable handle. Subsequent iterations
-		// pass --continue (via extraArgs) and inherit the same session.
+		// First iteration: pin claude to our chosen session id, either by
+		// having it allocate a fresh session under that id (`--session-id`)
+		// or by reattaching to an existing transcript (`--resume`).
+		// Subsequent iterations pass --continue (via extraArgs) and inherit
+		// the same session.
 		if len(extraArgs) == 0 {
-			argv = append(argv, "--session-id", sessionID)
+			if resumeSessionID != "" {
+				argv = append(argv, "--resume", sessionID)
+			} else {
+				argv = append(argv, "--session-id", sessionID)
+			}
 		}
 		argv = append(argv, extraArgs...)
 		cmd := exec.Command(AgentCommand, argv...)
