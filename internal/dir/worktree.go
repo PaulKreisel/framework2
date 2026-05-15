@@ -20,7 +20,7 @@ import (
 //
 // Idempotent: if the ticket already has this bare repo linked, Worktree
 // returns without error.
-func Worktree(db, ticketID, bareRepo string) error {
+func Worktree(db, beadsDir, ticketID, bareRepo string) error {
 	bare, err := filepath.Abs(bareRepo)
 	if err != nil {
 		return fmt.Errorf("resolve bare repo path: %w", err)
@@ -28,13 +28,13 @@ func Worktree(db, ticketID, bareRepo string) error {
 	if !gitIsRepo(bare) {
 		return fmt.Errorf("not a git repository: %s", bare)
 	}
-	_, err = ensureWorktree(db, ticketID, bare)
+	_, err = ensureWorktree(db, beadsDir, ticketID, bare)
 	return err
 }
 
 // ensureWorktree returns the branch name to use as the base for descendants.
-func ensureWorktree(db, ticketID, bare string) (string, error) {
-	entries, err := load(db, ticketID)
+func ensureWorktree(db, beadsDir, ticketID, bare string) (string, error) {
+	entries, err := load(db, beadsDir, ticketID)
 	if err != nil {
 		return "", err
 	}
@@ -42,7 +42,7 @@ func ensureWorktree(db, ticketID, bare string) (string, error) {
 		return e.Branch, nil
 	}
 
-	parent, err := parentID(db, ticketID)
+	parent, err := parentID(db, beadsDir, ticketID)
 	if err != nil {
 		return "", err
 	}
@@ -53,7 +53,7 @@ func ensureWorktree(db, ticketID, bare string) (string, error) {
 			return "", err
 		}
 	} else {
-		base, err = ensureWorktree(db, parent, bare)
+		base, err = ensureWorktree(db, beadsDir, parent, bare)
 		if err != nil {
 			return "", err
 		}
@@ -68,7 +68,7 @@ func ensureWorktree(db, ticketID, bare string) (string, error) {
 	if err := gitWorktreeAdd(bare, wtPath, ticketID, base); err != nil {
 		return "", err
 	}
-	if err := link(db, ticketID, wtPath, bare); err != nil {
+	if err := link(db, beadsDir, ticketID, wtPath, bare); err != nil {
 		return "", err
 	}
 	return ticketID, nil

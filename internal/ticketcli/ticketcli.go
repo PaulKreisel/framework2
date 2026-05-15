@@ -66,17 +66,38 @@ subcommands:
                                           each paused worktree, then completes
                                           the rest of the flow.`
 
+// Options configures a Run invocation. The zero value uses
+// os.Getenv("BEADS_DIR") for BeadsDir, matching the production behaviour of
+// the `ticket` binary.
+type Options struct {
+	// BeadsDir, when non-empty, overrides BEADS_DIR for the duration of this
+	// invocation: env folder lookups and child bd subprocess invocations use
+	// this value instead of os.Getenv("BEADS_DIR"). Tests use it to drive a
+	// per-test .beads/ directory in parallel.
+	BeadsDir string
+}
+
 // Run executes the ticket command-line with the given args, writing normal
 // output to stdout and errors to stderr. Returns the process exit code.
 func Run(args []string, stdout, stderr io.Writer) int {
-	if err := dispatch(args, stdout, stderr); err != nil {
+	return RunWithOptions(Options{}, args, stdout, stderr)
+}
+
+// RunWithOptions is like [Run] but lets callers pin BEADS_DIR explicitly via
+// [Options].
+func RunWithOptions(opts Options, args []string, stdout, stderr io.Writer) int {
+	beadsDir := opts.BeadsDir
+	if beadsDir == "" {
+		beadsDir = os.Getenv("BEADS_DIR")
+	}
+	if err := dispatch(beadsDir, args, stdout, stderr); err != nil {
 		fmt.Fprintln(stderr, "ticket:", err)
 		return 1
 	}
 	return 0
 }
 
-func dispatch(args []string, stdout, stderr io.Writer) error {
+func dispatch(beadsDir string, args []string, stdout, stderr io.Writer) error {
 	db, ticket, rest, err := extractGlobal(args)
 	if err != nil {
 		return err
@@ -86,19 +107,19 @@ func dispatch(args []string, stdout, stderr io.Writer) error {
 	}
 	switch rest[0] {
 	case "dir":
-		return runDir(db, ticket, rest[1:], stdout)
+		return runDir(db, beadsDir, ticket, rest[1:], stdout)
 	case "env":
-		return runEnv(db, ticket, rest[1:], stdout)
+		return runEnv(db, beadsDir, ticket, rest[1:], stdout)
 	case "agent":
-		return runAgent(db, ticket, rest[1:], agent.ModeAgent)
+		return runAgent(db, beadsDir, ticket, rest[1:], agent.ModeAgent)
 	case "spec":
-		return runAgent(db, ticket, rest[1:], agent.ModeSpec)
+		return runAgent(db, beadsDir, ticket, rest[1:], agent.ModeSpec)
 	case "create":
-		return runCreate(db, ticket, rest[1:], stdout)
+		return runCreate(db, beadsDir, ticket, rest[1:], stdout)
 	case "next":
-		return runNext(db, ticket, rest[1:], stdout, stderr)
+		return runNext(db, beadsDir, ticket, rest[1:], stdout, stderr)
 	case "finish":
-		return runFinish(db, ticket, rest[1:], stdout)
+		return runFinish(db, beadsDir, ticket, rest[1:], stdout)
 	case "-h", "--help", "help":
 		fmt.Fprintln(stdout, usage)
 		return nil
@@ -107,7 +128,7 @@ func dispatch(args []string, stdout, stderr io.Writer) error {
 	}
 }
 
-func runDir(db, ticket string, args []string, stdout io.Writer) error {
+func runDir(db, beadsDir, ticket string, args []string, stdout io.Writer) error {
 	if len(args) == 0 {
 		return errors.New("usage: ticket dir <link|remove|list> ...")
 	}
@@ -118,55 +139,55 @@ func runDir(db, ticket string, args []string, stdout io.Writer) error {
 		if err != nil {
 			return err
 		}
-		if err := dir.Link(db, id, tail[0]); err != nil {
+		if err := dir.Link(db, beadsDir, id, tail[0]); err != nil {
 			return err
 		}
 		// Only the leaf ticket — the one we just mutated — may have a live
 		// wrapper to refresh. dir.Worktree cascades into ancestors, but
 		// their sessions aren't running, so we never try to signal them.
-		return agent.RelaunchIfActive(os.Getenv("BEADS_DIR"), id)
+		return agent.RelaunchIfActive(beadsDir, id)
 	case "remove":
 		id, tail, err := resolveID(ticket, rest, 1, "usage: ticket dir remove [<id>] <path>")
 		if err != nil {
 			return err
 		}
-		return dir.Remove(db, id, tail[0])
+		return dir.Remove(db, beadsDir, id, tail[0])
 	case "list":
 		id, _, err := resolveID(ticket, rest, 0, "usage: ticket dir list [<id>]")
 		if err != nil {
 			return err
 		}
-		return dir.List(db, id, stdout)
+		return dir.List(db, beadsDir, id, stdout)
 	case "worktree":
 		id, tail, err := resolveID(ticket, rest, 1, "usage: ticket dir worktree [<id>] <bare-repo>")
 		if err != nil {
 			return err
 		}
-		if err := dir.Worktree(db, id, tail[0]); err != nil {
+		if err := dir.Worktree(db, beadsDir, id, tail[0]); err != nil {
 			return err
 		}
 		// See the comment under `link` above: cascade-created ancestor
 		// worktrees belong to tickets whose agents aren't running, so we
 		// only relaunch the explicitly addressed ticket.
-		return agent.RelaunchIfActive(os.Getenv("BEADS_DIR"), id)
+		return agent.RelaunchIfActive(beadsDir, id)
 	default:
 		return fmt.Errorf("unknown dir subcommand %q", sub)
 	}
 }
 
-func runEnv(db, ticket string, args []string, stdout io.Writer) error {
+func runEnv(db, beadsDir, ticket string, args []string, stdout io.Writer) error {
 	if len(args) > 0 && args[0] == "syncback" {
 		id, _, err := resolveID(ticket, args[1:], 0, "usage: ticket env syncback [<id>]")
 		if err != nil {
 			return err
 		}
-		return agent.Syncback(db, os.Getenv("BEADS_DIR"), id)
+		return agent.Syncback(db, beadsDir, id)
 	}
 	id, _, err := resolveID(ticket, args, 0, "usage: ticket env [<id>]")
 	if err != nil {
 		return err
 	}
-	envPath, err := env.Create(db, os.Getenv("BEADS_DIR"), id)
+	envPath, err := env.Create(db, beadsDir, id)
 	if err != nil {
 		return err
 	}
@@ -206,14 +227,14 @@ func isTerminalWriter(w io.Writer) bool {
 	return fi.Mode()&os.ModeCharDevice != 0
 }
 
-func runAgent(db, ticket string, args []string, mode agent.Mode) error {
+func runAgent(db, beadsDir, ticket string, args []string, mode agent.Mode) error {
 	if mode == agent.ModeAgent && len(args) > 0 && args[0] == "relaunch" {
 		// `ticket agent relaunch [<id>] [extra-args...]`
 		id, extra, err := resolveIDVariadic(ticket, args[1:], "usage: ticket agent relaunch [<id>] [extra-args...]")
 		if err != nil {
 			return err
 		}
-		return agent.Relaunch(os.Getenv("BEADS_DIR"), id, extra)
+		return agent.Relaunch(beadsDir, id, extra)
 	}
 	usage := "usage: ticket agent [<id>]"
 	if mode == agent.ModeSpec {
@@ -223,10 +244,10 @@ func runAgent(db, ticket string, args []string, mode agent.Mode) error {
 	if err != nil {
 		return err
 	}
-	return agent.Run(db, os.Getenv("BEADS_DIR"), id, mode)
+	return agent.Run(db, beadsDir, id, mode)
 }
 
-func runCreate(db, ticket string, args []string, stdout io.Writer) error {
+func runCreate(db, beadsDir, ticket string, args []string, stdout io.Writer) error {
 	if len(args) == 0 {
 		return errors.New("usage: ticket create <child|followup> [<id>] [--not-blocked] <title>")
 	}
@@ -260,10 +281,10 @@ func runCreate(db, ticket string, args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	return create.Run(db, id, tail[0], rel, !notBlocked, stdout)
+	return create.Run(db, beadsDir, id, tail[0], rel, !notBlocked, stdout)
 }
 
-func runFinish(db, ticket string, args []string, stdout io.Writer) error {
+func runFinish(db, beadsDir, ticket string, args []string, stdout io.Writer) error {
 	var continueMode bool
 	positional := make([]string, 0, len(args))
 	for _, a := range args {
@@ -277,15 +298,15 @@ func runFinish(db, ticket string, args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	return finish.Run(db, os.Getenv("BEADS_DIR"), id, continueMode, stdout)
+	return finish.Run(db, beadsDir, id, continueMode, stdout)
 }
 
-func runNext(db, ticket string, args []string, stdout, stderr io.Writer) error {
+func runNext(db, beadsDir, ticket string, args []string, stdout, stderr io.Writer) error {
 	id, _, err := resolveOptionalID(ticket, args, 0, "usage: ticket next [<id>]")
 	if err != nil {
 		return err
 	}
-	return next.Run(db, id, stdout, stderr)
+	return next.Run(db, beadsDir, id, stdout, stderr)
 }
 
 // resolveID pulls the ticket id from either the global --ticket flag or the

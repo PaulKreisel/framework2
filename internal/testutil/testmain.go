@@ -60,7 +60,27 @@ func RunTestMain(m *testing.M) int {
 		fail("warm server: %v", err)
 	}
 
-	return m.Run()
+	// Drop leftover per-test databases from previous interrupted runs before
+	// any test starts. The pool we initialise below creates fresh ones; the
+	// stale-cleanup is just so we don't accumulate them on the server forever.
+	cleanStaleTestDBs(beadsDir)
+
+	// Stock the per-test database pool so [TestDB] handles in parallel-safe
+	// constant time. Sized to GOMAXPROCS — Go's default per-package test
+	// parallelism — so a fully-parallel package never blocks on the pool.
+	host, port, err := readServerAddr(beadsDir)
+	if err != nil {
+		stop()
+		fail("read server addr: %v", err)
+	}
+	// Pool is initialised lazily on the first [TestDB] call so packages that
+	// only use [SharedBdDB] (env, next, thiscli, testutil itself) don't pay
+	// the bd-init startup cost. See [TestDB] for the pool config.
+	poolHost, poolPort = host, port
+
+	code := m.Run()
+	dropPoolEntries()
+	return code
 }
 
 // testBinaryPackageName returns the test binary's basename without the .test

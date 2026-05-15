@@ -18,8 +18,9 @@ import (
 )
 
 func TestRelaunchWritesSignalAndKillsTarget(t *testing.T) {
-	beadsDir := testutil.SharedBdDB(t)
-	ticket, _ := createBeadWithDescription(t, "agent-relaunch-ok", "x")
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBeadFull(t, beadsDir, "agent-relaunch-ok", "x", "")
 	envPath := mustEnv(t, beadsDir, ticket)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -57,8 +58,9 @@ func TestRelaunchWritesSignalAndKillsTarget(t *testing.T) {
 }
 
 func TestRelaunchWithNoExtraArgsWritesDefaultPrompt(t *testing.T) {
-	beadsDir := testutil.SharedBdDB(t)
-	ticket, _ := createBeadWithDescription(t, "agent-relaunch-empty", "x")
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBeadFull(t, beadsDir, "agent-relaunch-empty", "x", "")
 	envPath := mustEnv(t, beadsDir, ticket)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -85,8 +87,9 @@ func TestRelaunchWithNoExtraArgsWritesDefaultPrompt(t *testing.T) {
 }
 
 func TestRelaunchFailsWithoutPIDFile(t *testing.T) {
-	beadsDir := testutil.SharedBdDB(t)
-	ticket, _ := createBeadWithDescription(t, "agent-relaunch-no-pid", "x")
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBeadFull(t, beadsDir, "agent-relaunch-no-pid", "x", "")
 	mustEnv(t, beadsDir, ticket)
 
 	err := agent.Relaunch(beadsDir, ticket, nil)
@@ -99,8 +102,9 @@ func TestRelaunchFailsWithoutPIDFile(t *testing.T) {
 }
 
 func TestRelaunchFailsWithStalePID(t *testing.T) {
-	beadsDir := testutil.SharedBdDB(t)
-	ticket, _ := createBeadWithDescription(t, "agent-relaunch-stale-pid", "x")
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBeadFull(t, beadsDir, "agent-relaunch-stale-pid", "x", "")
 	envPath := mustEnv(t, beadsDir, ticket)
 
 	cmd := exec.Command("true")
@@ -119,8 +123,9 @@ func TestRelaunchFailsWithStalePID(t *testing.T) {
 }
 
 func TestRelaunchIfActiveNoOpsWithoutPIDFile(t *testing.T) {
-	beadsDir := testutil.SharedBdDB(t)
-	ticket, _ := createBeadWithDescription(t, "agent-relaunch-ifactive-nopid", "x")
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBeadFull(t, beadsDir, "agent-relaunch-ifactive-nopid", "x", "")
 	envPath := mustEnv(t, beadsDir, ticket)
 
 	if err := agent.RelaunchIfActive(beadsDir, ticket); err != nil {
@@ -132,8 +137,9 @@ func TestRelaunchIfActiveNoOpsWithoutPIDFile(t *testing.T) {
 }
 
 func TestRelaunchIfActiveNoOpsWithStalePID(t *testing.T) {
-	beadsDir := testutil.SharedBdDB(t)
-	ticket, _ := createBeadWithDescription(t, "agent-relaunch-ifactive-stale", "x")
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBeadFull(t, beadsDir, "agent-relaunch-ifactive-stale", "x", "")
 	envPath := mustEnv(t, beadsDir, ticket)
 
 	cmd := exec.Command("true")
@@ -151,8 +157,9 @@ func TestRelaunchIfActiveNoOpsWithStalePID(t *testing.T) {
 }
 
 func TestRelaunchIfActiveSignalsLiveWrapper(t *testing.T) {
-	beadsDir := testutil.SharedBdDB(t)
-	ticket, _ := createBeadWithDescription(t, "agent-relaunch-ifactive-live", "x")
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBeadFull(t, beadsDir, "agent-relaunch-ifactive-live", "x", "")
 	envPath := mustEnv(t, beadsDir, ticket)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -179,9 +186,14 @@ func TestRelaunchIfActiveSignalsLiveWrapper(t *testing.T) {
 	_ = cmd.Wait()
 }
 
+// TestRunLoopRelaunchesOnSignal and TestRunLoopClearsStaleSignalFile mutate
+// the package-level agent.AgentCommand / AgentDefaultArgs to substitute a
+// fake claude, so they cannot run alongside the other agent tests in
+// parallel. They still use TestDB for DB isolation; they just opt out of
+// t.Parallel.
 func TestRunLoopRelaunchesOnSignal(t *testing.T) {
-	beadsDir := testutil.SharedBdDB(t)
-	ticket, _ := createBeadWithDescription(t, "agent-run-loop", "x")
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBeadFull(t, beadsDir, "agent-run-loop", "x", "")
 	envPath := mustEnv(t, beadsDir, ticket)
 
 	workDir := t.TempDir()
@@ -249,8 +261,8 @@ fi
 }
 
 func TestRunLoopClearsStaleSignalFile(t *testing.T) {
-	beadsDir := testutil.SharedBdDB(t)
-	ticket, _ := createBeadWithDescription(t, "agent-run-clear-stale", "x")
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBeadFull(t, beadsDir, "agent-run-clear-stale", "x", "")
 	envPath := mustEnv(t, beadsDir, ticket)
 
 	// Plant a stale signal — if the loop didn't clear it pre-flight, the

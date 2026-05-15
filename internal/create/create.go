@@ -10,6 +10,8 @@ import (
 	"io"
 	"os/exec"
 	"strings"
+
+	"framework2/internal/bdcli"
 )
 
 // Relation selects how the new bead is wired relative to the current one.
@@ -27,7 +29,7 @@ const (
 // Run creates a new bead related to currentID by rel with the given title and
 // prints the new bead's id to stdout. db may be empty to use bd's default.
 // blocked is only consulted for Followup.
-func Run(db, currentID, title string, rel Relation, blocked bool, stdout io.Writer) error {
+func Run(db, beadsDir, currentID, title string, rel Relation, blocked bool, stdout io.Writer) error {
 	if currentID == "" {
 		return errors.New("ticket id required")
 	}
@@ -40,7 +42,7 @@ func Run(db, currentID, title string, rel Relation, blocked bool, stdout io.Writ
 	case Child:
 		parent = currentID
 	case Followup:
-		p, err := loadParent(db, currentID)
+		p, err := loadParent(db, beadsDir, currentID)
 		if err != nil {
 			return err
 		}
@@ -49,15 +51,11 @@ func Run(db, currentID, title string, rel Relation, blocked bool, stdout io.Writ
 		return fmt.Errorf("unknown relation: %d", rel)
 	}
 
-	args := []string{}
-	if db != "" {
-		args = append(args, "--db", db)
-	}
-	args = append(args, "create", title, "--silent")
+	args := []string{"create", title, "--silent"}
 	if parent != "" {
 		args = append(args, "--parent", parent)
 	}
-	out, err := exec.Command("bd", args...).Output()
+	out, err := bdcli.Cmd(beadsDir, db, args...).Output()
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
 			return fmt.Errorf("bd create: %v: %s", err, ee.Stderr)
@@ -70,12 +68,7 @@ func Run(db, currentID, title string, rel Relation, blocked bool, stdout io.Writ
 	}
 
 	if rel == Followup && blocked {
-		depArgs := []string{}
-		if db != "" {
-			depArgs = append(depArgs, "--db", db)
-		}
-		depArgs = append(depArgs, "dep", "add", id, currentID)
-		if dout, err := exec.Command("bd", depArgs...).CombinedOutput(); err != nil {
+		if dout, err := bdcli.Cmd(beadsDir, db, "dep", "add", id, currentID).CombinedOutput(); err != nil {
 			return fmt.Errorf("bd dep add %s %s: %v: %s", id, currentID, err, dout)
 		}
 	}
@@ -86,13 +79,8 @@ func Run(db, currentID, title string, rel Relation, blocked bool, stdout io.Writ
 
 // loadParent returns the parent id of ticketID, or "" if it has none.
 // Surfaces the first parent if multiple are recorded (bd allows this).
-func loadParent(db, ticketID string) (string, error) {
-	args := []string{}
-	if db != "" {
-		args = append(args, "--db", db)
-	}
-	args = append(args, "--json", "show", ticketID)
-	out, err := exec.Command("bd", args...).Output()
+func loadParent(db, beadsDir, ticketID string) (string, error) {
+	out, err := bdcli.Cmd(beadsDir, db, "--json", "show", ticketID).Output()
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
 			return "", fmt.Errorf("bd show %s: %v: %s", ticketID, err, ee.Stderr)

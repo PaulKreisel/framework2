@@ -7,9 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"framework2/internal/bdcli"
 )
 
 // MarkerFile is the basename of the per-env file containing the ticket id.
@@ -27,7 +28,7 @@ func Create(db, beadsDir, ticketID string) (string, error) {
 	if beadsDir == "" {
 		return "", errors.New("BEADS_DIR not set: cannot derive env root")
 	}
-	if err := assertTicketExists(db, ticketID); err != nil {
+	if err := assertTicketExists(db, beadsDir, ticketID); err != nil {
 		return "", err
 	}
 	envPath := filepath.Join(beadsDir, "envs", ticketID)
@@ -48,13 +49,8 @@ func Create(db, beadsDir, ticketID string) (string, error) {
 	return envPath, nil
 }
 
-func assertTicketExists(db, ticketID string) error {
-	args := []string{}
-	if db != "" {
-		args = append(args, "--db", db)
-	}
-	args = append(args, "show", ticketID)
-	out, err := exec.Command("bd", args...).CombinedOutput()
+func assertTicketExists(db, beadsDir, ticketID string) error {
+	out, err := bdcli.Cmd(beadsDir, db, "show", ticketID).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("ticket lookup failed for %s: %v: %s", ticketID, err, out)
 	}

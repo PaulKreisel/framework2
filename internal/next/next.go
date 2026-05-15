@@ -3,20 +3,17 @@ package next
 
 import (
 	"io"
-	"os/exec"
+
+	"framework2/internal/bdcli"
 )
 
 // Run shells out to `bd ready`, optionally scoped to a parent ticket.
-func Run(db, ticketID string, stdout, stderr io.Writer) error {
-	args := []string{}
-	if db != "" {
-		args = append(args, "--db", db)
-	}
-	args = append(args, "ready")
+func Run(db, beadsDir, ticketID string, stdout, stderr io.Writer) error {
+	args := []string{"ready"}
 	if ticketID != "" {
 		args = append(args, "--parent", ticketID)
 	}
-	cmd := exec.Command("bd", args...)
+	cmd := bdcli.Cmd(beadsDir, db, args...)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	return cmd.Run()

@@ -28,6 +28,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"framework2/internal/bdcli"
 	"framework2/internal/dir"
 )
 
@@ -47,7 +48,7 @@ func Run(db, beadsDir, ticketID string, continueMode bool, stdout io.Writer) err
 		return errors.New("BEADS_DIR not set: cannot derive env path")
 	}
 
-	entries, err := dir.Load(db, ticketID)
+	entries, err := dir.Load(db, beadsDir, ticketID)
 	if err != nil {
 		return err
 	}
@@ -57,15 +58,15 @@ func Run(db, beadsDir, ticketID string, continueMode bool, stdout io.Writer) err
 		return err
 	}
 
-	parent, err := dir.ParentID(db, ticketID)
+	parent, err := dir.ParentID(db, beadsDir, ticketID)
 	if err != nil {
 		return err
 	}
-	if err := rebaseWorktrees(db, ticketID, parent, worktrees, continueMode); err != nil {
+	if err := rebaseWorktrees(db, beadsDir, ticketID, parent, worktrees, continueMode); err != nil {
 		return err
 	}
 
-	if err := bdClose(db, ticketID); err != nil {
+	if err := bdClose(db, beadsDir, ticketID); err != nil {
 		return err
 	}
 	for _, e := range worktrees {
@@ -151,11 +152,11 @@ func inProgressRebase(wt string) bool {
 // worktree in the same bare repo is left alone. In continueMode, in-rebase
 // worktrees resume via `git rebase --continue`; non-in-rebase worktrees
 // take the normal path.
-func rebaseWorktrees(db, ticketID, parent string, worktrees []dir.Entry, continueMode bool) error {
+func rebaseWorktrees(db, beadsDir, ticketID, parent string, worktrees []dir.Entry, continueMode bool) error {
 	if parent == "" {
 		return nil
 	}
-	parentEntries, err := dir.Load(db, parent)
+	parentEntries, err := dir.Load(db, beadsDir, parent)
 	if err != nil {
 		return err
 	}
@@ -273,14 +274,8 @@ func findEntryForBare(entries []dir.Entry, bare string) (dir.Entry, bool) {
 	return dir.Entry{}, false
 }
 
-func bdClose(db, ticketID string) error {
-	args := []string{}
-	if db != "" {
-		args = append(args, "--db", db)
-	}
-	args = append(args, "close", ticketID)
-	cmd := exec.Command("bd", args...)
-	if out, err := cmd.CombinedOutput(); err != nil {
+func bdClose(db, beadsDir, ticketID string) error {
+	if out, err := bdcli.Cmd(beadsDir, db, "close", ticketID).CombinedOutput(); err != nil {
 		return fmt.Errorf("bd close %s: %w: %s", ticketID, err, strings.TrimSpace(string(out)))
 	}
 	return nil

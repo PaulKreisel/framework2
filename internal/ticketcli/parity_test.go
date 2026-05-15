@@ -2,7 +2,6 @@ package ticketcli_test
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -26,7 +25,8 @@ import (
 // subcommands depend on. Treat the table below as part of the dispatcher
 // contract.
 func TestSubcommandFormParity(t *testing.T) {
-	beadsDir := testutil.SharedBdDB(t)
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
 
 	cases := []struct {
 		name string
@@ -67,16 +67,16 @@ func TestSubcommandFormParity(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			ticket := createBead(t, "parity-"+strings.ReplaceAll(tc.name, " ", "-"))
+			ticket := testutil.CreateBead(t, beadsDir, "parity-"+strings.ReplaceAll(tc.name, " ", "-"))
 			t.Cleanup(func() { _ = os.RemoveAll(filepath.Join(beadsDir, "envs", ticket)) })
 
 			form1 := buildArgs(tc.sub, ticket, tc.tail, "")
 			form2 := buildArgs(tc.sub, "", tc.tail, ticket)
-			out1, err1, code1 := testutil.RunTicket(t, form1...)
+			out1, err1, code1 := testutil.RunTicketIn(t, beadsDir, form1...)
 			if code1 != 0 {
 				t.Fatalf("form 1 (positional) failed: exit=%d stderr=%q args=%v", code1, err1, form1)
 			}
-			out2, err2, code2 := testutil.RunTicket(t, form2...)
+			out2, err2, code2 := testutil.RunTicketIn(t, beadsDir, form2...)
 			if code2 != 0 {
 				t.Fatalf("form 2 (--ticket flag) failed: exit=%d stderr=%q args=%v", code2, err2, form2)
 			}
@@ -89,7 +89,7 @@ func TestSubcommandFormParity(t *testing.T) {
 			if cerr != nil {
 				t.Fatalf("env.Create for form 3: %v", cerr)
 			}
-			out3, err3, code3 := testutil.RunThisFrom(t, envPath, thisArgs...)
+			out3, err3, code3 := testutil.RunThisFromIn(t, beadsDir, envPath, thisArgs...)
 			if code3 != 0 {
 				t.Fatalf("form 3 (this) failed: exit=%d stderr=%q args=%v", code3, err3, thisArgs)
 			}
@@ -120,15 +120,4 @@ func buildArgs(sub []string, positionalID string, tail []string, ticketFlag stri
 	}
 	out = append(out, tail...)
 	return out
-}
-
-func createBead(t *testing.T, title string) string {
-	t.Helper()
-	out, err := exec.Command("bd", "create", title, "--silent").Output()
-	if err != nil {
-		t.Fatalf("bd create: %v", err)
-	}
-	id := strings.TrimSpace(string(out))
-	t.Cleanup(func() { _ = exec.Command("bd", "close", id).Run() })
-	return id
 }

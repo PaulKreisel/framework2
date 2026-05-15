@@ -4,24 +4,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
-)
 
-func bdArgs(db string, rest ...string) []string {
-	args := []string{}
-	if db != "" {
-		args = append(args, "--db", db)
-	}
-	return append(args, rest...)
-}
+	"framework2/internal/bdcli"
+)
 
 // Load returns the linked-dir entries stored under the ticket's metadata.dirs
 // key. Returns nil (no error) when the ticket has no entries yet.
-func Load(db, ticketID string) ([]Entry, error) {
-	return load(db, ticketID)
+func Load(db, beadsDir, ticketID string) ([]Entry, error) {
+	return load(db, beadsDir, ticketID)
 }
 
-func load(db, ticketID string) ([]Entry, error) {
-	row, err := showTicket(db, ticketID)
+func load(db, beadsDir, ticketID string) ([]Entry, error) {
+	row, err := showTicket(db, beadsDir, ticketID)
 	if err != nil {
 		return nil, err
 	}
@@ -37,13 +31,13 @@ func load(db, ticketID string) ([]Entry, error) {
 }
 
 // ParentID returns the immediate parent bead id, or "" if the bead is a root.
-func ParentID(db, ticketID string) (string, error) {
-	return parentID(db, ticketID)
+func ParentID(db, beadsDir, ticketID string) (string, error) {
+	return parentID(db, beadsDir, ticketID)
 }
 
 // parentID returns the immediate parent bead id, or "" if the bead is a root.
-func parentID(db, ticketID string) (string, error) {
-	row, err := showTicket(db, ticketID)
+func parentID(db, beadsDir, ticketID string) (string, error) {
+	row, err := showTicket(db, beadsDir, ticketID)
 	if err != nil {
 		return "", err
 	}
@@ -55,8 +49,8 @@ type ticketRow struct {
 	Parent   string                     `json:"parent"`
 }
 
-func showTicket(db, ticketID string) (*ticketRow, error) {
-	out, err := exec.Command("bd", bdArgs(db, "--json", "show", ticketID)...).Output()
+func showTicket(db, beadsDir, ticketID string) (*ticketRow, error) {
+	out, err := bdcli.Cmd(beadsDir, db, "--json", "show", ticketID).Output()
 	if err != nil {
 		return nil, fmt.Errorf("look up ticket %s: %w", ticketID, withStderr(err))
 	}
@@ -70,7 +64,7 @@ func showTicket(db, ticketID string) (*ticketRow, error) {
 	return &rows[0], nil
 }
 
-func save(db, ticketID string, entries []Entry) error {
+func save(db, beadsDir, ticketID string, entries []Entry) error {
 	if entries == nil {
 		entries = []Entry{}
 	}
@@ -78,7 +72,7 @@ func save(db, ticketID string, entries []Entry) error {
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command("bd", bdArgs(db, "update", ticketID, "--metadata", string(payload))...)
+	cmd := bdcli.Cmd(beadsDir, db, "update", ticketID, "--metadata", string(payload))
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("update ticket %s: %w: %s", ticketID, err, out)

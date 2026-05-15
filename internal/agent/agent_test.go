@@ -3,7 +3,6 @@ package agent_test
 import (
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -14,12 +13,13 @@ import (
 )
 
 func TestRegenerateWritesDescriptionMD(t *testing.T) {
-	beadsDir := testutil.SharedBdDB(t)
-	ticket, _ := createBeadWithDescription(t, "agent-descmd-fields",
-		"a short description for the agent regen test")
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBeadFull(t, beadsDir, "agent-descmd-fields",
+		"a short description for the agent regen test", "")
 	envPath := mustEnv(t, beadsDir, ticket)
 
-	prompt, err := agent.Regenerate("", envPath, ticket, agent.ModeAgent)
+	prompt, err := agent.Regenerate("", beadsDir, envPath, ticket, agent.ModeAgent)
 	if err != nil {
 		t.Fatalf("Regenerate: %v", err)
 	}
@@ -42,6 +42,7 @@ func TestRegenerateWritesDescriptionMD(t *testing.T) {
 }
 
 func TestBuildSystemPromptModes(t *testing.T) {
+	t.Parallel()
 	agentP := agent.BuildSystemPrompt("bd-1", "do the thing", agent.ModeAgent)
 	specP := agent.BuildSystemPrompt("bd-1", "do the thing", agent.ModeSpec)
 
@@ -80,12 +81,13 @@ func TestBuildSystemPromptModes(t *testing.T) {
 }
 
 func TestRegenerateSettingsMatchesLinkedDirs(t *testing.T) {
-	beadsDir := testutil.SharedBdDB(t)
-	ticket, _ := createBeadWithDescription(t, "agent-settings-paths", "x")
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBeadFull(t, beadsDir, "agent-settings-paths", "x", "")
 	envPath := mustEnv(t, beadsDir, ticket)
 
 	// Empty: settings.json must still be written with an empty array.
-	if _, err := agent.Regenerate("", envPath, ticket, agent.ModeAgent); err != nil {
+	if _, err := agent.Regenerate("", beadsDir, envPath, ticket, agent.ModeAgent); err != nil {
 		t.Fatalf("Regenerate (empty): %v", err)
 	}
 	got := readSettings(t, envPath)
@@ -99,13 +101,13 @@ func TestRegenerateSettingsMatchesLinkedDirs(t *testing.T) {
 	// Link two dirs and re-regen — settings must list exactly those paths.
 	d1 := t.TempDir()
 	d2 := t.TempDir()
-	if _, _, code := testutil.RunTicket(t, "dir", "link", ticket, d1); code != 0 {
+	if _, _, code := testutil.RunTicketIn(t, beadsDir, "dir", "link", ticket, d1); code != 0 {
 		t.Fatalf("link d1: exit=%d", code)
 	}
-	if _, _, code := testutil.RunTicket(t, "dir", "link", ticket, d2); code != 0 {
+	if _, _, code := testutil.RunTicketIn(t, beadsDir, "dir", "link", ticket, d2); code != 0 {
 		t.Fatalf("link d2: exit=%d", code)
 	}
-	if _, err := agent.Regenerate("", envPath, ticket, agent.ModeAgent); err != nil {
+	if _, err := agent.Regenerate("", beadsDir, envPath, ticket, agent.ModeAgent); err != nil {
 		t.Fatalf("Regenerate (two dirs): %v", err)
 	}
 	got = readSettings(t, envPath)
@@ -115,10 +117,10 @@ func TestRegenerateSettingsMatchesLinkedDirs(t *testing.T) {
 	}
 
 	// Remove one and re-regen — stale entry must drop, not merge.
-	if _, _, code := testutil.RunTicket(t, "dir", "remove", ticket, d1); code != 0 {
+	if _, _, code := testutil.RunTicketIn(t, beadsDir, "dir", "remove", ticket, d1); code != 0 {
 		t.Fatalf("remove d1: exit=%d", code)
 	}
-	if _, err := agent.Regenerate("", envPath, ticket, agent.ModeAgent); err != nil {
+	if _, err := agent.Regenerate("", beadsDir, envPath, ticket, agent.ModeAgent); err != nil {
 		t.Fatalf("Regenerate (after remove): %v", err)
 	}
 	got = readSettings(t, envPath)
@@ -129,8 +131,9 @@ func TestRegenerateSettingsMatchesLinkedDirs(t *testing.T) {
 }
 
 func TestRegenerateOverwritesStaleDescriptionMD(t *testing.T) {
-	beadsDir := testutil.SharedBdDB(t)
-	ticket, _ := createBeadWithDescription(t, "agent-stale-descmd", "real description")
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBeadFull(t, beadsDir, "agent-stale-descmd", "real description", "")
 	envPath := mustEnv(t, beadsDir, ticket)
 
 	stale := "hand-written content that must vanish\n"
@@ -138,7 +141,7 @@ func TestRegenerateOverwritesStaleDescriptionMD(t *testing.T) {
 		t.Fatalf("plant stale: %v", err)
 	}
 
-	if _, err := agent.Regenerate("", envPath, ticket, agent.ModeAgent); err != nil {
+	if _, err := agent.Regenerate("", beadsDir, envPath, ticket, agent.ModeAgent); err != nil {
 		t.Fatalf("Regenerate: %v", err)
 	}
 	body := readFile(t, filepath.Join(envPath, agent.DescriptionFile))
@@ -151,11 +154,12 @@ func TestRegenerateOverwritesStaleDescriptionMD(t *testing.T) {
 }
 
 func TestRegenerateDoesNotWriteClaudeMD(t *testing.T) {
-	beadsDir := testutil.SharedBdDB(t)
-	ticket, _ := createBeadWithDescription(t, "agent-no-claudemd", "x")
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBeadFull(t, beadsDir, "agent-no-claudemd", "x", "")
 	envPath := mustEnv(t, beadsDir, ticket)
 
-	if _, err := agent.Regenerate("", envPath, ticket, agent.ModeAgent); err != nil {
+	if _, err := agent.Regenerate("", beadsDir, envPath, ticket, agent.ModeAgent); err != nil {
 		t.Fatalf("Regenerate: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(envPath, "CLAUDE.md")); !os.IsNotExist(err) {
@@ -164,11 +168,12 @@ func TestRegenerateDoesNotWriteClaudeMD(t *testing.T) {
 }
 
 func TestSyncbackPushesDescription(t *testing.T) {
-	beadsDir := testutil.SharedBdDB(t)
-	ticket, _ := createBeadWithDescription(t, "agent-syncback", "original")
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBeadFull(t, beadsDir, "agent-syncback", "original", "")
 	envPath := mustEnv(t, beadsDir, ticket)
 
-	if _, err := agent.Regenerate("", envPath, ticket, agent.ModeAgent); err != nil {
+	if _, err := agent.Regenerate("", beadsDir, envPath, ticket, agent.ModeAgent); err != nil {
 		t.Fatalf("Regenerate: %v", err)
 	}
 	newBody := "edited via spec session\n\nwith a second paragraph\n"
@@ -181,7 +186,7 @@ func TestSyncbackPushesDescription(t *testing.T) {
 	}
 
 	// Read bead description back via bd --json show.
-	out, err := exec.Command("bd", "--json", "show", ticket).Output()
+	out, err := testutil.BdCmd(beadsDir, "--json", "show", ticket).Output()
 	if err != nil {
 		t.Fatalf("bd show: %v", err)
 	}
@@ -200,76 +205,79 @@ func TestSyncbackPushesDescription(t *testing.T) {
 }
 
 func TestClaimSetsInProgress(t *testing.T) {
-	testutil.SharedBdDB(t)
-	ticket, _ := createBeadWithDescription(t, "agent-claim-sets", "x")
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBeadFull(t, beadsDir, "agent-claim-sets", "x", "")
 
-	if got := readStatus(t, ticket); got != "open" {
+	if got := readStatus(t, beadsDir, ticket); got != "open" {
 		t.Fatalf("precondition: status = %q, want open", got)
 	}
-	if err := agent.Claim("", ticket); err != nil {
+	if err := agent.Claim("", beadsDir, ticket); err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
-	if got := readStatus(t, ticket); got != "in_progress" {
+	if got := readStatus(t, beadsDir, ticket); got != "in_progress" {
 		t.Errorf("after Claim, status = %q, want in_progress", got)
 	}
 }
 
 func TestClaimErrorsWhenBlockedByDep(t *testing.T) {
-	testutil.SharedBdDB(t)
-	blocker, _ := createBeadWithDescription(t, "agent-claim-blocker", "x")
-	blocked, _ := createBeadWithDescription(t, "agent-claim-blocked", "x")
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	blocker := testutil.CreateBeadFull(t, beadsDir, "agent-claim-blocker", "x", "")
+	blocked := testutil.CreateBeadFull(t, beadsDir, "agent-claim-blocked", "x", "")
 
-	if out, err := exec.Command("bd", "dep", "add", blocked, blocker).CombinedOutput(); err != nil {
+	if out, err := testutil.BdCmd(beadsDir, "dep", "add", blocked, blocker).CombinedOutput(); err != nil {
 		t.Fatalf("dep add: %v\n%s", err, out)
 	}
 
-	err := agent.Claim("", blocked)
+	err := agent.Claim("", beadsDir, blocked)
 	if err == nil {
 		t.Fatalf("Claim on blocked ticket: want error, got nil")
 	}
 	if !strings.Contains(err.Error(), "blocked by "+blocker) {
 		t.Errorf("error = %q, want mention of blocker %q", err.Error(), blocker)
 	}
-	if got := readStatus(t, blocked); got != "open" {
+	if got := readStatus(t, beadsDir, blocked); got != "open" {
 		t.Errorf("blocked ticket status = %q after refused claim, want open", got)
 	}
 
 	// Close the blocker — now the claim should succeed.
-	if out, err := exec.Command("bd", "close", blocker).CombinedOutput(); err != nil {
+	if out, err := testutil.BdCmd(beadsDir, "close", blocker).CombinedOutput(); err != nil {
 		t.Fatalf("close blocker: %v\n%s", err, out)
 	}
-	if err := agent.Claim("", blocked); err != nil {
+	if err := agent.Claim("", beadsDir, blocked); err != nil {
 		t.Fatalf("Claim after closing blocker: %v", err)
 	}
-	if got := readStatus(t, blocked); got != "in_progress" {
+	if got := readStatus(t, beadsDir, blocked); got != "in_progress" {
 		t.Errorf("after Claim, status = %q, want in_progress", got)
 	}
 }
 
 func TestClaimErrorsWhenAlreadyInProgress(t *testing.T) {
-	testutil.SharedBdDB(t)
-	ticket, _ := createBeadWithDescription(t, "agent-claim-already", "x")
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBeadFull(t, beadsDir, "agent-claim-already", "x", "")
 
-	if err := agent.Claim("", ticket); err != nil {
+	if err := agent.Claim("", beadsDir, ticket); err != nil {
 		t.Fatalf("first Claim: %v", err)
 	}
-	err := agent.Claim("", ticket)
+	err := agent.Claim("", beadsDir, ticket)
 	if err == nil {
 		t.Fatalf("second Claim: want error, got nil")
 	}
 	if !strings.Contains(err.Error(), "in_progress") {
 		t.Errorf("error message = %q, want mention of in_progress", err.Error())
 	}
-	if got := readStatus(t, ticket); got != "in_progress" {
+	if got := readStatus(t, beadsDir, ticket); got != "in_progress" {
 		t.Errorf("status changed after refused claim: %q, want in_progress", got)
 	}
 }
 
 // helpers
 
-func readStatus(t *testing.T, ticket string) string {
+func readStatus(t *testing.T, beadsDir, ticket string) string {
 	t.Helper()
-	out, err := exec.Command("bd", "--json", "show", ticket).Output()
+	out, err := testutil.BdCmd(beadsDir, "--json", "show", ticket).Output()
 	if err != nil {
 		t.Fatalf("bd show %s: %v", ticket, err)
 	}
@@ -283,17 +291,6 @@ func readStatus(t *testing.T, ticket string) string {
 		t.Fatalf("bd show %s: no rows", ticket)
 	}
 	return rows[0].Status
-}
-
-func createBeadWithDescription(t *testing.T, title, description string) (id, gotTitle string) {
-	t.Helper()
-	out, err := exec.Command("bd", "create", title, "-d", description, "--silent").Output()
-	if err != nil {
-		t.Fatalf("bd create: %v", err)
-	}
-	id = strings.TrimSpace(string(out))
-	t.Cleanup(func() { _ = exec.Command("bd", "close", id).Run() })
-	return id, title
 }
 
 func mustEnv(t *testing.T, beadsDir, ticket string) string {

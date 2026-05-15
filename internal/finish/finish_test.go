@@ -13,19 +13,20 @@ import (
 )
 
 func TestFinishRemovesWorktreeAndEnvAndClosesBead(t *testing.T) {
-	beadsDir := testutil.SharedBdDB(t)
-	parent := createBead(t, "finish-removes-parent")
-	child := createChildBead(t, "finish-removes-child", parent)
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	parent := testutil.CreateBead(t, beadsDir, "finish-removes-parent")
+	child := testutil.CreateChildBead(t, beadsDir, "finish-removes-child", parent)
 	bare := bareRepo(t, "main")
 
-	mustRunTicket(t, "dir", "worktree", child, bare)
+	mustRunTicket(t, beadsDir, "dir", "worktree", child, bare)
 	if _, err := env.Create("", beadsDir, child); err != nil {
 		t.Fatalf("env.Create: %v", err)
 	}
 	childWT := worktreePath(bare, child)
 	parentWT := worktreePath(bare, parent)
 
-	if _, stderr, code := testutil.RunTicket(t, "finish", child); code != 0 {
+	if _, stderr, code := testutil.RunTicketIn(t, beadsDir, "finish", child); code != 0 {
 		t.Fatalf("finish exit=%d stderr=%q", code, stderr)
 	}
 
@@ -39,23 +40,24 @@ func TestFinishRemovesWorktreeAndEnvAndClosesBead(t *testing.T) {
 	if _, err := os.Stat(envPath); !os.IsNotExist(err) {
 		t.Errorf("env folder %s still exists after finish (err=%v)", envPath, err)
 	}
-	if status := beadStatus(t, child); status != "closed" {
+	if status := beadStatus(t, beadsDir, child); status != "closed" {
 		t.Errorf("bead status=%q want closed", status)
 	}
 }
 
 func TestFinishRefusesDirtyWorktree(t *testing.T) {
-	testutil.SharedBdDB(t)
-	ticket := createBead(t, "finish-dirty")
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBead(t, beadsDir, "finish-dirty")
 	bare := bareRepo(t, "main")
 
-	mustRunTicket(t, "dir", "worktree", ticket, bare)
+	mustRunTicket(t, beadsDir, "dir", "worktree", ticket, bare)
 	wt := worktreePath(bare, ticket)
 	if err := os.WriteFile(filepath.Join(wt, "dirty.txt"), []byte("x"), 0o644); err != nil {
 		t.Fatalf("write dirty file: %v", err)
 	}
 
-	_, stderr, code := testutil.RunTicket(t, "finish", ticket)
+	_, stderr, code := testutil.RunTicketIn(t, beadsDir, "finish", ticket)
 	if code == 0 {
 		t.Fatal("finish succeeded on dirty worktree, want error")
 	}
@@ -68,16 +70,17 @@ func TestFinishRefusesDirtyWorktree(t *testing.T) {
 }
 
 func TestFinishRefusesDetachedHead(t *testing.T) {
-	testutil.SharedBdDB(t)
-	ticket := createBead(t, "finish-detached")
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBead(t, beadsDir, "finish-detached")
 	bare := bareRepo(t, "main")
 
-	mustRunTicket(t, "dir", "worktree", ticket, bare)
+	mustRunTicket(t, beadsDir, "dir", "worktree", ticket, bare)
 	wt := worktreePath(bare, ticket)
 	sha := gitOut(t, wt, "rev-parse", "HEAD")
 	gitDo(t, wt, "checkout", "-q", "--detach", sha)
 
-	_, stderr, code := testutil.RunTicket(t, "finish", ticket)
+	_, stderr, code := testutil.RunTicketIn(t, beadsDir, "finish", ticket)
 	if code == 0 {
 		t.Fatal("finish succeeded on detached HEAD, want error")
 	}
@@ -87,12 +90,13 @@ func TestFinishRefusesDetachedHead(t *testing.T) {
 }
 
 func TestFinishFastForwardsOntoAdvancedParent(t *testing.T) {
-	testutil.SharedBdDB(t)
-	parent := createBead(t, "finish-ff-parent")
-	child := createChildBead(t, "finish-ff-child", parent)
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	parent := testutil.CreateBead(t, beadsDir, "finish-ff-parent")
+	child := testutil.CreateChildBead(t, beadsDir, "finish-ff-child", parent)
 	bare := bareRepo(t, "main")
 
-	mustRunTicket(t, "dir", "worktree", child, bare)
+	mustRunTicket(t, beadsDir, "dir", "worktree", child, bare)
 	parentWT := worktreePath(bare, parent)
 
 	// Advance the parent branch; the child's branch is still at the old
@@ -102,7 +106,7 @@ func TestFinishFastForwardsOntoAdvancedParent(t *testing.T) {
 
 	// We expect git worktree remove to fire next — so capture the child
 	// branch SHA from the bare repo's ref after finish, not from the wt.
-	if _, stderr, code := testutil.RunTicket(t, "finish", child); code != 0 {
+	if _, stderr, code := testutil.RunTicketIn(t, beadsDir, "finish", child); code != 0 {
 		t.Fatalf("finish exit=%d stderr=%q", code, stderr)
 	}
 
@@ -113,12 +117,13 @@ func TestFinishFastForwardsOntoAdvancedParent(t *testing.T) {
 }
 
 func TestFinishAdvancesParentBranchToChildTip(t *testing.T) {
-	testutil.SharedBdDB(t)
-	parent := createBead(t, "finish-advance-parent")
-	child := createChildBead(t, "finish-advance-child", parent)
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	parent := testutil.CreateBead(t, beadsDir, "finish-advance-parent")
+	child := testutil.CreateChildBead(t, beadsDir, "finish-advance-child", parent)
 	bare := bareRepo(t, "main")
 
-	mustRunTicket(t, "dir", "worktree", child, bare)
+	mustRunTicket(t, beadsDir, "dir", "worktree", child, bare)
 	parentWT := worktreePath(bare, parent)
 	childWT := worktreePath(bare, child)
 
@@ -126,7 +131,7 @@ func TestFinishAdvancesParentBranchToChildTip(t *testing.T) {
 	advanceBranch(t, childWT)
 	childTip := gitOut(t, childWT, "rev-parse", "HEAD")
 
-	if _, stderr, code := testutil.RunTicket(t, "finish", child); code != 0 {
+	if _, stderr, code := testutil.RunTicketIn(t, beadsDir, "finish", child); code != 0 {
 		t.Fatalf("finish exit=%d stderr=%q", code, stderr)
 	}
 
@@ -141,12 +146,13 @@ func TestFinishAdvancesParentBranchToChildTip(t *testing.T) {
 }
 
 func TestFinishRebasesCleanlyDivergedBranch(t *testing.T) {
-	testutil.SharedBdDB(t)
-	parent := createBead(t, "finish-diverge-clean-parent")
-	child := createChildBead(t, "finish-diverge-clean-child", parent)
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	parent := testutil.CreateBead(t, beadsDir, "finish-diverge-clean-parent")
+	child := testutil.CreateChildBead(t, beadsDir, "finish-diverge-clean-child", parent)
 	bare := bareRepo(t, "main")
 
-	mustRunTicket(t, "dir", "worktree", child, bare)
+	mustRunTicket(t, beadsDir, "dir", "worktree", child, bare)
 	parentWT := worktreePath(bare, parent)
 	childWT := worktreePath(bare, child)
 
@@ -155,9 +161,9 @@ func TestFinishRebasesCleanlyDivergedBranch(t *testing.T) {
 	advanceBranch(t, parentWT)
 	advanceBranch(t, childWT)
 
-	mustRunTicket(t, "finish", child)
+	mustRunTicket(t, beadsDir, "finish", child)
 
-	if status := beadStatus(t, child); status != "closed" {
+	if status := beadStatus(t, beadsDir, child); status != "closed" {
 		t.Errorf("bead status=%q want closed after successful finish", status)
 	}
 	if _, err := os.Stat(childWT); !os.IsNotExist(err) {
@@ -172,12 +178,13 @@ func TestFinishRebasesCleanlyDivergedBranch(t *testing.T) {
 }
 
 func TestFinishPausesOnConflictAndResumesWithContinue(t *testing.T) {
-	testutil.SharedBdDB(t)
-	parent := createBead(t, "finish-diverge-conflict-parent")
-	child := createChildBead(t, "finish-diverge-conflict-child", parent)
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	parent := testutil.CreateBead(t, beadsDir, "finish-diverge-conflict-parent")
+	child := testutil.CreateChildBead(t, beadsDir, "finish-diverge-conflict-child", parent)
 	bare := bareRepo(t, "main")
 
-	mustRunTicket(t, "dir", "worktree", child, bare)
+	mustRunTicket(t, beadsDir, "dir", "worktree", child, bare)
 	parentWT := worktreePath(bare, parent)
 	childWT := worktreePath(bare, child)
 
@@ -186,7 +193,7 @@ func TestFinishPausesOnConflictAndResumesWithContinue(t *testing.T) {
 	writeAndCommit(t, parentWT, "shared.txt", "parent line\n", "parent edit")
 	writeAndCommit(t, childWT, "shared.txt", "child line\n", "child edit")
 
-	_, stderr, code := testutil.RunTicket(t, "finish", child)
+	_, stderr, code := testutil.RunTicketIn(t, beadsDir, "finish", child)
 	if code == 0 {
 		t.Fatal("finish succeeded on conflicting rebase, want error")
 	}
@@ -197,7 +204,7 @@ func TestFinishPausesOnConflictAndResumesWithContinue(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(childWT, ".git")); err != nil {
 		t.Errorf("child worktree gone despite refused finish: %v", err)
 	}
-	if status := beadStatus(t, child); status != "open" {
+	if status := beadStatus(t, beadsDir, child); status != "open" {
 		t.Errorf("bead status=%q want still open after paused finish", status)
 	}
 	if !gitDirHasRebase(t, childWT) {
@@ -206,7 +213,7 @@ func TestFinishPausesOnConflictAndResumesWithContinue(t *testing.T) {
 
 	// Without --continue, a second invocation should refuse because the
 	// rebase is still in progress.
-	_, stderr, code = testutil.RunTicket(t, "finish", child)
+	_, stderr, code = testutil.RunTicketIn(t, beadsDir, "finish", child)
 	if code == 0 {
 		t.Fatal("finish succeeded with rebase still in progress, want error")
 	}
@@ -221,9 +228,9 @@ func TestFinishPausesOnConflictAndResumesWithContinue(t *testing.T) {
 	gitDo(t, childWT, "add", "shared.txt")
 
 	// Resume.
-	mustRunTicket(t, "finish", child, "--continue")
+	mustRunTicket(t, beadsDir, "finish", child, "--continue")
 
-	if status := beadStatus(t, child); status != "closed" {
+	if status := beadStatus(t, beadsDir, child); status != "closed" {
 		t.Errorf("bead status=%q want closed after --continue", status)
 	}
 	if _, err := os.Stat(childWT); !os.IsNotExist(err) {
@@ -232,14 +239,15 @@ func TestFinishPausesOnConflictAndResumesWithContinue(t *testing.T) {
 }
 
 func TestFinishContinueWithoutPausedRebase(t *testing.T) {
-	testutil.SharedBdDB(t)
-	parent := createBead(t, "finish-continue-nothing-parent")
-	child := createChildBead(t, "finish-continue-nothing-child", parent)
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	parent := testutil.CreateBead(t, beadsDir, "finish-continue-nothing-parent")
+	child := testutil.CreateChildBead(t, beadsDir, "finish-continue-nothing-child", parent)
 	bare := bareRepo(t, "main")
-	mustRunTicket(t, "dir", "worktree", child, bare)
+	mustRunTicket(t, beadsDir, "dir", "worktree", child, bare)
 	advanceBranch(t, worktreePath(bare, child))
 
-	_, stderr, code := testutil.RunTicket(t, "finish", child, "--continue")
+	_, stderr, code := testutil.RunTicketIn(t, beadsDir, "finish", child, "--continue")
 	if code == 0 {
 		t.Fatal("finish --continue succeeded with no paused rebase, want error")
 	}
@@ -266,39 +274,17 @@ func gitDirHasRebase(t *testing.T, wt string) bool {
 
 // --- helpers ---
 
-func mustRunTicket(t *testing.T, args ...string) {
+func mustRunTicket(t *testing.T, beadsDir string, args ...string) {
 	t.Helper()
-	_, stderr, code := testutil.RunTicket(t, args...)
+	_, stderr, code := testutil.RunTicketIn(t, beadsDir, args...)
 	if code != 0 {
 		t.Fatalf("ticket %v exit=%d stderr=%q", args, code, stderr)
 	}
 }
 
-func createBead(t *testing.T, title string) string {
+func beadStatus(t *testing.T, beadsDir, id string) string {
 	t.Helper()
-	out, err := exec.Command("bd", "create", title, "--silent").Output()
-	if err != nil {
-		t.Fatalf("bd create: %v", err)
-	}
-	id := strings.TrimSpace(string(out))
-	t.Cleanup(func() { _ = exec.Command("bd", "close", id).Run() })
-	return id
-}
-
-func createChildBead(t *testing.T, title, parent string) string {
-	t.Helper()
-	out, err := exec.Command("bd", "create", title, "--parent", parent, "--silent").Output()
-	if err != nil {
-		t.Fatalf("bd create child: %v", err)
-	}
-	id := strings.TrimSpace(string(out))
-	t.Cleanup(func() { _ = exec.Command("bd", "close", id).Run() })
-	return id
-}
-
-func beadStatus(t *testing.T, id string) string {
-	t.Helper()
-	out, err := exec.Command("bd", "--json", "show", id).Output()
+	out, err := testutil.BdCmd(beadsDir, "--json", "show", id).Output()
 	if err != nil {
 		t.Fatalf("bd show: %v", err)
 	}
@@ -330,21 +316,17 @@ func bareRepo(t *testing.T, defaultBranch string) string {
 	envv := gitEnv()
 	gitIn := func(dir string, args ...string) string {
 		t.Helper()
-		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-		cmd.Env = envv
-		out, err := cmd.CombinedOutput()
+		out, err := runGitCmd(dir, envv, args...)
 		if err != nil {
 			t.Fatalf("git -C %s %v: %v\n%s", dir, args, err, out)
 		}
-		return strings.TrimSpace(string(out))
+		return strings.TrimSpace(out)
 	}
 	gitIn(source, "init", "-q", "-b", defaultBranch)
 	gitIn(source, "commit", "--allow-empty", "-q", "-m", "init")
 
 	bare := filepath.Join(parent, "repo.git")
-	cloneCmd := exec.Command("git", "clone", "--bare", source, bare)
-	cloneCmd.Env = envv
-	if out, err := cloneCmd.CombinedOutput(); err != nil {
+	if out, err := runGitCmd("", envv, "clone", "--bare", source, bare); err != nil {
 		t.Fatalf("git clone --bare: %v\n%s", err, out)
 	}
 	abs, err := filepath.Abs(bare)
@@ -356,22 +338,18 @@ func bareRepo(t *testing.T, defaultBranch string) string {
 
 func gitDo(t *testing.T, wt string, args ...string) {
 	t.Helper()
-	cmd := exec.Command("git", append([]string{"-C", wt}, args...)...)
-	cmd.Env = gitEnv()
-	if out, err := cmd.CombinedOutput(); err != nil {
+	if out, err := runGitCmd(wt, gitEnv(), args...); err != nil {
 		t.Fatalf("git %v in %s: %v\n%s", args, wt, err, out)
 	}
 }
 
 func gitOut(t *testing.T, wt string, args ...string) string {
 	t.Helper()
-	cmd := exec.Command("git", append([]string{"-C", wt}, args...)...)
-	cmd.Env = gitEnv()
-	out, err := cmd.Output()
+	out, err := runGitCmd(wt, gitEnv(), args...)
 	if err != nil {
 		t.Fatalf("git %v in %s: %v", args, wt, err)
 	}
-	return strings.TrimSpace(string(out))
+	return strings.TrimSpace(out)
 }
 
 // writeAndCommit creates/overwrites a single file with body, stages it, and
@@ -406,4 +384,17 @@ func gitEnv() []string {
 		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",
 		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com",
 	)
+}
+
+func runGitCmd(dir string, env []string, args ...string) (string, error) {
+	var full []string
+	if dir != "" {
+		full = append([]string{"-C", dir}, args...)
+	} else {
+		full = args
+	}
+	cmd := exec.Command("git", full...)
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	return string(out), err
 }

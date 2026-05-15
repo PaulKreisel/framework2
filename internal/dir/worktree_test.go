@@ -12,15 +12,16 @@ import (
 )
 
 func TestDirWorktreeRootBeadOnMain(t *testing.T) {
-	testutil.SharedBdDB(t)
-	ticket := createBead(t, "wt-root-main")
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBead(t, beadsDir, "wt-root-main")
 	bare := bareRepo(t, "main")
 
-	_, stderr, code := testutil.RunTicket(t, "dir", "worktree", ticket, bare)
+	_, stderr, code := testutil.RunTicketIn(t, beadsDir, "dir", "worktree", ticket, bare)
 	if code != 0 {
 		t.Fatalf("worktree exit=%d stderr=%q", code, stderr)
 	}
-	entries := listEntries(t, ticket)
+	entries := listEntries(t, beadsDir, ticket)
 	if len(entries) != 1 {
 		t.Fatalf("entries=%+v, want 1", entries)
 	}
@@ -44,15 +45,16 @@ func TestDirWorktreeRootBeadOnMain(t *testing.T) {
 }
 
 func TestDirWorktreeRootBeadOnMaster(t *testing.T) {
-	testutil.SharedBdDB(t)
-	ticket := createBead(t, "wt-root-master")
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBead(t, beadsDir, "wt-root-master")
 	bare := bareRepo(t, "master")
 
-	_, stderr, code := testutil.RunTicket(t, "dir", "worktree", ticket, bare)
+	_, stderr, code := testutil.RunTicketIn(t, beadsDir, "dir", "worktree", ticket, bare)
 	if code != 0 {
 		t.Fatalf("worktree exit=%d stderr=%q", code, stderr)
 	}
-	entries := listEntries(t, ticket)
+	entries := listEntries(t, beadsDir, ticket)
 	if len(entries) != 1 {
 		t.Fatalf("entries=%+v, want 1", entries)
 	}
@@ -62,17 +64,18 @@ func TestDirWorktreeRootBeadOnMaster(t *testing.T) {
 }
 
 func TestDirWorktreeCascadesToParent(t *testing.T) {
-	testutil.SharedBdDB(t)
-	parent := createBead(t, "wt-cascade-parent")
-	child := createChildBead(t, "wt-cascade-child", parent)
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	parent := testutil.CreateBead(t, beadsDir, "wt-cascade-parent")
+	child := testutil.CreateChildBead(t, beadsDir, "wt-cascade-child", parent)
 	bare := bareRepo(t, "main")
 
-	_, stderr, code := testutil.RunTicket(t, "dir", "worktree", child, bare)
+	_, stderr, code := testutil.RunTicketIn(t, beadsDir, "dir", "worktree", child, bare)
 	if code != 0 {
 		t.Fatalf("worktree exit=%d stderr=%q", code, stderr)
 	}
 
-	parentEntries := listEntries(t, parent)
+	parentEntries := listEntries(t, beadsDir, parent)
 	if len(parentEntries) != 1 {
 		t.Fatalf("parent entries=%+v, want 1 (cascade should have created parent's worktree first)", parentEntries)
 	}
@@ -83,7 +86,7 @@ func TestDirWorktreeCascadesToParent(t *testing.T) {
 		t.Errorf("parent worktree HEAD %q != bare main %q", sha, bareBranchSHA(t, bare, "main"))
 	}
 
-	childEntries := listEntries(t, child)
+	childEntries := listEntries(t, beadsDir, child)
 	if len(childEntries) != 1 {
 		t.Fatalf("child entries=%+v, want 1", childEntries)
 	}
@@ -96,15 +99,16 @@ func TestDirWorktreeCascadesToParent(t *testing.T) {
 }
 
 func TestDirWorktreeStopsCascadeAtLinkedAncestor(t *testing.T) {
-	testutil.SharedBdDB(t)
-	parent := createBead(t, "wt-stop-parent")
-	child := createChildBead(t, "wt-stop-child", parent)
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	parent := testutil.CreateBead(t, beadsDir, "wt-stop-parent")
+	child := testutil.CreateChildBead(t, beadsDir, "wt-stop-child", parent)
 	bare := bareRepo(t, "main")
 
-	if _, stderr, code := testutil.RunTicket(t, "dir", "worktree", parent, bare); code != 0 {
+	if _, stderr, code := testutil.RunTicketIn(t, beadsDir, "dir", "worktree", parent, bare); code != 0 {
 		t.Fatalf("parent worktree: exit=%d stderr=%q", code, stderr)
 	}
-	parentEntries := listEntries(t, parent)
+	parentEntries := listEntries(t, beadsDir, parent)
 	if len(parentEntries) != 1 {
 		t.Fatalf("parent entries after first call=%+v", parentEntries)
 	}
@@ -112,16 +116,16 @@ func TestDirWorktreeStopsCascadeAtLinkedAncestor(t *testing.T) {
 
 	advanceBranch(t, parentEntries[0].Path)
 
-	if _, stderr, code := testutil.RunTicket(t, "dir", "worktree", child, bare); code != 0 {
+	if _, stderr, code := testutil.RunTicketIn(t, beadsDir, "dir", "worktree", child, bare); code != 0 {
 		t.Fatalf("child worktree: exit=%d stderr=%q", code, stderr)
 	}
 
-	parentEntriesAfter := listEntries(t, parent)
+	parentEntriesAfter := listEntries(t, beadsDir, parent)
 	if len(parentEntriesAfter) != 1 {
 		t.Errorf("parent entries changed: want 1, got %+v", parentEntriesAfter)
 	}
 
-	childEntries := listEntries(t, child)
+	childEntries := listEntries(t, beadsDir, child)
 	if len(childEntries) != 1 {
 		t.Fatalf("child entries=%+v, want 1", childEntries)
 	}
@@ -136,35 +140,37 @@ func TestDirWorktreeStopsCascadeAtLinkedAncestor(t *testing.T) {
 }
 
 func TestDirWorktreeIdempotent(t *testing.T) {
-	testutil.SharedBdDB(t)
-	ticket := createBead(t, "wt-idempotent")
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBead(t, beadsDir, "wt-idempotent")
 	bare := bareRepo(t, "main")
 
-	if _, stderr, code := testutil.RunTicket(t, "dir", "worktree", ticket, bare); code != 0 {
+	if _, stderr, code := testutil.RunTicketIn(t, beadsDir, "dir", "worktree", ticket, bare); code != 0 {
 		t.Fatalf("first worktree: exit=%d stderr=%q", code, stderr)
 	}
-	if _, stderr, code := testutil.RunTicket(t, "dir", "worktree", ticket, bare); code != 0 {
+	if _, stderr, code := testutil.RunTicketIn(t, beadsDir, "dir", "worktree", ticket, bare); code != 0 {
 		t.Fatalf("second worktree: exit=%d stderr=%q", code, stderr)
 	}
-	entries := listEntries(t, ticket)
+	entries := listEntries(t, beadsDir, ticket)
 	if len(entries) != 1 {
 		t.Errorf("entries=%+v, want exactly 1 after idempotent re-run", entries)
 	}
 }
 
 func TestDirWorktreeNotAGitRepo(t *testing.T) {
-	testutil.SharedBdDB(t)
-	ticket := createBead(t, "wt-not-git")
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBead(t, beadsDir, "wt-not-git")
 	notRepo := t.TempDir()
 
-	_, stderr, code := testutil.RunTicket(t, "dir", "worktree", ticket, notRepo)
+	_, stderr, code := testutil.RunTicketIn(t, beadsDir, "dir", "worktree", ticket, notRepo)
 	if code == 0 {
 		t.Fatal("worktree succeeded on non-git path, want error")
 	}
 	if !strings.Contains(stderr, "not a git repository") {
 		t.Errorf("stderr=%q want to mention 'not a git repository'", stderr)
 	}
-	entries := listEntries(t, ticket)
+	entries := listEntries(t, beadsDir, ticket)
 	if len(entries) != 0 {
 		t.Errorf("entries=%+v want none", entries)
 	}
@@ -211,17 +217,6 @@ func bareRepo(t *testing.T, defaultBranch string) string {
 		t.Fatalf("abs: %v", err)
 	}
 	return abs
-}
-
-func createChildBead(t *testing.T, title, parent string) string {
-	t.Helper()
-	out, err := exec.Command("bd", "create", title, "--parent", parent, "--silent").Output()
-	if err != nil {
-		t.Fatalf("bd create child: %v", err)
-	}
-	id := strings.TrimSpace(string(out))
-	t.Cleanup(func() { _ = exec.Command("bd", "close", id).Run() })
-	return id
 }
 
 func worktreeOnBranch(t *testing.T, wt, branch string) bool {

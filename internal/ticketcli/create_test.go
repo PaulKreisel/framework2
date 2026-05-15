@@ -2,7 +2,6 @@ package ticketcli_test
 
 import (
 	"encoding/json"
-	"os/exec"
 	"strings"
 	"testing"
 
@@ -10,10 +9,11 @@ import (
 )
 
 func TestCreateChild(t *testing.T) {
-	_ = testutil.SharedBdDB(t)
-	parent := createBead(t, "create-child-parent")
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	parent := testutil.CreateBead(t, beadsDir, "create-child-parent")
 
-	out, errOut, code := testutil.RunTicket(t, "create", "child", parent, "child of parent")
+	out, errOut, code := testutil.RunTicketIn(t, beadsDir, "create", "child", parent, "child of parent")
 	if code != 0 {
 		t.Fatalf("ticket create child: exit=%d stderr=%q", code, errOut)
 	}
@@ -21,88 +21,92 @@ func TestCreateChild(t *testing.T) {
 	if childID == "" {
 		t.Fatalf("create child produced no id; stderr=%q", errOut)
 	}
-	t.Cleanup(func() { _ = exec.Command("bd", "close", childID).Run() })
+	t.Cleanup(func() { _ = testutil.BdCmd(beadsDir, "close", childID).Run() })
 
-	if got := loadParent(t, childID); got != parent {
+	if got := loadParent(t, beadsDir, childID); got != parent {
 		t.Errorf("child %s parent = %q, want %q", childID, got, parent)
 	}
 }
 
 func TestCreateFollowupUnderSharedParent(t *testing.T) {
-	_ = testutil.SharedBdDB(t)
-	parent := createBead(t, "create-followup-parent")
-	out, errOut, code := testutil.RunTicket(t, "create", "child", parent, "current for followup")
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	parent := testutil.CreateBead(t, beadsDir, "create-followup-parent")
+	out, errOut, code := testutil.RunTicketIn(t, beadsDir, "create", "child", parent, "current for followup")
 	if code != 0 {
 		t.Fatalf("seed child: exit=%d stderr=%q", code, errOut)
 	}
 	current := strings.TrimSpace(out)
-	t.Cleanup(func() { _ = exec.Command("bd", "close", current).Run() })
+	t.Cleanup(func() { _ = testutil.BdCmd(beadsDir, "close", current).Run() })
 
-	out, errOut, code = testutil.RunTicket(t, "create", "followup", current, "the followup")
+	out, errOut, code = testutil.RunTicketIn(t, beadsDir, "create", "followup", current, "the followup")
 	if code != 0 {
 		t.Fatalf("ticket create followup: exit=%d stderr=%q", code, errOut)
 	}
 	followID := strings.TrimSpace(out)
-	t.Cleanup(func() { _ = exec.Command("bd", "close", followID).Run() })
+	t.Cleanup(func() { _ = testutil.BdCmd(beadsDir, "close", followID).Run() })
 
 	// followup must share current's parent AND be blocked by current.
-	if got := loadParent(t, followID); got != parent {
+	if got := loadParent(t, beadsDir, followID); got != parent {
 		t.Errorf("followup %s parent = %q, want %q (sibling of current)", followID, got, parent)
 	}
-	if !hasDependency(t, followID, current) {
+	if !hasDependency(t, beadsDir, followID, current) {
 		t.Errorf("followup %s missing dependency on %s", followID, current)
 	}
 }
 
 func TestCreateFollowupTopLevel(t *testing.T) {
-	_ = testutil.SharedBdDB(t)
-	current := createBead(t, "create-followup-no-parent")
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	current := testutil.CreateBead(t, beadsDir, "create-followup-no-parent")
 
-	out, errOut, code := testutil.RunTicket(t, "create", "followup", current, "top-level followup")
+	out, errOut, code := testutil.RunTicketIn(t, beadsDir, "create", "followup", current, "top-level followup")
 	if code != 0 {
 		t.Fatalf("ticket create followup: exit=%d stderr=%q", code, errOut)
 	}
 	followID := strings.TrimSpace(out)
-	t.Cleanup(func() { _ = exec.Command("bd", "close", followID).Run() })
+	t.Cleanup(func() { _ = testutil.BdCmd(beadsDir, "close", followID).Run() })
 
-	if got := loadParent(t, followID); got != "" {
+	if got := loadParent(t, beadsDir, followID); got != "" {
 		t.Errorf("followup unexpectedly has parent %q (current has none → top-level)", got)
 	}
-	if !hasDependency(t, followID, current) {
+	if !hasDependency(t, beadsDir, followID, current) {
 		t.Errorf("followup %s missing dependency on %s", followID, current)
 	}
 }
 
 func TestCreateFollowupNotBlocked(t *testing.T) {
-	_ = testutil.SharedBdDB(t)
-	parent := createBead(t, "create-followup-notblocked-parent")
-	out, errOut, code := testutil.RunTicket(t, "create", "child", parent, "current for notblocked")
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	parent := testutil.CreateBead(t, beadsDir, "create-followup-notblocked-parent")
+	out, errOut, code := testutil.RunTicketIn(t, beadsDir, "create", "child", parent, "current for notblocked")
 	if code != 0 {
 		t.Fatalf("seed child: exit=%d stderr=%q", code, errOut)
 	}
 	current := strings.TrimSpace(out)
-	t.Cleanup(func() { _ = exec.Command("bd", "close", current).Run() })
+	t.Cleanup(func() { _ = testutil.BdCmd(beadsDir, "close", current).Run() })
 
-	out, errOut, code = testutil.RunTicket(t, "create", "followup", current, "--not-blocked", "plain sibling")
+	out, errOut, code = testutil.RunTicketIn(t, beadsDir, "create", "followup", current, "--not-blocked", "plain sibling")
 	if code != 0 {
 		t.Fatalf("ticket create followup --not-blocked: exit=%d stderr=%q", code, errOut)
 	}
 	sib := strings.TrimSpace(out)
-	t.Cleanup(func() { _ = exec.Command("bd", "close", sib).Run() })
+	t.Cleanup(func() { _ = testutil.BdCmd(beadsDir, "close", sib).Run() })
 
-	if got := loadParent(t, sib); got != parent {
+	if got := loadParent(t, beadsDir, sib); got != parent {
 		t.Errorf("followup --not-blocked %s parent = %q, want %q", sib, got, parent)
 	}
-	if hasDependency(t, sib, current) {
+	if hasDependency(t, beadsDir, sib, current) {
 		t.Errorf("followup --not-blocked %s should not depend on %s", sib, current)
 	}
 }
 
 func TestCreateChildRejectsNotBlocked(t *testing.T) {
-	_ = testutil.SharedBdDB(t)
-	current := createBead(t, "create-child-rejects-flag")
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	current := testutil.CreateBead(t, beadsDir, "create-child-rejects-flag")
 
-	_, errOut, code := testutil.RunTicket(t, "create", "child", current, "--not-blocked", "x")
+	_, errOut, code := testutil.RunTicketIn(t, beadsDir, "create", "child", current, "--not-blocked", "x")
 	if code == 0 {
 		t.Fatalf("expected nonzero exit for --not-blocked on child")
 	}
@@ -112,10 +116,11 @@ func TestCreateChildRejectsNotBlocked(t *testing.T) {
 }
 
 func TestCreateUnknownRelation(t *testing.T) {
-	_ = testutil.SharedBdDB(t)
-	current := createBead(t, "create-unknown-rel")
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	current := testutil.CreateBead(t, beadsDir, "create-unknown-rel")
 
-	_, errOut, code := testutil.RunTicket(t, "create", "sibling", current, "x")
+	_, errOut, code := testutil.RunTicketIn(t, beadsDir, "create", "sibling", current, "x")
 	if code == 0 {
 		t.Fatalf("expected nonzero exit for unknown relation")
 	}
@@ -125,9 +130,9 @@ func TestCreateUnknownRelation(t *testing.T) {
 }
 
 // loadParent returns the parent id of ticketID, or "" if it has none.
-func loadParent(t *testing.T, ticketID string) string {
+func loadParent(t *testing.T, beadsDir, ticketID string) string {
 	t.Helper()
-	out, err := exec.Command("bd", "--json", "show", ticketID).Output()
+	out, err := testutil.BdCmd(beadsDir, "--json", "show", ticketID).Output()
 	if err != nil {
 		t.Fatalf("bd show %s: %v", ticketID, err)
 	}
@@ -145,9 +150,9 @@ func loadParent(t *testing.T, ticketID string) string {
 
 // hasDependency reports whether ticketID depends on otherID (any
 // dependency_type).
-func hasDependency(t *testing.T, ticketID, otherID string) bool {
+func hasDependency(t *testing.T, beadsDir, ticketID, otherID string) bool {
 	t.Helper()
-	out, err := exec.Command("bd", "--json", "show", ticketID).Output()
+	out, err := testutil.BdCmd(beadsDir, "--json", "show", ticketID).Output()
 	if err != nil {
 		t.Fatalf("bd show %s: %v", ticketID, err)
 	}

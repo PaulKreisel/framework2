@@ -20,14 +20,14 @@ type Entry struct {
 }
 
 // Link appends an entry for path to the ticket's dirs metadata.
-func Link(db, ticketID, path string) error {
-	return link(db, ticketID, path, "")
+func Link(db, beadsDir, ticketID, path string) error {
+	return link(db, beadsDir, ticketID, path, "")
 }
 
 // link is the shared append-an-entry path used by Link and the worktree flow.
 // bareRepo is recorded on the new entry when non-empty.
-func link(db, ticketID, path, bareRepo string) error {
-	entries, err := load(db, ticketID)
+func link(db, beadsDir, ticketID, path, bareRepo string) error {
+	entries, err := load(db, beadsDir, ticketID)
 	if err != nil {
 		return err
 	}
@@ -42,12 +42,12 @@ func link(db, ticketID, path, bareRepo string) error {
 	}
 	entry.BareRepo = bareRepo
 	entries = append(entries, *entry)
-	return save(db, ticketID, entries)
+	return save(db, beadsDir, ticketID, entries)
 }
 
 // Remove drops the entry whose path matches the argument.
-func Remove(db, ticketID, path string) error {
-	entries, err := load(db, ticketID)
+func Remove(db, beadsDir, ticketID, path string) error {
+	entries, err := load(db, beadsDir, ticketID)
 	if err != nil {
 		return err
 	}
@@ -62,12 +62,12 @@ func Remove(db, ticketID, path string) error {
 		return fmt.Errorf("path not linked to %s: %s", ticketID, path)
 	}
 	entries = append(entries[:found], entries[found+1:]...)
-	return save(db, ticketID, entries)
+	return save(db, beadsDir, ticketID, entries)
 }
 
 // List writes the ticket's dir entries as indented JSON.
-func List(db, ticketID string, out io.Writer) error {
-	entries, err := load(db, ticketID)
+func List(db, beadsDir, ticketID string, out io.Writer) error {
+	entries, err := load(db, beadsDir, ticketID)
 	if err != nil {
 		return err
 	}

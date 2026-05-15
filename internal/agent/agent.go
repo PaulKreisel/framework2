@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 
+	"framework2/internal/bdcli"
 	"framework2/internal/dir"
 )
 
@@ -71,7 +72,7 @@ func Run(db, beadsDir, ticketID string, mode Mode) error {
 		return fmt.Errorf("env path is not a directory: %s", envPath)
 	}
 
-	if err := Claim(db, ticketID); err != nil {
+	if err := Claim(db, beadsDir, ticketID); err != nil {
 		return err
 	}
 
@@ -84,7 +85,7 @@ func Run(db, beadsDir, ticketID string, mode Mode) error {
 
 	var extraArgs []string
 	for {
-		prompt, err := Regenerate(db, envPath, ticketID, mode)
+		prompt, err := Regenerate(db, beadsDir, envPath, ticketID, mode)
 		if err != nil {
 			return fmt.Errorf("regenerate env context: %w", err)
 		}
@@ -121,12 +122,12 @@ func Run(db, beadsDir, ticketID string, mode Mode) error {
 // state of the ticket and its linked dirs, and returns the system prompt the
 // wrapper should pass via --append-system-prompt. Idempotent. Exported so
 // tests can drive the regen step without forking AgentCommand.
-func Regenerate(db, envPath, ticketID string, mode Mode) (string, error) {
-	issue, err := loadIssue(db, ticketID)
+func Regenerate(db, beadsDir, envPath, ticketID string, mode Mode) (string, error) {
+	issue, err := loadIssue(db, beadsDir, ticketID)
 	if err != nil {
 		return "", err
 	}
-	dirs, err := dir.Load(db, ticketID)
+	dirs, err := dir.Load(db, beadsDir, ticketID)
 	if err != nil {
 		return "", err
 	}
@@ -157,8 +158,8 @@ type bdDependency struct {
 // `bd update --claim` (sets assignee to the current user, status to
 // in_progress). Refuses if the ticket is already in_progress, or if any of
 // its `blocks`-type dependencies are still open.
-func Claim(db, ticketID string) error {
-	issue, err := loadIssue(db, ticketID)
+func Claim(db, beadsDir, ticketID string) error {
+	issue, err := loadIssue(db, beadsDir, ticketID)
 	if err != nil {
 		return err
 	}
@@ -170,25 +171,15 @@ func Claim(db, ticketID string) error {
 			return fmt.Errorf("ticket %s is blocked by %s (status %s); refusing to claim", ticketID, dep.ID, dep.Status)
 		}
 	}
-	args := []string{}
-	if db != "" {
-		args = append(args, "--db", db)
-	}
-	args = append(args, "update", ticketID, "--claim")
-	out, err := exec.Command("bd", args...).CombinedOutput()
+	out, err := bdcli.Cmd(beadsDir, db, "update", ticketID, "--claim").CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("bd update %s --claim: %v: %s", ticketID, err, out)
 	}
 	return nil
 }
 
-func loadIssue(db, ticketID string) (*bdIssue, error) {
-	args := []string{}
-	if db != "" {
-		args = append(args, "--db", db)
-	}
-	args = append(args, "--json", "show", ticketID)
-	out, err := exec.Command("bd", args...).Output()
+func loadIssue(db, beadsDir, ticketID string) (*bdIssue, error) {
+	out, err := bdcli.Cmd(beadsDir, db, "--json", "show", ticketID).Output()
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
 			return nil, fmt.Errorf("bd show %s: %v: %s", ticketID, err, ee.Stderr)
@@ -287,12 +278,7 @@ func Syncback(db, beadsDir, ticketID string) error {
 		}
 		return fmt.Errorf("stat %s: %w", descPath, err)
 	}
-	args := []string{}
-	if db != "" {
-		args = append(args, "--db", db)
-	}
-	args = append(args, "update", ticketID, "--body-file", descPath)
-	out, err := exec.Command("bd", args...).CombinedOutput()
+	out, err := bdcli.Cmd(beadsDir, db, "update", ticketID, "--body-file", descPath).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("bd update %s --body-file: %v: %s", ticketID, err, out)
 	}

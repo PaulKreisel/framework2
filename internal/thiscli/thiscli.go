@@ -32,6 +32,12 @@ func Run(args []string, stdout, stderr io.Writer) int {
 // RunFrom is like Run but uses an explicit starting directory. Exposed so
 // tests can avoid os.Chdir.
 func RunFrom(cwd string, args []string, stdout, stderr io.Writer) int {
+	return RunFromWithOptions(ticketcli.Options{}, cwd, args, stdout, stderr)
+}
+
+// RunFromWithOptions is like RunFrom but lets callers pin BEADS_DIR via
+// ticketcli.Options. Used by tests driving per-test .beads/ directories.
+func RunFromWithOptions(opts ticketcli.Options, cwd string, args []string, stdout, stderr io.Writer) int {
 	id, _, err := Discover(cwd)
 	if err != nil {
 		fmt.Fprintln(stderr, "this:", err)
@@ -44,7 +50,7 @@ func RunFrom(cwd string, args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	forwarded := append([]string{"--ticket", id}, args...)
-	return ticketcli.Run(forwarded, stdout, stderr)
+	return ticketcli.RunWithOptions(opts, forwarded, stdout, stderr)
 }
 
 // Discover walks up from start looking for a .ticket-id marker file. Returns
