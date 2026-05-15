@@ -18,17 +18,16 @@ type Relation int
 const (
 	// Child: new bead is a child of current (current parents new).
 	Child Relation = iota
-	// Followup: like Sibling (new shares current's parent — top-level if
-	// none), but additionally current blocks new.
+	// Followup: new bead shares current's parent (top-level if current has
+	// none). By default current blocks new; pass blocked=false to skip the
+	// dep (i.e. a plain sibling).
 	Followup
-	// Sibling: new bead shares current's parent. If current has no parent,
-	// new is created top-level (no parent), no error.
-	Sibling
 )
 
 // Run creates a new bead related to currentID by rel with the given title and
 // prints the new bead's id to stdout. db may be empty to use bd's default.
-func Run(db, currentID, title string, rel Relation, stdout io.Writer) error {
+// blocked is only consulted for Followup.
+func Run(db, currentID, title string, rel Relation, blocked bool, stdout io.Writer) error {
 	if currentID == "" {
 		return errors.New("ticket id required")
 	}
@@ -40,7 +39,7 @@ func Run(db, currentID, title string, rel Relation, stdout io.Writer) error {
 	switch rel {
 	case Child:
 		parent = currentID
-	case Followup, Sibling:
+	case Followup:
 		p, err := loadParent(db, currentID)
 		if err != nil {
 			return err
@@ -70,7 +69,7 @@ func Run(db, currentID, title string, rel Relation, stdout io.Writer) error {
 		return errors.New("bd create returned empty id")
 	}
 
-	if rel == Followup {
+	if rel == Followup && blocked {
 		depArgs := []string{}
 		if db != "" {
 			depArgs = append(depArgs, "--db", db)

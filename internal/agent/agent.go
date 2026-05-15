@@ -169,20 +169,35 @@ func writeDescription(envPath string, issue *bdIssue) error {
 	return os.WriteFile(filepath.Join(envPath, DescriptionFile), []byte(body), 0o644)
 }
 
-// BuildSystemPrompt returns the small mode-specific text appended to
-// claude's system prompt for this launch. Kept intentionally short: the
-// authoritative ticket content lives in description.md, not in the prompt.
+// BuildSystemPrompt returns the mode-specific text appended to claude's
+// system prompt for this launch. Lists the in-session commands and what
+// they're for; description.md holds the actual task content.
 func BuildSystemPrompt(ticketID, title string, mode Mode) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Ticket %s — %s\n", ticketID, title)
-	b.WriteString("IMPORTANT: Read description.md before everything else.\n")
+	fmt.Fprintf(&b, "Ticket %s — %s\n\n", ticketID, title)
 	switch mode {
 	case ModeSpec:
-		b.WriteString("You are spec'ing, not coding. Do not edit source files. ")
-		b.WriteString("Iterate on description.md (synced back to the bead description via `this env syncback`) ")
-		b.WriteString("and use `ticket create child|followup|sibling <title>` to spawn related beads.")
+		b.WriteString("You are spec'ing this ticket, not coding. Do not edit source files.\n")
+		b.WriteString("Read description.md first.\n\n")
+		b.WriteString("## Update the description of this ticket\n")
+		b.WriteString("* Modify the description.md file\n")
+		b.WriteString("* Run `this env syncback`\n\n")
+		b.WriteString("## Delegating work\n")
+		b.WriteString("### Within this ticket: create a child\n")
+		b.WriteString("`this create child <title>`\n\n")
+		b.WriteString("### For later\n")
+		b.WriteString("`this create followup <title>` — sibling of this ticket, blocked by it\n")
+		b.WriteString("`this create followup --not-blocked <title>` — sibling of this ticket, not blocked\n\n")
+		b.WriteString("## Adding a directory to this session\n")
+		b.WriteString("`this dir worktree <bare-repo>` (or `this dir link <path>`), then `this agent relaunch`.\n")
 	default:
-		b.WriteString("To add a directory to this session: `this dir worktree <bare-repo>` (or `this dir link <path>`), then `this agent relaunch`.")
+		b.WriteString("Execute the task described in description.md. Read it first.\n\n")
+		b.WriteString("## Delegating work for later\n")
+		b.WriteString("`this create followup <title>` — sibling of this ticket, blocked by it\n")
+		b.WriteString("`this create followup --not-blocked <title>` — sibling of this ticket, not blocked\n\n")
+		b.WriteString("## Adding a directory to this session\n")
+		b.WriteString("`this dir worktree <bare-repo>` (or `this dir link <path>`), then `this agent relaunch`.\n\n")
+		b.WriteString("(Side note: if you intentionally edit description.md, run `this env syncback` to persist it back to the bead.)\n")
 	}
 	return b.String()
 }

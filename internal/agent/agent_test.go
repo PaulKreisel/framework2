@@ -52,15 +52,24 @@ func TestBuildSystemPromptModes(t *testing.T) {
 		if !strings.Contains(p, "description.md") {
 			t.Errorf("prompt missing description.md reference:\n%s", p)
 		}
+		if !strings.Contains(p, "this create followup") {
+			t.Errorf("prompt missing `this create followup` reference:\n%s", p)
+		}
 	}
 	if !strings.Contains(specP, "spec'ing") {
 		t.Errorf("spec-mode prompt missing spec-mode guidance:\n%s", specP)
 	}
-	if !strings.Contains(specP, "ticket create") {
-		t.Errorf("spec-mode prompt missing ticket create reference:\n%s", specP)
+	if !strings.Contains(specP, "this create child") {
+		t.Errorf("spec-mode prompt missing `this create child` reference:\n%s", specP)
+	}
+	if !strings.Contains(specP, "this env syncback") {
+		t.Errorf("spec-mode prompt missing syncback reference:\n%s", specP)
 	}
 	if strings.Contains(agentP, "spec'ing") {
 		t.Errorf("agent-mode prompt should not mention spec'ing:\n%s", agentP)
+	}
+	if strings.Contains(agentP, "this create child") {
+		t.Errorf("agent-mode prompt should not advertise `this create child`:\n%s", agentP)
 	}
 	if !strings.Contains(agentP, "this agent relaunch") {
 		t.Errorf("agent-mode prompt missing relaunch hint:\n%s", agentP)

@@ -73,42 +73,41 @@ func TestCreateFollowupTopLevel(t *testing.T) {
 	}
 }
 
-func TestCreateSiblingWithParent(t *testing.T) {
+func TestCreateFollowupNotBlocked(t *testing.T) {
 	_ = testutil.SharedBdDB(t)
-	parent := createBead(t, "create-sibling-parent")
-	// Create the current ticket as a child of parent first.
-	out, errOut, code := testutil.RunTicket(t, "create", "child", parent, "current of sibling test")
+	parent := createBead(t, "create-followup-notblocked-parent")
+	out, errOut, code := testutil.RunTicket(t, "create", "child", parent, "current for notblocked")
 	if code != 0 {
 		t.Fatalf("seed child: exit=%d stderr=%q", code, errOut)
 	}
 	current := strings.TrimSpace(out)
 	t.Cleanup(func() { _ = exec.Command("bd", "close", current).Run() })
 
-	out, errOut, code = testutil.RunTicket(t, "create", "sibling", current, "the sibling")
+	out, errOut, code = testutil.RunTicket(t, "create", "followup", current, "--not-blocked", "plain sibling")
 	if code != 0 {
-		t.Fatalf("ticket create sibling: exit=%d stderr=%q", code, errOut)
+		t.Fatalf("ticket create followup --not-blocked: exit=%d stderr=%q", code, errOut)
 	}
 	sib := strings.TrimSpace(out)
 	t.Cleanup(func() { _ = exec.Command("bd", "close", sib).Run() })
 
 	if got := loadParent(t, sib); got != parent {
-		t.Errorf("sibling %s parent = %q, want %q", sib, got, parent)
+		t.Errorf("followup --not-blocked %s parent = %q, want %q", sib, got, parent)
+	}
+	if hasDependency(t, sib, current) {
+		t.Errorf("followup --not-blocked %s should not depend on %s", sib, current)
 	}
 }
 
-func TestCreateSiblingWithoutParent(t *testing.T) {
+func TestCreateChildRejectsNotBlocked(t *testing.T) {
 	_ = testutil.SharedBdDB(t)
-	current := createBead(t, "create-sibling-no-parent")
+	current := createBead(t, "create-child-rejects-flag")
 
-	out, errOut, code := testutil.RunTicket(t, "create", "sibling", current, "top-level sibling")
-	if code != 0 {
-		t.Fatalf("ticket create sibling: exit=%d stderr=%q", code, errOut)
+	_, errOut, code := testutil.RunTicket(t, "create", "child", current, "--not-blocked", "x")
+	if code == 0 {
+		t.Fatalf("expected nonzero exit for --not-blocked on child")
 	}
-	sib := strings.TrimSpace(out)
-	t.Cleanup(func() { _ = exec.Command("bd", "close", sib).Run() })
-
-	if got := loadParent(t, sib); got != "" {
-		t.Errorf("top-level sibling unexpectedly has parent %q", got)
+	if !strings.Contains(errOut, "--not-blocked is only valid for") {
+		t.Errorf("stderr missing message; got %q", errOut)
 	}
 }
 
@@ -116,7 +115,7 @@ func TestCreateUnknownRelation(t *testing.T) {
 	_ = testutil.SharedBdDB(t)
 	current := createBead(t, "create-unknown-rel")
 
-	_, errOut, code := testutil.RunTicket(t, "create", "nephew", current, "x")
+	_, errOut, code := testutil.RunTicket(t, "create", "sibling", current, "x")
 	if code == 0 {
 		t.Fatalf("expected nonzero exit for unknown relation")
 	}

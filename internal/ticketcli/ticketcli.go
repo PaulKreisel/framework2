@@ -49,10 +49,11 @@ subcommands:
                                           in spec mode (edits description.md and
                                           spawns related beads; does not code)
   create child <title>                    new bead as a child of the current ticket
-  create followup <title>                  sibling of the current ticket, additionally
-                                          blocked by it (top-level + dep if no parent)
-  create sibling <title>                  new bead under the current ticket's parent
-                                          (top-level if current has no parent)
+  create followup [--not-blocked] <title>
+                                          sibling of the current ticket (top-level if
+                                          current has no parent). By default current
+                                          blocks the new bead; --not-blocked skips
+                                          that dep.
   next [<id>]                             show ready descendants of a ticket
   finish [<id>]                           wrap up: rebase the ticket's worktrees
                                           onto their parent branch (FF when no
@@ -215,26 +216,39 @@ func runAgent(db, ticket string, args []string, mode agent.Mode) error {
 
 func runCreate(db, ticket string, args []string, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: ticket create <child|followup|sibling> <title>")
+		return errors.New("usage: ticket create <child|followup> [<id>] [--not-blocked] <title>")
 	}
+	sub, rest := args[0], args[1:]
+
+	// Extract --not-blocked flag from anywhere in rest; surrounding tokens
+	// are positionals (id, title) handled by resolveID below.
+	var notBlocked bool
+	positional := make([]string, 0, len(rest))
+	for _, a := range rest {
+		if a == "--not-blocked" {
+			notBlocked = true
+			continue
+		}
+		positional = append(positional, a)
+	}
+
 	var rel create.Relation
-	switch args[0] {
+	switch sub {
 	case "child":
+		if notBlocked {
+			return errors.New("--not-blocked is only valid for `create followup`")
+		}
 		rel = create.Child
 	case "followup":
 		rel = create.Followup
-	case "sibling":
-		rel = create.Sibling
 	default:
-		return fmt.Errorf("unknown create relation %q (want child|followup|sibling)", args[0])
+		return fmt.Errorf("unknown create relation %q (want child|followup)", sub)
 	}
-	// The current ticket id is required (via --ticket or positional). Title
-	// is the only true positional.
-	id, tail, err := resolveID(ticket, args[1:], 1, fmt.Sprintf("usage: ticket create %s [<id>] <title>", args[0]))
+	id, tail, err := resolveID(ticket, positional, 1, fmt.Sprintf("usage: ticket create %s [<id>] [--not-blocked] <title>", sub))
 	if err != nil {
 		return err
 	}
-	return create.Run(db, id, tail[0], rel, stdout)
+	return create.Run(db, id, tail[0], rel, !notBlocked, stdout)
 }
 
 func runFinish(db, ticket string, args []string, stdout io.Writer) error {
