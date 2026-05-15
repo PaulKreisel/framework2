@@ -1,6 +1,6 @@
 # framework2 — for agents
 
-Read [initial_prompt.md](initial_prompt.md) before starting work in this repo. It captures the design decisions and the reasoning behind them; the per-task *specifications* live in beads.
+Per-task specifications live in beads. Find what to work on with `bd ready`.
 
 ## Hard rules
 
