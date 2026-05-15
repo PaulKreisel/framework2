@@ -16,6 +16,7 @@ import (
 
 	"framework2/internal/bdcli"
 	"framework2/internal/dir"
+	"framework2/internal/env"
 )
 
 // AgentCommand is the binary execed by Run. Exported as a var so future work
@@ -44,12 +45,12 @@ const (
 // by `this env syncback` / `ticket env syncback`.
 const DescriptionFile = "description.md"
 
-// Run resolves the env folder for ticketID, regenerates the auto-managed
-// context files (description.md, .claude/settings.json), and then execs
-// AgentCommand from inside the env folder in a loop: after each exit, if a
-// [SignalFile] is present, the loop regenerates context and re-execs
-// AgentCommand with `--continue` plus the signal's args appended. The env
-// folder must already exist — use `ticket env <id>` first.
+// Run resolves the env folder for ticketID — creating it via [env.Create] if
+// it doesn't exist yet — regenerates the auto-managed context files
+// (description.md, .claude/settings.json), and then execs AgentCommand from
+// inside the env folder in a loop: after each exit, if a [SignalFile] is
+// present, the loop regenerates context and re-execs AgentCommand with
+// `--continue` plus the signal's args appended.
 //
 // While AgentCommand is running, its pid is recorded at <env>/[PIDFile] so
 // [Relaunch] can target it.
@@ -60,16 +61,9 @@ func Run(db, beadsDir, ticketID string, mode Mode) error {
 	if beadsDir == "" {
 		return errors.New("BEADS_DIR not set: cannot derive env root")
 	}
-	envPath := filepath.Join(beadsDir, "envs", ticketID)
-	info, err := os.Stat(envPath)
+	envPath, err := env.Create(db, beadsDir, ticketID)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return fmt.Errorf("env folder does not exist for %s: %s (run `ticket env %s` first)", ticketID, envPath, ticketID)
-		}
-		return fmt.Errorf("stat env dir: %w", err)
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("env path is not a directory: %s", envPath)
+		return fmt.Errorf("create env dir: %w", err)
 	}
 
 	if err := Claim(db, beadsDir, ticketID); err != nil {
