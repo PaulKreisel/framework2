@@ -203,12 +203,19 @@ func stateOf(e AgentEntry) string {
 	return e.Status
 }
 
+// ErrSessionNotFound is returned by SetStatus when no agent record matches
+// the supplied session id. Callers route this differently depending on how
+// the lookup was initiated: a manual `set-status --session <id>` exits with
+// the error (it's a typo backstop), but a hook-driven invocation suppresses
+// it (the hook fires for every claude session, including ones that weren't
+// launched via `ticket agent` and never registered an entry).
+var ErrSessionNotFound = errors.New("no agent record found for session")
+
 // SetStatus updates the matching agent record's Status and StatusUpdatedAt.
 // Lookup is by sessionID; ticketID, if non-empty, scopes the search to a
 // single ticket. With ticketID empty all open tickets are scanned. A no-op
-// (Status already equal to status) still bumps StatusUpdatedAt — but as a
-// fast path returns nil without touching the bead. Returns an error when no
-// matching agent is found so hook misconfiguration is loud, not silent.
+// (Status already equal to status) is fast-pathed without touching the bead.
+// Returns [ErrSessionNotFound] when no record matches.
 func SetStatus(db, beadsDir, sessionID, status, ticketID string) error {
 	if sessionID == "" {
 		return errors.New("session id required")
@@ -242,7 +249,7 @@ func SetStatus(db, beadsDir, sessionID, status, ticketID string) error {
 			return saveAgents(db, beadsDir, tid, entries)
 		}
 	}
-	return fmt.Errorf("no agent record found for session %s", sessionID)
+	return fmt.Errorf("%w %s", ErrSessionNotFound, sessionID)
 }
 
 // ticketsWithAgents lists every bead id whose metadata carries a non-empty

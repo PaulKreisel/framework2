@@ -310,17 +310,27 @@ func runAgentSetStatus(db, beadsDir, ticket string, args []string) error {
 		return fmt.Errorf("status must be %q or %q, got %q",
 			agent.StatusRunning, agent.StatusWaiting, status)
 	}
+	fromHook := false
 	if session == "" {
 		s, err := sessionFromHookStdin()
 		if err != nil {
 			return fmt.Errorf("read session id: %w", err)
 		}
 		session = s
+		fromHook = true
 	}
 	if session == "" {
 		return errors.New("no --session id supplied and stdin payload did not contain session_id")
 	}
-	return agent.SetStatus(db, beadsDir, session, status, ticket)
+	err := agent.SetStatus(db, beadsDir, session, status, ticket)
+	// Hook-driven invocations fire for every claude session, not just those
+	// launched via `ticket agent` — so a missing record there is expected,
+	// not an error. Explicit --session calls (manual testing backstop) still
+	// surface the error so typos don't silently succeed.
+	if fromHook && errors.Is(err, agent.ErrSessionNotFound) {
+		return nil
+	}
+	return err
 }
 
 // sessionFromHookStdin parses Claude Code's hook payload from os.Stdin and

@@ -2,6 +2,7 @@ package agent_test
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -109,6 +110,9 @@ func TestSetStatusErrorsWhenSessionMissing(t *testing.T) {
 		agent.StatusRunning, ticket)
 	if err == nil {
 		t.Fatalf("SetStatus on missing session: want error, got nil")
+	}
+	if !errors.Is(err, agent.ErrSessionNotFound) {
+		t.Errorf("error %q should wrap ErrSessionNotFound", err)
 	}
 	if !strings.Contains(err.Error(), "deadbeef") {
 		t.Errorf("error %q should mention the missing session id", err)
@@ -242,6 +246,52 @@ func TestSetStatusCLIWithSessionFlag(t *testing.T) {
 
 	if got := loadOne(t, beadsDir, ticket); got.Status != agent.StatusWaiting {
 		t.Errorf("Status = %q, want %q", got.Status, agent.StatusWaiting)
+	}
+}
+
+func TestSetStatusCLIHookPathSilentOnUnknownSession(t *testing.T) {
+	// Stop / UserPromptSubmit hooks fire for EVERY claude session, including
+	// ones not launched via `ticket agent` (and thus never registered in any
+	// bead's metadata.agents). When the session id arrives off stdin (the
+	// hook signature), an unknown session must be a silent exit-0 — not an
+	// error that pollutes the parent session's UI. Explicit --session calls
+	// (manual testing backstop) keep the strict behaviour, covered separately
+	// by TestSetStatusCLIRejectsUnknownState.
+	beadsDir := testutil.TestDB(t)
+
+	// Plant a registered session on a decoy ticket so the "any tickets to
+	// scan" code path runs — we want the not-found branch, not the
+	// no-tickets branch.
+	decoy := testutil.CreateBeadFull(t, beadsDir, "hookpath-decoy", "x", "")
+	if err := agent.RegisterAgent("", beadsDir, decoy, agent.AgentEntry{
+		SessionID: "00000000-0000-4000-8000-decoydecoyde",
+		PID:       1, Mode: "agent", StartedAt: "2026-05-15T14:00:00Z",
+		Env: "/env-decoy", Status: agent.StatusRunning,
+	}); err != nil {
+		t.Fatalf("Register decoy: %v", err)
+	}
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	if _, err := w.Write([]byte(`{"session_id":"99999999-9999-4999-8999-unknownunknown","hook_event_name":"Stop"}`)); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	w.Close()
+
+	origStdin := os.Stdin
+	os.Stdin = r
+	t.Cleanup(func() { os.Stdin = origStdin })
+
+	stdout, stderr, code := testutil.RunTicketIn(t, beadsDir,
+		"agent", "set-status", "waiting")
+	if code != 0 {
+		t.Fatalf("hook-path set-status: exit=%d, want 0 (silent skip)\nstdout=%q\nstderr=%q",
+			code, stdout, stderr)
+	}
+	if stderr != "" {
+		t.Errorf("hook-path set-status should be silent; stderr=%q", stderr)
 	}
 }
 
