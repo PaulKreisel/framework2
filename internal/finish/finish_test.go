@@ -140,33 +140,128 @@ func TestFinishAdvancesParentBranchToChildTip(t *testing.T) {
 	}
 }
 
-func TestFinishRefusesDivergedBranch(t *testing.T) {
+func TestFinishRebasesCleanlyDivergedBranch(t *testing.T) {
 	testutil.SharedBdDB(t)
-	parent := createBead(t, "finish-diverge-parent")
-	child := createChildBead(t, "finish-diverge-child", parent)
+	parent := createBead(t, "finish-diverge-clean-parent")
+	child := createChildBead(t, "finish-diverge-clean-child", parent)
 	bare := bareRepo(t, "main")
 
 	mustRunTicket(t, "dir", "worktree", child, bare)
 	parentWT := worktreePath(bare, parent)
 	childWT := worktreePath(bare, child)
 
-	// Both branches commit independently → divergent history.
+	// Each branch commits a uniquely-named file → divergent but
+	// non-conflicting history (a rebase applies cleanly).
 	advanceBranch(t, parentWT)
 	advanceBranch(t, childWT)
 
+	mustRunTicket(t, "finish", child)
+
+	if status := beadStatus(t, child); status != "closed" {
+		t.Errorf("bead status=%q want closed after successful finish", status)
+	}
+	if _, err := os.Stat(childWT); !os.IsNotExist(err) {
+		t.Errorf("child worktree still present after finish: err=%v", err)
+	}
+	// Parent branch should now point at the child's rebased tip, which is
+	// the latest commit on the parent worktree.
+	got := gitOut(t, parentWT, "log", "--format=%s", "-1")
+	if !strings.HasPrefix(got, "advance ") {
+		t.Errorf("parent tip after finish = %q, want 'advance ...' (the rebased child commit)", got)
+	}
+}
+
+func TestFinishPausesOnConflictAndResumesWithContinue(t *testing.T) {
+	testutil.SharedBdDB(t)
+	parent := createBead(t, "finish-diverge-conflict-parent")
+	child := createChildBead(t, "finish-diverge-conflict-child", parent)
+	bare := bareRepo(t, "main")
+
+	mustRunTicket(t, "dir", "worktree", child, bare)
+	parentWT := worktreePath(bare, parent)
+	childWT := worktreePath(bare, child)
+
+	// Both branches touch the SAME file with conflicting content → rebase
+	// hits conflicts and pauses.
+	writeAndCommit(t, parentWT, "shared.txt", "parent line\n", "parent edit")
+	writeAndCommit(t, childWT, "shared.txt", "child line\n", "child edit")
+
 	_, stderr, code := testutil.RunTicket(t, "finish", child)
 	if code == 0 {
-		t.Fatal("finish succeeded on diverged branch, want error")
+		t.Fatal("finish succeeded on conflicting rebase, want error")
 	}
-	if !strings.Contains(stderr, "diverged") {
-		t.Errorf("stderr=%q want to mention 'diverged'", stderr)
+	if !strings.Contains(stderr, "--continue") {
+		t.Errorf("stderr=%q want to point at `--continue`", stderr)
 	}
-	if _, err := os.Stat(childWT); err != nil {
-		t.Errorf("child worktree removed despite refused finish: %v", err)
+	// Worktree must be PAUSED in a rebase (not aborted), and bead still open.
+	if _, err := os.Stat(filepath.Join(childWT, ".git")); err != nil {
+		t.Errorf("child worktree gone despite refused finish: %v", err)
 	}
 	if status := beadStatus(t, child); status != "open" {
-		t.Errorf("bead status=%q want still open after refused finish", status)
+		t.Errorf("bead status=%q want still open after paused finish", status)
 	}
+	if !gitDirHasRebase(t, childWT) {
+		t.Errorf("child worktree is not in a paused rebase; finish should have left rebase state in place")
+	}
+
+	// Without --continue, a second invocation should refuse because the
+	// rebase is still in progress.
+	_, stderr, code = testutil.RunTicket(t, "finish", child)
+	if code == 0 {
+		t.Fatal("finish succeeded with rebase still in progress, want error")
+	}
+	if !strings.Contains(stderr, "rebase in progress") {
+		t.Errorf("stderr=%q want to mention 'rebase in progress'", stderr)
+	}
+
+	// Simulate the human resolving the conflict: pick child's version.
+	if err := os.WriteFile(filepath.Join(childWT, "shared.txt"), []byte("child line\n"), 0o644); err != nil {
+		t.Fatalf("write resolution: %v", err)
+	}
+	gitDo(t, childWT, "add", "shared.txt")
+
+	// Resume.
+	mustRunTicket(t, "finish", child, "--continue")
+
+	if status := beadStatus(t, child); status != "closed" {
+		t.Errorf("bead status=%q want closed after --continue", status)
+	}
+	if _, err := os.Stat(childWT); !os.IsNotExist(err) {
+		t.Errorf("child worktree still present after --continue finish: err=%v", err)
+	}
+}
+
+func TestFinishContinueWithoutPausedRebase(t *testing.T) {
+	testutil.SharedBdDB(t)
+	parent := createBead(t, "finish-continue-nothing-parent")
+	child := createChildBead(t, "finish-continue-nothing-child", parent)
+	bare := bareRepo(t, "main")
+	mustRunTicket(t, "dir", "worktree", child, bare)
+	advanceBranch(t, worktreePath(bare, child))
+
+	_, stderr, code := testutil.RunTicket(t, "finish", child, "--continue")
+	if code == 0 {
+		t.Fatal("finish --continue succeeded with no paused rebase, want error")
+	}
+	if !strings.Contains(stderr, "no rebase in progress") {
+		t.Errorf("stderr=%q want to mention 'no rebase in progress'", stderr)
+	}
+}
+
+// gitDirHasRebase reports whether wt's git dir contains rebase-{merge,apply}
+// state — i.e. the worktree is mid-rebase.
+func gitDirHasRebase(t *testing.T, wt string) bool {
+	t.Helper()
+	gd := gitOut(t, wt, "rev-parse", "--git-dir")
+	if !filepath.IsAbs(gd) {
+		gd = filepath.Join(wt, gd)
+	}
+	for _, name := range []string{"rebase-merge", "rebase-apply"} {
+		if _, err := os.Stat(filepath.Join(gd, name)); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // --- helpers ---
@@ -277,6 +372,18 @@ func gitOut(t *testing.T, wt string, args ...string) string {
 		t.Fatalf("git %v in %s: %v", args, wt, err)
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// writeAndCommit creates/overwrites a single file with body, stages it, and
+// commits with msg. Used to set up rebase conflicts where two branches must
+// touch the same path with different content.
+func writeAndCommit(t *testing.T, wt, name, body, msg string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(wt, name), []byte(body), 0o644); err != nil {
+		t.Fatalf("write %s: %v", name, err)
+	}
+	gitDo(t, wt, "add", name)
+	gitDo(t, wt, "commit", "-q", "-m", msg)
 }
 
 // advanceBranch makes a real (non-empty) commit on the current branch of wt,

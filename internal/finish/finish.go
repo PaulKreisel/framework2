@@ -34,7 +34,12 @@ import (
 // Run executes the finish flow for ticketID. beadsDir must be set so the env
 // folder can be located; db is the optional bd database path forwarded to
 // `bd` invocations.
-func Run(db, beadsDir, ticketID string, stdout io.Writer) error {
+//
+// If continueMode is true, Run expects at least one linked worktree to have
+// a paused rebase (left over from a prior `Run` whose rebase hit conflicts);
+// it calls `git rebase --continue` in each such worktree and then completes
+// the rest of the flow.
+func Run(db, beadsDir, ticketID string, continueMode bool, stdout io.Writer) error {
 	if ticketID == "" {
 		return errors.New("ticket id required")
 	}
@@ -48,7 +53,7 @@ func Run(db, beadsDir, ticketID string, stdout io.Writer) error {
 	}
 	worktrees := worktreeEntries(entries)
 
-	if err := preflight(worktrees); err != nil {
+	if err := preflight(worktrees, continueMode); err != nil {
 		return err
 	}
 
@@ -56,7 +61,7 @@ func Run(db, beadsDir, ticketID string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if err := rebaseWorktrees(db, ticketID, parent, worktrees); err != nil {
+	if err := rebaseWorktrees(db, ticketID, parent, worktrees, continueMode); err != nil {
 		return err
 	}
 
@@ -89,8 +94,21 @@ func worktreeEntries(entries []dir.Entry) []dir.Entry {
 	return out
 }
 
-func preflight(worktrees []dir.Entry) error {
+func preflight(worktrees []dir.Entry, continueMode bool) error {
+	anyInRebase := false
 	for _, e := range worktrees {
+		// Check rebase state FIRST: during a paused rebase HEAD is naturally
+		// detached, which would otherwise trip the detached-HEAD check below.
+		if inProgressRebase(e.Path) {
+			anyInRebase = true
+			if !continueMode {
+				return fmt.Errorf("worktree %s has a rebase in progress; resolve conflicts then run `ticket finish --continue` (or `git rebase --abort` to undo)", e.Path)
+			}
+			// Skip the detached-HEAD and clean-tree checks: an in-rebase
+			// worktree is legitimately detached and may have staged conflict
+			// resolutions that appear in `git status`.
+			continue
+		}
 		branch, ok := runGit(e.Path, "rev-parse", "--abbrev-ref", "HEAD")
 		if !ok || branch == "HEAD" {
 			return fmt.Errorf("worktree %s is on a detached HEAD: commit and check out a branch before finishing", e.Path)
@@ -103,14 +121,37 @@ func preflight(worktrees []dir.Entry) error {
 			return fmt.Errorf("worktree %s has uncommitted changes:\n%s\ncommit them first, then re-run ticket finish", e.Path, status)
 		}
 	}
+	if continueMode && !anyInRebase {
+		return errors.New("no rebase in progress in any linked worktree; `ticket finish --continue` needs a paused rebase to resume")
+	}
 	return nil
 }
 
-// rebaseWorktrees fast-forward-rebases each worktree's branch onto its
-// parent ticket's branch in the same bare repo. A root bead (no parent)
-// or a bead whose parent has no worktree in the same bare repo is left
-// alone.
-func rebaseWorktrees(db, ticketID, parent string, worktrees []dir.Entry) error {
+// inProgressRebase reports whether wt is in the middle of a `git rebase`
+// (presence of rebase-merge/rebase-apply state inside its git dir).
+func inProgressRebase(wt string) bool {
+	gitDir, ok := runGit(wt, "rev-parse", "--git-dir")
+	if !ok {
+		return false
+	}
+	if !filepath.IsAbs(gitDir) {
+		gitDir = filepath.Join(wt, gitDir)
+	}
+	for _, name := range []string{"rebase-merge", "rebase-apply"} {
+		if _, err := os.Stat(filepath.Join(gitDir, name)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// rebaseWorktrees brings each worktree's branch onto its parent ticket's
+// branch in the same bare repo, then fast-forwards the parent worktree's
+// branch to match. A root bead (no parent) or a bead whose parent has no
+// worktree in the same bare repo is left alone. In continueMode, in-rebase
+// worktrees resume via `git rebase --continue`; non-in-rebase worktrees
+// take the normal path.
+func rebaseWorktrees(db, ticketID, parent string, worktrees []dir.Entry, continueMode bool) error {
 	if parent == "" {
 		return nil
 	}
@@ -125,7 +166,7 @@ func rebaseWorktrees(db, ticketID, parent string, worktrees []dir.Entry) error {
 			// rebase onto. Treat as a no-op for this bare.
 			continue
 		}
-		if err := ffRebase(e.Path, pe.Branch); err != nil {
+		if err := ffRebase(e.Path, pe.Branch, continueMode); err != nil {
 			return err
 		}
 		if err := ffAdvance(pe.Path, pe.Branch, e.Branch); err != nil {
@@ -165,12 +206,34 @@ func ffAdvance(parentWT, parentBranch, childBranch string) error {
 	return runGitChecked(parentWT, "merge", "--ff-only", childBranch)
 }
 
-// ffRebase rebases the current branch in wt onto upstream, refusing
-// anything that isn't a clean fast-forward. The intent is the same as
-// `git pull --ff-only` against an upstream branch: catch up the bead's
-// branch to its parent's tip when nothing has diverged, and bail out
-// loudly when it has.
-func ffRebase(wt, upstream string) error {
+// ffRebase brings the current branch in wt up to upstream. In normal mode:
+//
+//   - identical → no-op
+//   - HEAD behind upstream → fast-forward merge
+//   - HEAD ahead of upstream → no-op (already includes upstream)
+//   - diverged → real `git rebase upstream`; on conflict, leave the rebase
+//     paused in the worktree so the user can resolve and resume with
+//     `ticket finish --continue`.
+//
+// In continueMode, wt is expected to be in the middle of a paused rebase
+// (preflight enforced this for at least one worktree). `git rebase
+// --continue` is invoked; a worktree without an in-progress rebase is a
+// no-op (one bare may have rebased cleanly while another still needs to
+// resume).
+func ffRebase(wt, upstream string, continueMode bool) error {
+	if continueMode {
+		if !inProgressRebase(wt) {
+			return nil
+		}
+		cmd := exec.Command("git", "-C", wt, "rebase", "--continue")
+		cmd.Env = append(os.Environ(), "GIT_EDITOR=true", "GIT_SEQUENCE_EDITOR=true")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("worktree %s: rebase --continue failed; resolve remaining conflicts (and `git add` them) before re-running:\n%s",
+				wt, strings.TrimSpace(string(out)))
+		}
+		return nil
+	}
+
 	headSHA, ok := runGit(wt, "rev-parse", "HEAD")
 	if !ok {
 		return fmt.Errorf("rev-parse HEAD failed in %s", wt)
@@ -191,8 +254,14 @@ func ffRebase(wt, upstream string) error {
 		// HEAD is already ahead of upstream — nothing to do.
 		return nil
 	}
-	return fmt.Errorf("worktree %s: branch has diverged from parent %s — cannot fast-forward; rebase or merge manually before ticket finish",
-		wt, upstream)
+	// Diverged. Try a real rebase; on conflict, leave the rebase paused so
+	// the user can resolve and resume with `ticket finish --continue`.
+	cmd := exec.Command("git", "-C", wt, "rebase", upstream)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("worktree %s: rebase onto %s hit conflicts; resolve them (and `git add` resolved files), then run `ticket finish --continue` (or `git rebase --abort` to undo):\n%s",
+			wt, upstream, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 func findEntryForBare(entries []dir.Entry, bare string) (dir.Entry, bool) {

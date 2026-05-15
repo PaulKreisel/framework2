@@ -42,10 +42,16 @@ subcommands:
                                           wrapper to re-exec claude with --continue
                                           (use after a dir link/worktree)
   next [<id>]                             show ready descendants of a ticket
-  finish [<id>]                           wrap up: FF-rebase the ticket's worktrees
-                                          onto their parent branch, close the bead,
-                                          remove the worktrees, and delete the env
-                                          folder. One-way; never invoked automatically.`
+  finish [<id>]                           wrap up: rebase the ticket's worktrees
+                                          onto their parent branch (FF when no
+                                          divergence, real rebase otherwise),
+                                          close the bead, remove the worktrees,
+                                          and delete the env folder. One-way;
+                                          never invoked automatically.
+  finish [<id>] --continue                resume a finish whose rebase paused on
+                                          conflicts: runs ` + "`git rebase --continue`" + ` in
+                                          each paused worktree, then completes
+                                          the rest of the flow.`
 
 // Run executes the ticket command-line with the given args, writing normal
 // output to stdout and errors to stderr. Returns the process exit code.
@@ -181,11 +187,20 @@ func runAgent(db, ticket string, args []string) error {
 }
 
 func runFinish(db, ticket string, args []string, stdout io.Writer) error {
-	id, _, err := resolveID(ticket, args, 0, "usage: ticket finish [<id>]")
+	var continueMode bool
+	positional := make([]string, 0, len(args))
+	for _, a := range args {
+		if a == "--continue" {
+			continueMode = true
+			continue
+		}
+		positional = append(positional, a)
+	}
+	id, _, err := resolveID(ticket, positional, 0, "usage: ticket finish [<id>] [--continue]")
 	if err != nil {
 		return err
 	}
-	return finish.Run(db, os.Getenv("BEADS_DIR"), id, stdout)
+	return finish.Run(db, os.Getenv("BEADS_DIR"), id, continueMode, stdout)
 }
 
 func runNext(db, ticket string, args []string, stdout, stderr io.Writer) error {
