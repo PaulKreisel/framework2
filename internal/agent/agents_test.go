@@ -149,6 +149,7 @@ func TestListAgentsTableLayoutAndStatus(t *testing.T) {
 		Mode:      "agent",
 		StartedAt: "2026-05-15T14:56:00Z",
 		Env:       "/env-running",
+		Status:    agent.StatusRunning,
 	}); err != nil {
 		t.Fatalf("Register running: %v", err)
 	}
@@ -159,6 +160,7 @@ func TestListAgentsTableLayoutAndStatus(t *testing.T) {
 		Mode:      "spec",
 		StartedAt: "2026-05-15T13:15:00Z",
 		Env:       "/env-exited",
+		Status:    agent.StatusRunning,
 	}); err != nil {
 		t.Fatalf("Register exited: %v", err)
 	}
@@ -168,7 +170,7 @@ func TestListAgentsTableLayoutAndStatus(t *testing.T) {
 		t.Fatalf("agent list: exit=%d stderr=%q", code, stderr)
 	}
 
-	if !strings.Contains(stdout, "SESSION ID") || !strings.Contains(stdout, "STATUS") {
+	if !strings.Contains(stdout, "SESSION ID") || !strings.Contains(stdout, "STATE") {
 		t.Errorf("table header missing:\n%s", stdout)
 	}
 	if !strings.Contains(stdout, "running") {

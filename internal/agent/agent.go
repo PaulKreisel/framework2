@@ -82,14 +82,20 @@ func Run(db, beadsDir, ticketID string, mode Mode) error {
 	if err != nil {
 		return fmt.Errorf("generate session id: %w", err)
 	}
+	startedAt := time.Now().UTC().Format(time.RFC3339)
 	if err := RegisterAgent(db, beadsDir, ticketID, AgentEntry{
-		SessionID: sessionID,
-		PID:       os.Getpid(),
-		Mode:      mode.String(),
-		StartedAt: time.Now().UTC().Format(time.RFC3339),
-		Env:       envPath,
+		SessionID:       sessionID,
+		PID:             os.Getpid(),
+		Mode:            mode.String(),
+		StartedAt:       startedAt,
+		Env:             envPath,
+		Status:          StatusRunning,
+		StatusUpdatedAt: startedAt,
 	}); err != nil {
 		return fmt.Errorf("register agent: %w", err)
+	}
+	if err := InstallStatusHooks(); err != nil {
+		return fmt.Errorf("install status hooks: %w", err)
 	}
 
 	var extraArgs []string

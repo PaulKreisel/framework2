@@ -8,6 +8,7 @@
 package ticketcli
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -44,6 +45,12 @@ subcommands:
                                           in coding mode
   agent list [<id>] [--json]              list agents that have been launched on a
                                           ticket (newest first)
+  agent set-status <running|waiting> [--session <id>]
+                                          update an agent record's running/waiting
+                                          status. Driven by Claude Code Stop /
+                                          UserPromptSubmit hooks; if --session is
+                                          omitted the session id is parsed from
+                                          the JSON hook payload on stdin.
   agent relaunch [<id>] [extra-args...]   from inside a session: ask the running
                                           wrapper to re-exec claude with --continue
                                           (use after a dir link/worktree)
@@ -255,6 +262,10 @@ func runAgent(db, beadsDir, ticket string, args []string, mode agent.Mode, stdou
 		}
 		return agent.ListAgents(db, beadsDir, id, jsonOut, stdout)
 	}
+	if mode == agent.ModeAgent && len(args) > 0 && args[0] == "set-status" {
+		// `ticket agent set-status <running|waiting> [--session <id>] [--ticket <id>]`
+		return runAgentSetStatus(db, beadsDir, ticket, args[1:])
+	}
 	usage := "usage: ticket agent [<id>]"
 	if mode == agent.ModeSpec {
 		usage = "usage: ticket spec [<id>]"
@@ -264,6 +275,80 @@ func runAgent(db, beadsDir, ticket string, args []string, mode agent.Mode, stdou
 		return err
 	}
 	return agent.Run(db, beadsDir, id, mode)
+}
+
+// runAgentSetStatus handles `ticket agent set-status <state> [--session <id>]`.
+// The `ticket` argument is the resolved value of the global --ticket flag and
+// scopes the lookup when provided; otherwise the agent record is located by
+// session id across all open beads. When --session is omitted (the hook
+// invocation path) session_id is parsed out of the Claude Code hook JSON
+// payload on stdin.
+func runAgentSetStatus(db, beadsDir, ticket string, args []string) error {
+	usage := "usage: ticket agent set-status <running|waiting> [--session <id>]"
+	var session string
+	var positional []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--session":
+			if i+1 >= len(args) {
+				return errors.New(usage)
+			}
+			session = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--session="):
+			session = strings.TrimPrefix(a, "--session=")
+		default:
+			positional = append(positional, a)
+		}
+	}
+	if len(positional) != 1 {
+		return errors.New(usage)
+	}
+	status := positional[0]
+	if status != agent.StatusRunning && status != agent.StatusWaiting {
+		return fmt.Errorf("status must be %q or %q, got %q",
+			agent.StatusRunning, agent.StatusWaiting, status)
+	}
+	if session == "" {
+		s, err := sessionFromHookStdin()
+		if err != nil {
+			return fmt.Errorf("read session id: %w", err)
+		}
+		session = s
+	}
+	if session == "" {
+		return errors.New("no --session id supplied and stdin payload did not contain session_id")
+	}
+	return agent.SetStatus(db, beadsDir, session, status, ticket)
+}
+
+// sessionFromHookStdin parses Claude Code's hook payload from os.Stdin and
+// returns its session_id. The payload arrives as a JSON object with keys
+// session_id, transcript_path, cwd, hook_event_name (we only need the first).
+// Empty stdin returns ("", nil) so callers can fall back to other lookups.
+func sessionFromHookStdin() (string, error) {
+	info, err := os.Stdin.Stat()
+	if err != nil {
+		return "", err
+	}
+	if info.Mode()&os.ModeCharDevice != 0 {
+		return "", nil
+	}
+	body, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		return "", err
+	}
+	if len(body) == 0 {
+		return "", nil
+	}
+	var payload struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return "", fmt.Errorf("parse hook payload: %w", err)
+	}
+	return payload.SessionID, nil
 }
 
 func runCreate(db, beadsDir, ticket string, args []string, stdout io.Writer) error {

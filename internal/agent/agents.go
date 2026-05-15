@@ -20,15 +20,32 @@ import (
 //
 // PID is the wrapper process pid (the Go process running [Run]), which is
 // stable across the wrapper's relaunch loop — unlike the claude pid recorded
-// in [PIDFile], which changes each iteration. Liveness checks ([statusOf]) use
+// in [PIDFile], which changes each iteration. Liveness checks ([stateOf]) use
 // this pid to decide whether the agent is still running.
+//
+// Status is a free-form string driven by Claude Code hooks via
+// `this agent set-status`. Today's writers only emit "running" and "waiting";
+// the field is intentionally not an enum so finer waiting states can be
+// added later without a schema migration. Empty Status on a legacy entry is
+// treated as "running" by [stateOf].
 type AgentEntry struct {
-	SessionID string `json:"sessionId"`
-	PID       int    `json:"pid"`
-	Mode      string `json:"mode"`
-	StartedAt string `json:"startedAt"`
-	Env       string `json:"env"`
+	SessionID       string `json:"sessionId"`
+	PID             int    `json:"pid"`
+	Mode            string `json:"mode"`
+	StartedAt       string `json:"startedAt"`
+	Env             string `json:"env"`
+	Status          string `json:"status,omitempty"`
+	StatusUpdatedAt string `json:"statusUpdatedAt,omitempty"`
 }
+
+// StatusRunning is the initial status assigned when an agent is registered,
+// and the value the UserPromptSubmit hook writes back when the user submits
+// a prompt.
+const StatusRunning = "running"
+
+// StatusWaiting is what the Stop hook writes when an assistant turn ends and
+// claude is waiting for the next user input.
+const StatusWaiting = "waiting"
 
 // String returns "agent" or "spec".
 func (m Mode) String() string {
@@ -130,7 +147,7 @@ func showAgentsRow(db, beadsDir, ticketID string) (*agentsRow, error) {
 
 // ListAgents writes the ticket's agent records to out. With jsonOutput=true
 // the raw entries (newest first) are emitted as indented JSON; otherwise a
-// tab-aligned table with columns SESSION ID, MODE, PID, STARTED, STATUS, ENV
+// tab-aligned table with columns SESSION ID, MODE, PID, STARTED, STATE, ENV
 // is written.
 func ListAgents(db, beadsDir, ticketID string, jsonOutput bool, out io.Writer) error {
 	entries, err := LoadAgents(db, beadsDir, ticketID)
@@ -154,23 +171,111 @@ func ListAgents(db, beadsDir, ticketID string, jsonOutput bool, out io.Writer) e
 		return err
 	}
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "SESSION ID\tMODE\tPID\tSTARTED\tSTATUS\tENV")
+	fmt.Fprintln(tw, "SESSION ID\tMODE\tPID\tSTARTED\tSTATE\tENV")
 	for _, e := range reversed {
 		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%s\n",
-			e.SessionID, e.Mode, e.PID, formatStarted(e.StartedAt), statusOf(e), e.Env)
+			e.SessionID, e.Mode, e.PID, formatStarted(e.StartedAt), stateOf(e), e.Env)
 	}
 	return tw.Flush()
 }
 
-// statusOf returns "running" if entry.PID is alive, else "exited".
-func statusOf(e AgentEntry) string {
+// stateOf collapses (wrapper-pid liveness, recorded Status) into the value
+// shown in the STATE column: "exited" wins when the wrapper is dead so a
+// stale "running"/"waiting" record never masks a dead session; otherwise the
+// hook-driven Status is surfaced (defaulting to "running" for legacy entries
+// that predate the status field).
+//
+// Liveness uses signal 0: ESRCH means the pid is gone, EPERM means the pid
+// exists but we don't own it (e.g. init on macOS). EPERM therefore counts as
+// alive — denying that would falsely report any running wrapper as "exited"
+// whenever it runs under a different uid.
+func stateOf(e AgentEntry) string {
 	if e.PID <= 0 {
 		return "exited"
 	}
-	if err := syscall.Kill(e.PID, 0); err != nil {
+	err := syscall.Kill(e.PID, 0)
+	if errors.Is(err, syscall.ESRCH) {
 		return "exited"
 	}
-	return "running"
+	if e.Status == "" {
+		return StatusRunning
+	}
+	return e.Status
+}
+
+// SetStatus updates the matching agent record's Status and StatusUpdatedAt.
+// Lookup is by sessionID; ticketID, if non-empty, scopes the search to a
+// single ticket. With ticketID empty all open tickets are scanned. A no-op
+// (Status already equal to status) still bumps StatusUpdatedAt — but as a
+// fast path returns nil without touching the bead. Returns an error when no
+// matching agent is found so hook misconfiguration is loud, not silent.
+func SetStatus(db, beadsDir, sessionID, status, ticketID string) error {
+	if sessionID == "" {
+		return errors.New("session id required")
+	}
+	if status == "" {
+		return errors.New("status required")
+	}
+	tickets := []string{ticketID}
+	if ticketID == "" {
+		all, err := ticketsWithAgents(db, beadsDir)
+		if err != nil {
+			return err
+		}
+		tickets = all
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	for _, tid := range tickets {
+		entries, err := LoadAgents(db, beadsDir, tid)
+		if err != nil {
+			return err
+		}
+		for i, e := range entries {
+			if e.SessionID != sessionID {
+				continue
+			}
+			if e.Status == status {
+				return nil
+			}
+			entries[i].Status = status
+			entries[i].StatusUpdatedAt = now
+			return saveAgents(db, beadsDir, tid, entries)
+		}
+	}
+	return fmt.Errorf("no agent record found for session %s", sessionID)
+}
+
+// ticketsWithAgents lists every bead id whose metadata carries a non-empty
+// agents array. Used by SetStatus when the caller didn't pin a ticket — hooks
+// only have a session id, so we scan to locate the owning bead.
+func ticketsWithAgents(db, beadsDir string) ([]string, error) {
+	out, err := bdcli.Cmd(beadsDir, db, "--json", "list", "--all").Output()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
+			return nil, fmt.Errorf("list tickets: %v: %s", err, ee.Stderr)
+		}
+		return nil, fmt.Errorf("list tickets: %w", err)
+	}
+	var rows []struct {
+		ID       string                     `json:"id"`
+		Metadata map[string]json.RawMessage `json:"metadata"`
+	}
+	if err := json.Unmarshal(out, &rows); err != nil {
+		return nil, fmt.Errorf("parse ticket list: %w", err)
+	}
+	var ids []string
+	for _, r := range rows {
+		raw, ok := r.Metadata["agents"]
+		if !ok || len(raw) == 0 || string(raw) == "null" {
+			continue
+		}
+		// Cheap presence check: an empty array marshals as "[]".
+		if string(raw) == "[]" {
+			continue
+		}
+		ids = append(ids, r.ID)
+	}
+	return ids, nil
 }
 
 // formatStarted re-renders an RFC 3339 timestamp as "YYYY-MM-DD HH:MM" in
