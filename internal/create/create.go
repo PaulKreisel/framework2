@@ -18,7 +18,8 @@ type Relation int
 const (
 	// Child: new bead is a child of current (current parents new).
 	Child Relation = iota
-	// Followup: new bead depends on current (current blocks new).
+	// Followup: like Sibling (new shares current's parent — top-level if
+	// none), but additionally current blocks new.
 	Followup
 	// Sibling: new bead shares current's parent. If current has no parent,
 	// new is created top-level (no parent), no error.
@@ -39,10 +40,7 @@ func Run(db, currentID, title string, rel Relation, stdout io.Writer) error {
 	switch rel {
 	case Child:
 		parent = currentID
-	case Followup:
-		// Wired post-creation with `bd dep add` so the semantics ("current
-		// blocks new") are unambiguous regardless of --deps direction.
-	case Sibling:
+	case Followup, Sibling:
 		p, err := loadParent(db, currentID)
 		if err != nil {
 			return err

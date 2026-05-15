@@ -49,7 +49,8 @@ subcommands:
                                           in spec mode (edits description.md and
                                           spawns related beads; does not code)
   create child <title>                    new bead as a child of the current ticket
-  create followup <title>                 new bead blocked by the current ticket
+  create followup <title>                  sibling of the current ticket, additionally
+                                          blocked by it (top-level + dep if no parent)
   create sibling <title>                  new bead under the current ticket's parent
                                           (top-level if current has no parent)
   next [<id>]                             show ready descendants of a ticket

@@ -28,24 +28,45 @@ func TestCreateChild(t *testing.T) {
 	}
 }
 
-func TestCreateFollowup(t *testing.T) {
+func TestCreateFollowupUnderSharedParent(t *testing.T) {
 	_ = testutil.SharedBdDB(t)
-	current := createBead(t, "create-followup-current")
+	parent := createBead(t, "create-followup-parent")
+	out, errOut, code := testutil.RunTicket(t, "create", "child", parent, "current for followup")
+	if code != 0 {
+		t.Fatalf("seed child: exit=%d stderr=%q", code, errOut)
+	}
+	current := strings.TrimSpace(out)
+	t.Cleanup(func() { _ = exec.Command("bd", "close", current).Run() })
 
-	out, errOut, code := testutil.RunTicket(t, "create", "followup", current, "the followup")
+	out, errOut, code = testutil.RunTicket(t, "create", "followup", current, "the followup")
 	if code != 0 {
 		t.Fatalf("ticket create followup: exit=%d stderr=%q", code, errOut)
 	}
 	followID := strings.TrimSpace(out)
-	if followID == "" {
-		t.Fatalf("create followup produced no id; stderr=%q", errOut)
-	}
 	t.Cleanup(func() { _ = exec.Command("bd", "close", followID).Run() })
 
-	// followup should depend on current (current blocks followup), and must
-	// not have current as parent.
-	if got := loadParent(t, followID); got == current {
-		t.Errorf("followup unexpectedly has current as parent (%s)", current)
+	// followup must share current's parent AND be blocked by current.
+	if got := loadParent(t, followID); got != parent {
+		t.Errorf("followup %s parent = %q, want %q (sibling of current)", followID, got, parent)
+	}
+	if !hasDependency(t, followID, current) {
+		t.Errorf("followup %s missing dependency on %s", followID, current)
+	}
+}
+
+func TestCreateFollowupTopLevel(t *testing.T) {
+	_ = testutil.SharedBdDB(t)
+	current := createBead(t, "create-followup-no-parent")
+
+	out, errOut, code := testutil.RunTicket(t, "create", "followup", current, "top-level followup")
+	if code != 0 {
+		t.Fatalf("ticket create followup: exit=%d stderr=%q", code, errOut)
+	}
+	followID := strings.TrimSpace(out)
+	t.Cleanup(func() { _ = exec.Command("bd", "close", followID).Run() })
+
+	if got := loadParent(t, followID); got != "" {
+		t.Errorf("followup unexpectedly has parent %q (current has none → top-level)", got)
 	}
 	if !hasDependency(t, followID, current) {
 		t.Errorf("followup %s missing dependency on %s", followID, current)
