@@ -42,6 +42,13 @@ subcommands:
   dir worktree [<id>] <bare-repo>    create a worktree off <bare-repo> for the
                                      ticket and link it (cascades through
                                      parents so ancestors gain the worktree too)
+  dir status [<id>] [<selector>] [--json]
+                                     show working-tree status of one linked dir
+                                     and (when the parent links the same bare
+                                     repo) how its branch has diverged from the
+                                     parent's. selector matches path/localRepo
+                                     /bareRepo; may be omitted when the ticket
+                                     has exactly one linked dir.
   dir slug [<id>] <slug>             set the bead's slug (refused once the slug
                                      has been frozen by a branch/worktree)
   dir slug --ai [<id>]               refine the slug via Claude Haiku in place;
@@ -204,9 +211,50 @@ func runDir(db, beadsDir, ticket string, args []string, stdout io.Writer) error 
 		return agent.RelaunchIfActive(beadsDir, id)
 	case "slug":
 		return runSlug(db, beadsDir, ticket, rest)
+	case "status":
+		return runDirStatus(db, beadsDir, ticket, rest, stdout)
 	default:
 		return fmt.Errorf("unknown dir subcommand %q", sub)
 	}
+}
+
+// runDirStatus handles `ticket dir status [<id>] [<selector>] [--json]`.
+// selector is optional; when absent the ticket must have exactly one linked
+// dir, otherwise the command refuses with the list of valid choices.
+func runDirStatus(db, beadsDir, ticket string, args []string, stdout io.Writer) error {
+	var jsonOut bool
+	positional := make([]string, 0, len(args))
+	for _, a := range args {
+		if a == "--json" {
+			jsonOut = true
+			continue
+		}
+		positional = append(positional, a)
+	}
+	usage := "usage: ticket dir status [<id>] [<selector>] [--json]"
+	// Allow zero or one trailing positional after the id is resolved.
+	var id, selector string
+	switch {
+	case ticket != "":
+		switch len(positional) {
+		case 0:
+		case 1:
+			selector = positional[0]
+		default:
+			return errors.New(usage)
+		}
+		id = ticket
+	default:
+		switch len(positional) {
+		case 1:
+			id = positional[0]
+		case 2:
+			id, selector = positional[0], positional[1]
+		default:
+			return errors.New(usage)
+		}
+	}
+	return dir.Status(db, beadsDir, id, selector, jsonOut, stdout)
 }
 
 // runSlug handles `ticket dir slug [<id>] <slug>` (set the slug) and
