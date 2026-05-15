@@ -1,0 +1,257 @@
+// Package jiracli implements the `jira` command: fetch one Jira issue and
+// create a corresponding top-level bead in the current .beads/ db.
+//
+// Scope deliberately stays narrow: one Jira key in, one bead id out. Auth is
+// via the legacy KNIME_ATLASSIAN_EMAIL / KNIME_ATLASSIAN_API_TOKEN env vars
+// (a separate followup tracks moving credentials out of env).
+package jiracli
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"os/exec"
+	"regexp"
+	"strings"
+	"time"
+
+	"framework2/internal/bdcli"
+	"framework2/internal/slug"
+)
+
+// DefaultBaseURL is the Atlassian site we fetch from. Tests override it via
+// [Options].
+const DefaultBaseURL = "https://knime-com.atlassian.net"
+
+// httpTimeout caps each Jira call. Long enough for cold paths to the cloud,
+// short enough to fail rather than hang an interactive shell.
+const httpTimeout = 30 * time.Second
+
+var keyPattern = regexp.MustCompile(`^[A-Z]+-[0-9]+$`)
+
+// Options pins values that production reads from the environment. Tests use
+// it to drive a fake Jira server and a per-test .beads/ directory.
+type Options struct {
+	// BaseURL overrides DefaultBaseURL.
+	BaseURL string
+	// BeadsDir overrides BEADS_DIR for the bd subprocess.
+	BeadsDir string
+	// DB, when non-empty, is forwarded as `--db <path>` to bd.
+	DB string
+	// HTTPClient overrides http.DefaultClient (with httpTimeout applied
+	// when nil).
+	HTTPClient *http.Client
+	// Email + Token override the env-var auth lookup. Empty values fall back
+	// to KNIME_ATLASSIAN_EMAIL / KNIME_ATLASSIAN_API_TOKEN.
+	Email, Token string
+}
+
+// Run is the binary entrypoint. Returns the process exit code.
+func Run(args []string, stdout, stderr io.Writer) int {
+	return RunWithOptions(Options{}, args, stdout, stderr)
+}
+
+// RunWithOptions is like [Run] but lets callers pin auth, BEADS_DIR, and the
+// Jira base URL. Used by tests.
+func RunWithOptions(opts Options, args []string, stdout, stderr io.Writer) int {
+	if err := dispatch(opts, args, stdout); err != nil {
+		fmt.Fprintln(stderr, "jira:", err)
+		return 1
+	}
+	return 0
+}
+
+const usage = `usage: jira <KEY>
+
+Fetch one Jira issue and create a top-level bead for it in the current .beads/
+database. Prints the new bead id to stdout.
+
+Auth: requires KNIME_ATLASSIAN_EMAIL and KNIME_ATLASSIAN_API_TOKEN.`
+
+func dispatch(opts Options, args []string, stdout io.Writer) error {
+	for _, a := range args {
+		if a == "-h" || a == "--help" || a == "help" {
+			fmt.Fprintln(stdout, usage)
+			return nil
+		}
+	}
+	if len(args) != 1 {
+		return errors.New(usage)
+	}
+	key := args[0]
+	if !keyPattern.MatchString(key) {
+		return fmt.Errorf("%q is not a Jira key (expected e.g. UIEXT-3141)", key)
+	}
+
+	email, token, err := credentials(opts)
+	if err != nil {
+		return err
+	}
+
+	issue, err := Fetch(context.Background(), opts, email, token, key)
+	if err != nil {
+		return err
+	}
+
+	id, err := createBead(opts, key, issue)
+	if err != nil {
+		return err
+	}
+	_, werr := fmt.Fprintln(stdout, id)
+	return werr
+}
+
+func credentials(opts Options) (email, token string, err error) {
+	email = opts.Email
+	if email == "" {
+		email = os.Getenv("KNIME_ATLASSIAN_EMAIL")
+	}
+	token = opts.Token
+	if token == "" {
+		token = os.Getenv("KNIME_ATLASSIAN_API_TOKEN")
+	}
+	if email == "" || token == "" {
+		return "", "", errors.New("KNIME_ATLASSIAN_EMAIL and KNIME_ATLASSIAN_API_TOKEN must be set")
+	}
+	return email, token, nil
+}
+
+// Issue is the subset of Jira's REST v2 response we consume.
+type Issue struct {
+	Key    string `json:"key"`
+	Fields struct {
+		Summary     string `json:"summary"`
+		Description string `json:"description"`
+		IssueType   struct {
+			Name string `json:"name"`
+		} `json:"issuetype"`
+		// customfield_11444 is KNIME's "Steps to Reproduce" field.
+		StepsToReproduce string `json:"customfield_11444"`
+	} `json:"fields"`
+}
+
+// Fetch retrieves one Jira issue. Exported for tests; production callers go
+// through [Run].
+func Fetch(ctx context.Context, opts Options, email, token, key string) (*Issue, error) {
+	base := opts.BaseURL
+	if base == "" {
+		base = DefaultBaseURL
+	}
+	url := fmt.Sprintf("%s/rest/api/2/issue/%s?fields=summary,description,issuetype,customfield_11444", base, key)
+
+	cctx, cancel := context.WithTimeout(ctx, httpTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(cctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	req.SetBasicAuth(email, token)
+	req.Header.Set("Accept", "application/json")
+
+	client := opts.HTTPClient
+	if client == nil {
+		client = &http.Client{Timeout: httpTimeout}
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetch %s: %w", key, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("Jira issue %s not found", key)
+	}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return nil, fmt.Errorf("Jira auth failed (%d) — check KNIME_ATLASSIAN_EMAIL / KNIME_ATLASSIAN_API_TOKEN", resp.StatusCode)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return nil, fmt.Errorf("fetch %s: status %d: %s", key, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var issue Issue
+	if err := json.NewDecoder(resp.Body).Decode(&issue); err != nil {
+		return nil, fmt.Errorf("parse Jira response for %s: %w", key, err)
+	}
+	return &issue, nil
+}
+
+// MapType converts a Jira issuetype name to a beads type. Mirrors the upstream
+// beads jira integration (gastownhall/beads internal/jira/fieldmapper.go) with
+// a KNIME-specific addition: Regression → bug.
+func MapType(jiraType string) string {
+	switch jiraType {
+	case "Bug", "Regression":
+		return "bug"
+	case "Story", "Feature", "Enhancement", "New Feature":
+		return "feature"
+	case "Epic":
+		return "epic"
+	case "Task", "Sub-task":
+		return "task"
+	default:
+		return "task"
+	}
+}
+
+// BuildDescription returns the bead description body: Jira description verbatim,
+// with "## Steps to Reproduce" appended when customfield_11444 is non-empty.
+func BuildDescription(issue *Issue) string {
+	desc := strings.TrimRight(issue.Fields.Description, "\n")
+	steps := strings.TrimSpace(issue.Fields.StepsToReproduce)
+	if steps == "" {
+		return desc
+	}
+	if desc == "" {
+		return "## Steps to Reproduce\n\n" + steps
+	}
+	return desc + "\n\n## Steps to Reproduce\n\n" + steps
+}
+
+// createBead shells out to `bd create` and returns the new bead id.
+func createBead(opts Options, key string, issue *Issue) (string, error) {
+	title := issue.Fields.Summary
+	body := BuildDescription(issue)
+	beadType := MapType(issue.Fields.IssueType.Name)
+	base := opts.BaseURL
+	if base == "" {
+		base = DefaultBaseURL
+	}
+	externalRef := fmt.Sprintf("%s/browse/%s", strings.TrimRight(base, "/"), key)
+
+	args := []string{
+		"create", title,
+		"--silent",
+		"--type", beadType,
+		"--priority", "2",
+		"--external-ref", externalRef,
+	}
+	if body != "" {
+		args = append(args, "--body-file", "-")
+	}
+	if s := slug.Derive(issue.Fields.Summary, slug.MaxLen); s != "" {
+		meta, _ := json.Marshal(map[string]string{"slug": s})
+		args = append(args, "--metadata", string(meta))
+	}
+
+	cmd := bdcli.Cmd(opts.BeadsDir, opts.DB, args...)
+	if body != "" {
+		cmd.Stdin = strings.NewReader(body)
+	}
+	out, err := cmd.Output()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
+			return "", fmt.Errorf("bd create: %v: %s", err, ee.Stderr)
+		}
+		return "", fmt.Errorf("bd create: %w", err)
+	}
+	id := strings.TrimSpace(string(out))
+	if id == "" {
+		return "", errors.New("bd create returned empty id")
+	}
+	return id, nil
+}
