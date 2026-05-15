@@ -62,8 +62,10 @@ func Run(db, beadsDir, ticketID string, mode Mode) error {
 // `--continue` plus the signal's args appended.
 //
 // When resumeSessionID is empty (the common path used by `ticket agent`), a
-// fresh session id is generated, the bead is claimed, and the first claude
-// invocation passes `--session-id <newID>` so the id is stable from the start.
+// fresh session id is generated, the bead is claimed (unless mode is
+// [ModeSpec] — `ticket spec` doesn't own the status transition), and the
+// first claude invocation passes `--session-id <newID>` so the id is stable
+// from the start.
 //
 // When resumeSessionID is non-empty (the path used by [Attach] for an exited
 // agent), the bead is NOT re-claimed (it's already in_progress from the prior
@@ -85,7 +87,7 @@ func RunWithResume(db, beadsDir, ticketID, resumeSessionID string, mode Mode) er
 		return fmt.Errorf("create env dir: %w", err)
 	}
 
-	if resumeSessionID == "" {
+	if resumeSessionID == "" && mode != ModeSpec {
 		if err := Claim(db, beadsDir, ticketID); err != nil {
 			return err
 		}

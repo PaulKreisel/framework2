@@ -299,6 +299,34 @@ func TestRunLoopClearsStaleSignalFile(t *testing.T) {
 	}
 }
 
+// TestRunSpecModeDoesNotClaim guards that `ticket spec` doesn't flip the bead
+// to in_progress: only `ticket agent` owns that status transition.
+func TestRunSpecModeDoesNotClaim(t *testing.T) {
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBeadFull(t, beadsDir, "agent-spec-no-claim", "x", "")
+	mustEnv(t, beadsDir, ticket)
+
+	prevCmd, prevArgs := agent.AgentCommand, agent.AgentDefaultArgs
+	t.Cleanup(func() { agent.AgentCommand, agent.AgentDefaultArgs = prevCmd, prevArgs })
+	agent.AgentCommand = "/bin/sh"
+	agent.AgentDefaultArgs = []string{"-c", ":", "fake-claude"}
+
+	done := make(chan error, 1)
+	go func() { done <- agent.Run("", beadsDir, ticket, agent.ModeSpec) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("agent.Run (spec): %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("agent.Run (spec) hung")
+	}
+
+	if got := readStatus(t, beadsDir, ticket); got != "open" {
+		t.Errorf("after spec Run, status = %q, want open (spec must not claim)", got)
+	}
+}
+
 func writePID(t *testing.T, envPath string, pid int) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(envPath, agent.PIDFile), []byte(strconv.Itoa(pid)+"\n"), 0o644); err != nil {
