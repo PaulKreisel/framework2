@@ -189,14 +189,14 @@ func BuildSystemPrompt(ticketID, title string, mode Mode) string {
 		b.WriteString("`this create followup <title>` — sibling of this ticket, blocked by it\n")
 		b.WriteString("`this create followup --not-blocked <title>` — sibling of this ticket, not blocked\n\n")
 		b.WriteString("## Adding a directory to this session\n")
-		b.WriteString("`this dir worktree <bare-repo>` (or `this dir link <path>`), then `this agent relaunch`.\n")
+		b.WriteString("`this dir worktree <bare-repo>` (or `this dir link <path>`). The wrapper auto-relaunches claude so the new dir is in scope.\n")
 	default:
 		b.WriteString("Execute the task described in description.md. Read it first.\n\n")
 		b.WriteString("## Delegating work for later\n")
 		b.WriteString("`this create followup <title>` — sibling of this ticket, blocked by it\n")
 		b.WriteString("`this create followup --not-blocked <title>` — sibling of this ticket, not blocked\n\n")
 		b.WriteString("## Adding a directory to this session\n")
-		b.WriteString("`this dir worktree <bare-repo>` (or `this dir link <path>`), then `this agent relaunch`.\n\n")
+		b.WriteString("`this dir worktree <bare-repo>` (or `this dir link <path>`). The wrapper auto-relaunches claude so the new dir is in scope.\n\n")
 		b.WriteString("(Side note: if you intentionally edit description.md, run `this env syncback` to persist it back to the bead.)\n")
 	}
 	return b.String()

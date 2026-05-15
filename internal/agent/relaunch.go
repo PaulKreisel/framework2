@@ -38,7 +38,9 @@ const DefaultRelaunchPrompt = "Relaunch successful"
 // instead so the relaunched session has something to acknowledge.
 //
 // Returns an error if no pid file exists (i.e. not running inside a wrapped
-// session) or if the recorded pid is no longer alive.
+// session) or if the recorded pid is no longer alive. Callers that want a
+// best-effort relaunch (no error when no wrapper is running) should use
+// [RelaunchIfActive] instead.
 func Relaunch(beadsDir, ticketID string, extraArgs []string) error {
 	if beadsDir == "" {
 		return errors.New("BEADS_DIR not set: cannot derive env path")
@@ -61,6 +63,23 @@ func Relaunch(beadsDir, ticketID string, extraArgs []string) error {
 		return fmt.Errorf("signal claude (pid %d): %w", pid, err)
 	}
 	return nil
+}
+
+// RelaunchIfActive is the best-effort variant used by the auto-relaunch flow
+// in `ticket dir link` and `ticket dir worktree`: if a live wrapper is
+// running for ticketID it relaunches it, otherwise it silently returns nil.
+// Empty beadsDir or ticketID, a missing pid file, an unreadable/garbled pid
+// file, and a recorded-but-dead process all collapse to the no-op case so
+// that running the wrapping CLI from outside any session is never an error.
+func RelaunchIfActive(beadsDir, ticketID string) error {
+	if beadsDir == "" || ticketID == "" {
+		return nil
+	}
+	pidPath := filepath.Join(beadsDir, "envs", ticketID, PIDFile)
+	if _, err := readPIDFile(pidPath); err != nil {
+		return nil
+	}
+	return Relaunch(beadsDir, ticketID, nil)
 }
 
 func readPIDFile(path string) (int, error) {

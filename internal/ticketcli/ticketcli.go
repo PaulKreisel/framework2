@@ -118,7 +118,13 @@ func runDir(db, ticket string, args []string, stdout io.Writer) error {
 		if err != nil {
 			return err
 		}
-		return dir.Link(db, id, tail[0])
+		if err := dir.Link(db, id, tail[0]); err != nil {
+			return err
+		}
+		// Only the leaf ticket — the one we just mutated — may have a live
+		// wrapper to refresh. dir.Worktree cascades into ancestors, but
+		// their sessions aren't running, so we never try to signal them.
+		return agent.RelaunchIfActive(os.Getenv("BEADS_DIR"), id)
 	case "remove":
 		id, tail, err := resolveID(ticket, rest, 1, "usage: ticket dir remove [<id>] <path>")
 		if err != nil {
@@ -136,7 +142,13 @@ func runDir(db, ticket string, args []string, stdout io.Writer) error {
 		if err != nil {
 			return err
 		}
-		return dir.Worktree(db, id, tail[0])
+		if err := dir.Worktree(db, id, tail[0]); err != nil {
+			return err
+		}
+		// See the comment under `link` above: cascade-created ancestor
+		// worktrees belong to tickets whose agents aren't running, so we
+		// only relaunch the explicitly addressed ticket.
+		return agent.RelaunchIfActive(os.Getenv("BEADS_DIR"), id)
 	default:
 		return fmt.Errorf("unknown dir subcommand %q", sub)
 	}

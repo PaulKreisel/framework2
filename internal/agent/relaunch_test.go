@@ -118,6 +118,67 @@ func TestRelaunchFailsWithStalePID(t *testing.T) {
 	}
 }
 
+func TestRelaunchIfActiveNoOpsWithoutPIDFile(t *testing.T) {
+	beadsDir := testutil.SharedBdDB(t)
+	ticket, _ := createBeadWithDescription(t, "agent-relaunch-ifactive-nopid", "x")
+	envPath := mustEnv(t, beadsDir, ticket)
+
+	if err := agent.RelaunchIfActive(beadsDir, ticket); err != nil {
+		t.Fatalf("RelaunchIfActive without pid file: %v, want nil", err)
+	}
+	if _, err := os.Stat(filepath.Join(envPath, agent.SignalFile)); !os.IsNotExist(err) {
+		t.Errorf("signal file should not be written when no wrapper is running (err=%v)", err)
+	}
+}
+
+func TestRelaunchIfActiveNoOpsWithStalePID(t *testing.T) {
+	beadsDir := testutil.SharedBdDB(t)
+	ticket, _ := createBeadWithDescription(t, "agent-relaunch-ifactive-stale", "x")
+	envPath := mustEnv(t, beadsDir, ticket)
+
+	cmd := exec.Command("true")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("true: %v", err)
+	}
+	writePID(t, envPath, cmd.Process.Pid)
+
+	if err := agent.RelaunchIfActive(beadsDir, ticket); err != nil {
+		t.Fatalf("RelaunchIfActive with stale pid: %v, want nil", err)
+	}
+	if _, err := os.Stat(filepath.Join(envPath, agent.SignalFile)); !os.IsNotExist(err) {
+		t.Errorf("signal file should not be written for stale pid (err=%v)", err)
+	}
+}
+
+func TestRelaunchIfActiveSignalsLiveWrapper(t *testing.T) {
+	beadsDir := testutil.SharedBdDB(t)
+	ticket, _ := createBeadWithDescription(t, "agent-relaunch-ifactive-live", "x")
+	envPath := mustEnv(t, beadsDir, ticket)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start sleep: %v", err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill() })
+	writePID(t, envPath, cmd.Process.Pid)
+
+	if err := agent.RelaunchIfActive(beadsDir, ticket); err != nil {
+		t.Fatalf("RelaunchIfActive: %v", err)
+	}
+
+	body, err := os.ReadFile(filepath.Join(envPath, agent.SignalFile))
+	if err != nil {
+		t.Fatalf("read signal file: %v", err)
+	}
+	want := agent.DefaultRelaunchPrompt + "\n"
+	if string(body) != want {
+		t.Errorf("signal body = %q, want %q (default prompt)", string(body), want)
+	}
+	_ = cmd.Wait()
+}
+
 func TestRunLoopRelaunchesOnSignal(t *testing.T) {
 	beadsDir := testutil.SharedBdDB(t)
 	ticket, _ := createBeadWithDescription(t, "agent-run-loop", "x")

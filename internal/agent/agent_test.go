@@ -71,8 +71,11 @@ func TestBuildSystemPromptModes(t *testing.T) {
 	if strings.Contains(agentP, "this create child") {
 		t.Errorf("agent-mode prompt should not advertise `this create child`:\n%s", agentP)
 	}
-	if !strings.Contains(agentP, "this agent relaunch") {
-		t.Errorf("agent-mode prompt missing relaunch hint:\n%s", agentP)
+	if strings.Contains(agentP, "this agent relaunch") {
+		t.Errorf("agent-mode prompt should not mention `this agent relaunch` (auto-relaunch now wired into dir link/worktree):\n%s", agentP)
+	}
+	if strings.Contains(specP, "this agent relaunch") {
+		t.Errorf("spec-mode prompt should not mention `this agent relaunch`:\n%s", specP)
 	}
 }
 
