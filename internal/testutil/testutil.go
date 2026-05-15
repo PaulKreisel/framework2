@@ -1,82 +1,47 @@
 // Package testutil provides shared test infrastructure for framework2.
 //
-// The central piece is [SharedBdDB], which exposes a persistent bd database
-// living inside the repo at testdata/.beads (gitignored). The DB is created on
-// first use via `bd init` and reused on subsequent test runs to avoid paying
-// the 10-30s embedded-Dolt startup cost every time.
+// Each test package opts into the shared bd database by adding:
 //
-// Tests are responsible for cleaning up the beads they create (typically via
-// `bd close`) so the next test sees a quiescent DB.
+//	func TestMain(m *testing.M) { os.Exit(testutil.RunTestMain(m)) }
+//
+// [RunTestMain] provisions a per-package bd DB at <repo>/testdata/<pkg>/.beads
+// (gitignored), runs a long-lived `dolt sql-server` against it for the
+// lifetime of the test process, and tears it down on exit. Per-package data
+// dirs let `go test ./...` run packages in parallel without contending on a
+// single Dolt directory.
+//
+// Tests then call [SharedBdDB] to discover the path (BEADS_DIR is also set
+// process-wide so subprocess `bd` invocations connect to the same server via
+// the dolt-server.port file).
+//
+// Tests must clean up every bead they create (typically with `bd close`) —
+// the DB is shared across tests in a package and across runs.
 package testutil
 
 import (
 	"errors"
-	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
 	"testing"
 )
 
-// SharedBdDB returns the absolute path to the persistent shared bd database.
-// On first call per process, runs `bd init` if the DB does not yet exist.
+// SharedBdDB returns the absolute path to this test process's bd database. It
+// requires that [RunTestMain] has already provisioned the DB from the
+// package's TestMain — there is no lazy init.
 //
-// As a side effect, this sets BEADS_DIR for the calling test (scoped via
-// t.Setenv) so that subprocess `bd` invocations target the shared test DB
-// instead of the developer's real one.
-//
-// Tests using this helper must not call t.Parallel — t.Setenv forbids it,
-// and the shared DB is global state that parallel tests would race on.
+// As a defensive measure it re-sets BEADS_DIR in the test's scope via
+// t.Setenv, so tests cannot accidentally lose it by mutating env earlier.
+// That also means tests using this helper must not call t.Parallel.
 func SharedBdDB(t testing.TB) string {
 	t.Helper()
-	sharedOnce.Do(func() {
-		sharedPath, sharedErr = ensureSharedDB()
-	})
-	if sharedErr != nil {
-		t.Fatalf("testutil: setup shared bd DB: %v", sharedErr)
+	path := os.Getenv("BEADS_DIR")
+	if path == "" {
+		t.Fatalf("testutil.SharedBdDB: BEADS_DIR is unset — does the test package's TestMain call testutil.RunTestMain?")
 	}
-	t.Setenv("BEADS_DIR", sharedPath)
-	return sharedPath
-}
-
-var (
-	sharedOnce sync.Once
-	sharedPath string
-	sharedErr  error
-)
-
-func ensureSharedDB() (string, error) {
-	root, err := repoRoot()
-	if err != nil {
-		return "", err
-	}
-	path := filepath.Join(root, "testdata", ".beads")
-	if _, err := os.Stat(filepath.Join(path, "embeddeddolt")); err == nil {
-		return path, nil
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return "", fmt.Errorf("create testdata dir: %w", err)
-	}
-	env := envWith(os.Environ(), map[string]string{
-		"BEADS_DIR":          path,
-		"BD_NON_INTERACTIVE": "1",
-	})
-	initCmd := exec.Command("bd", "init",
-		"--prefix", "tst",
-		"--skip-agents", "--skip-hooks")
-	initCmd.Env = env
-	if out, err := initCmd.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("bd init: %v\n%s", err, out)
-	}
-	cfgCmd := exec.Command("bd", "config", "set", "dolt.auto-commit", "on")
-	cfgCmd.Env = env
-	if out, err := cfgCmd.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("bd config set dolt.auto-commit on: %v\n%s", err, out)
-	}
-	return path, nil
+	t.Setenv("BEADS_DIR", path)
+	return path
 }
 
 // envWith returns env with the given key/value pairs overriding any existing

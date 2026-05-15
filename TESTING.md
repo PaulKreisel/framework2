@@ -10,20 +10,41 @@ go test ./internal/dir/...   # one package
 go test -run TestLink ./internal/dir/   # one test
 ```
 
-The first run creates the shared test DB and takes a few seconds longer than subsequent runs.
+The first run per package creates the test DB and takes a few seconds longer than subsequent runs.
 
 ## The shared bd database
 
-`testutil.SharedBdDB(t)` returns the path to a persistent bd DB at `<repo>/testdata/.beads`. The directory is gitignored.
+Each test package owns a bd database at `<repo>/testdata/<pkg>/.beads/` (gitignored). The package's `TestMain` starts a long-lived `dolt sql-server` against that directory for the duration of the test process, so subprocess `bd` calls drop from ~0.9s (embedded boot per call) to ~0.2s (SQL handshake per call).
 
-- First call per process: runs `bd init --prefix tst --skip-agents --skip-hooks` with `BEADS_DIR` pointed at the test path.
-- Subsequent calls: reuse it.
-- Side effect: sets `BEADS_DIR` for the calling test via `t.Setenv`, so any `exec.Command("bd", …)` you spawn inside the test hits the test DB instead of the developer's real one.
-- Test bead IDs use the `tst-` prefix.
+Per-package data dirs let `go test ./...` run packages in parallel without contending on a single Dolt directory.
+
+**Wire your test package in** with one file:
+
+```go
+// testmain_test.go
+package mypkg_test
+
+import (
+    "os"
+    "testing"
+
+    "framework2/internal/testutil"
+)
+
+func TestMain(m *testing.M) { os.Exit(testutil.RunTestMain(m)) }
+```
+
+`RunTestMain` is idempotent: on first run it `bd init`s the DB and flips it to server mode; on subsequent runs it reuses what's there and just starts the server. The server is torn down on process exit (including SIGINT/SIGTERM).
+
+In test bodies, call `testutil.SharedBdDB(t)` to get the DB path. It also re-sets `BEADS_DIR` in the test's scope via `t.Setenv`, so `exec.Command("bd", …)` invocations hit this package's DB.
+
+Test bead IDs use the `tst-` prefix.
 
 **Hard rule:** every test must clean up every bead it creates (typically with `bd close`). The DB is shared across tests in the package; if you leak open beads, you'll pollute another test's view of `bd ready` etc. Register cleanup via `t.Cleanup(...)` immediately after creation.
 
-`t.Setenv` forbids `t.Parallel()`, and the shared DB is global state anyway — keep tests serial.
+`t.Setenv` forbids `t.Parallel()`, and the package DB is global state anyway — keep tests serial within a package.
+
+**Orphan servers.** A test process killed with `SIGKILL` (or a runaway `go test` left over from a previous shell) can leak a `dolt sql-server`. Clean up with `BEADS_DIR=… bd dolt stop` per package, or `bd dolt killall` (from a non-test cwd) to nuke any running servers bd knows about.
 
 ## Invoking `ticket` subcommands
 
