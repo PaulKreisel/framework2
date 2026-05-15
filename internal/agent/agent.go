@@ -131,13 +131,17 @@ func Regenerate(db, beadsDir, envPath, ticketID string, mode Mode) (string, erro
 	if err != nil {
 		return "", err
 	}
+	ancestorDirs, err := dir.LoadAncestorEntries(db, beadsDir, ticketID)
+	if err != nil {
+		return "", err
+	}
 	if err := writeDescription(envPath, issue); err != nil {
 		return "", err
 	}
 	if err := writeSettings(envPath, dirs); err != nil {
 		return "", err
 	}
-	return BuildSystemPrompt(issue.ID, issue.Title, mode), nil
+	return BuildSystemPrompt(issue.ID, issue.Title, mode, dirs, ancestorDirs), nil
 }
 
 type bdIssue struct {
@@ -203,8 +207,11 @@ func writeDescription(envPath string, issue *bdIssue) error {
 
 // BuildSystemPrompt returns the mode-specific text appended to claude's
 // system prompt for this launch. Lists the in-session commands and what
-// they're for; description.md holds the actual task content.
-func BuildSystemPrompt(ticketID, title string, mode Mode) string {
+// they're for; description.md holds the actual task content. dirs are the
+// current bead's linked dirs and ancestorDirs are the union of ancestors'
+// linked dirs — they're used to render a "Repos in this session" block so
+// the agent knows what's wired up and what an ancestor already pulled in.
+func BuildSystemPrompt(ticketID, title string, mode Mode, dirs, ancestorDirs []dir.Entry) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Ticket %s — %s\n\n", ticketID, title)
 	switch mode {
@@ -231,7 +238,93 @@ func BuildSystemPrompt(ticketID, title string, mode Mode) string {
 		b.WriteString("`this dir worktree <bare-repo>` (or `this dir link <path>`). The wrapper auto-relaunches claude so the new dir is in scope.\n\n")
 		b.WriteString("(Side note: if you intentionally edit description.md, run `this env syncback` to persist it back to the bead.)\n")
 	}
+	writeReposSection(&b, dirs, ancestorDirs)
 	return b.String()
+}
+
+// writeReposSection appends a "Repos in this session" block listing the
+// bare-repo-backed dirs currently linked to the bead and, when an ancestor
+// touches a repo the current bead does not yet have, an actionable bullet of
+// repo name and bare path so the agent can run `this dir worktree <path>`.
+// Entries without a BareRepo are skipped — only true bare-repo-backed entries
+// count as "repos" here.
+func writeReposSection(b *strings.Builder, dirs, ancestorDirs []dir.Entry) {
+	currentRepos := bareReposFrom(dirs)
+	currentBares := make(map[string]struct{}, len(currentRepos))
+	for _, r := range currentRepos {
+		currentBares[r.bare] = struct{}{}
+	}
+	parentRepos := bareReposFromExcluding(ancestorDirs, currentBares)
+	if len(currentRepos) == 0 && len(parentRepos) == 0 {
+		return
+	}
+	b.WriteString("\n## Repos in this session\n\n")
+	if len(currentRepos) == 0 {
+		b.WriteString("No repos linked yet.\n")
+	} else {
+		names := make([]string, len(currentRepos))
+		for i, r := range currentRepos {
+			names[i] = r.name
+		}
+		fmt.Fprintf(b, "Repos linked into this session: %s.\n", strings.Join(names, ", "))
+	}
+	if len(parentRepos) > 0 {
+		b.WriteString("\nParent tickets touch the following repos (add with `this dir worktree <path>`):\n\n")
+		for _, r := range parentRepos {
+			fmt.Fprintf(b, "- %s — `%s`\n", r.name, r.bare)
+		}
+	}
+}
+
+// bareRepoRef is one repo surfaced in the system prompt: the bare path is its
+// identity (also the argument an agent would pass to `this dir worktree`) and
+// name is the human-readable basename.
+type bareRepoRef struct {
+	bare string
+	name string
+}
+
+// bareReposFrom returns the bare repos backing entries, in entry order, with
+// duplicates collapsed by bare path. Entries without BareRepo are omitted —
+// per ai-02h we only surface bare-repo-backed entries here.
+func bareReposFrom(entries []dir.Entry) []bareRepoRef {
+	seen := make(map[string]struct{})
+	var out []bareRepoRef
+	for _, e := range entries {
+		if e.BareRepo == "" {
+			continue
+		}
+		if _, dup := seen[e.BareRepo]; dup {
+			continue
+		}
+		seen[e.BareRepo] = struct{}{}
+		out = append(out, bareRepoRef{bare: e.BareRepo, name: repoNameFromBarePath(e.BareRepo)})
+	}
+	return out
+}
+
+func bareReposFromExcluding(entries []dir.Entry, exclude map[string]struct{}) []bareRepoRef {
+	seen := make(map[string]struct{})
+	var out []bareRepoRef
+	for _, e := range entries {
+		if e.BareRepo == "" {
+			continue
+		}
+		if _, x := exclude[e.BareRepo]; x {
+			continue
+		}
+		if _, dup := seen[e.BareRepo]; dup {
+			continue
+		}
+		seen[e.BareRepo] = struct{}{}
+		out = append(out, bareRepoRef{bare: e.BareRepo, name: repoNameFromBarePath(e.BareRepo)})
+	}
+	return out
+}
+
+// repoNameFromBarePath turns "/abs/path/to/framework2.git" into "framework2".
+func repoNameFromBarePath(p string) string {
+	return strings.TrimSuffix(filepath.Base(p), ".git")
 }
 
 // SettingsPayload mirrors the .claude/settings.json structure we write.

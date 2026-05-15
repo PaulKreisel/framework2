@@ -35,6 +35,31 @@ func ParentID(db, beadsDir, ticketID string) (string, error) {
 	return parentID(db, beadsDir, ticketID)
 }
 
+// LoadAncestorEntries walks the parent chain of ticketID and returns the
+// concatenated dir entries of every ancestor (immediate parent first). The
+// current ticket's own entries are NOT included. Callers should de-dupe as
+// needed — the same path can appear under multiple ancestors when worktree
+// cascades have propagated it.
+func LoadAncestorEntries(db, beadsDir, ticketID string) ([]Entry, error) {
+	var out []Entry
+	cur := ticketID
+	for {
+		p, err := parentID(db, beadsDir, cur)
+		if err != nil {
+			return nil, err
+		}
+		if p == "" {
+			return out, nil
+		}
+		es, err := load(db, beadsDir, p)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, es...)
+		cur = p
+	}
+}
+
 // parentID returns the immediate parent bead id, or "" if the bead is a root.
 func parentID(db, beadsDir, ticketID string) (string, error) {
 	row, err := showTicket(db, beadsDir, ticketID)
