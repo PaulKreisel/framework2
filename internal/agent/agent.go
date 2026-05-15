@@ -140,16 +140,23 @@ func Regenerate(db, envPath, ticketID string, mode Mode) (string, error) {
 }
 
 type bdIssue struct {
-	ID          string `json:"id"`
-	Title       string `json:"title"`
-	Description string `json:"description"`
-	Status      string `json:"status"`
+	ID           string         `json:"id"`
+	Title        string         `json:"title"`
+	Description  string         `json:"description"`
+	Status       string         `json:"status"`
+	Dependencies []bdDependency `json:"dependencies"`
+}
+
+type bdDependency struct {
+	ID             string `json:"id"`
+	Status         string `json:"status"`
+	DependencyType string `json:"dependency_type"`
 }
 
 // Claim marks ticketID as actively being worked on by the current user via
 // `bd update --claim` (sets assignee to the current user, status to
-// in_progress). Refuses if the ticket is already in_progress so two agent
-// sessions can't silently land on the same bead.
+// in_progress). Refuses if the ticket is already in_progress, or if any of
+// its `blocks`-type dependencies are still open.
 func Claim(db, ticketID string) error {
 	issue, err := loadIssue(db, ticketID)
 	if err != nil {
@@ -157,6 +164,11 @@ func Claim(db, ticketID string) error {
 	}
 	if issue.Status == "in_progress" {
 		return fmt.Errorf("ticket %s is already in_progress; refusing to claim", ticketID)
+	}
+	for _, dep := range issue.Dependencies {
+		if dep.DependencyType == "blocks" && dep.Status != "closed" {
+			return fmt.Errorf("ticket %s is blocked by %s (status %s); refusing to claim", ticketID, dep.ID, dep.Status)
+		}
 	}
 	args := []string{}
 	if db != "" {

@@ -214,6 +214,38 @@ func TestClaimSetsInProgress(t *testing.T) {
 	}
 }
 
+func TestClaimErrorsWhenBlockedByDep(t *testing.T) {
+	testutil.SharedBdDB(t)
+	blocker, _ := createBeadWithDescription(t, "agent-claim-blocker", "x")
+	blocked, _ := createBeadWithDescription(t, "agent-claim-blocked", "x")
+
+	if out, err := exec.Command("bd", "dep", "add", blocked, blocker).CombinedOutput(); err != nil {
+		t.Fatalf("dep add: %v\n%s", err, out)
+	}
+
+	err := agent.Claim("", blocked)
+	if err == nil {
+		t.Fatalf("Claim on blocked ticket: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "blocked by "+blocker) {
+		t.Errorf("error = %q, want mention of blocker %q", err.Error(), blocker)
+	}
+	if got := readStatus(t, blocked); got != "open" {
+		t.Errorf("blocked ticket status = %q after refused claim, want open", got)
+	}
+
+	// Close the blocker — now the claim should succeed.
+	if out, err := exec.Command("bd", "close", blocker).CombinedOutput(); err != nil {
+		t.Fatalf("close blocker: %v\n%s", err, out)
+	}
+	if err := agent.Claim("", blocked); err != nil {
+		t.Fatalf("Claim after closing blocker: %v", err)
+	}
+	if got := readStatus(t, blocked); got != "in_progress" {
+		t.Errorf("after Claim, status = %q, want in_progress", got)
+	}
+}
+
 func TestClaimErrorsWhenAlreadyInProgress(t *testing.T) {
 	testutil.SharedBdDB(t)
 	ticket, _ := createBeadWithDescription(t, "agent-claim-already", "x")
