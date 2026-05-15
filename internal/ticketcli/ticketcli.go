@@ -42,6 +42,8 @@ subcommands:
                                           bead description (one-way file → bead)
   agent [<id>]                            launch claude from a ticket's env folder
                                           in coding mode
+  agent list [<id>] [--json]              list agents that have been launched on a
+                                          ticket (newest first)
   agent relaunch [<id>] [extra-args...]   from inside a session: ask the running
                                           wrapper to re-exec claude with --continue
                                           (use after a dir link/worktree)
@@ -111,9 +113,9 @@ func dispatch(beadsDir string, args []string, stdout, stderr io.Writer) error {
 	case "env":
 		return runEnv(db, beadsDir, ticket, rest[1:], stdout)
 	case "agent":
-		return runAgent(db, beadsDir, ticket, rest[1:], agent.ModeAgent)
+		return runAgent(db, beadsDir, ticket, rest[1:], agent.ModeAgent, stdout)
 	case "spec":
-		return runAgent(db, beadsDir, ticket, rest[1:], agent.ModeSpec)
+		return runAgent(db, beadsDir, ticket, rest[1:], agent.ModeSpec, stdout)
 	case "create":
 		return runCreate(db, beadsDir, ticket, rest[1:], stdout)
 	case "next":
@@ -227,7 +229,7 @@ func isTerminalWriter(w io.Writer) bool {
 	return fi.Mode()&os.ModeCharDevice != 0
 }
 
-func runAgent(db, beadsDir, ticket string, args []string, mode agent.Mode) error {
+func runAgent(db, beadsDir, ticket string, args []string, mode agent.Mode, stdout io.Writer) error {
 	if mode == agent.ModeAgent && len(args) > 0 && args[0] == "relaunch" {
 		// `ticket agent relaunch [<id>] [extra-args...]`
 		id, extra, err := resolveIDVariadic(ticket, args[1:], "usage: ticket agent relaunch [<id>] [extra-args...]")
@@ -235,6 +237,23 @@ func runAgent(db, beadsDir, ticket string, args []string, mode agent.Mode) error
 			return err
 		}
 		return agent.Relaunch(beadsDir, id, extra)
+	}
+	if mode == agent.ModeAgent && len(args) > 0 && args[0] == "list" {
+		// `ticket agent list [<id>] [--json]`
+		var jsonOut bool
+		positional := make([]string, 0, len(args)-1)
+		for _, a := range args[1:] {
+			if a == "--json" {
+				jsonOut = true
+				continue
+			}
+			positional = append(positional, a)
+		}
+		id, _, err := resolveID(ticket, positional, 0, "usage: ticket agent list [<id>] [--json]")
+		if err != nil {
+			return err
+		}
+		return agent.ListAgents(db, beadsDir, id, jsonOut, stdout)
 	}
 	usage := "usage: ticket agent [<id>]"
 	if mode == agent.ModeSpec {

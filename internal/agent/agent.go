@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"framework2/internal/bdcli"
 	"framework2/internal/dir"
@@ -77,6 +78,20 @@ func Run(db, beadsDir, ticketID string, mode Mode) error {
 	_ = os.Remove(sigPath)
 	_ = os.Remove(pidPath)
 
+	sessionID, err := NewSessionID()
+	if err != nil {
+		return fmt.Errorf("generate session id: %w", err)
+	}
+	if err := RegisterAgent(db, beadsDir, ticketID, AgentEntry{
+		SessionID: sessionID,
+		PID:       os.Getpid(),
+		Mode:      mode.String(),
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+		Env:       envPath,
+	}); err != nil {
+		return fmt.Errorf("register agent: %w", err)
+	}
+
 	var extraArgs []string
 	for {
 		prompt, err := Regenerate(db, beadsDir, envPath, ticketID, mode)
@@ -85,6 +100,12 @@ func Run(db, beadsDir, ticketID string, mode Mode) error {
 		}
 		argv := append([]string{}, AgentDefaultArgs...)
 		argv = append(argv, "--append-system-prompt", prompt)
+		// First iteration: claude allocates the session under our chosen id
+		// so `agent list` can surface a stable handle. Subsequent iterations
+		// pass --continue (via extraArgs) and inherit the same session.
+		if len(extraArgs) == 0 {
+			argv = append(argv, "--session-id", sessionID)
+		}
 		argv = append(argv, extraArgs...)
 		cmd := exec.Command(AgentCommand, argv...)
 		cmd.Dir = envPath
