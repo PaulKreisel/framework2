@@ -110,7 +110,7 @@ func TestFinishFastForwardsOntoAdvancedParent(t *testing.T) {
 		t.Fatalf("finish exit=%d stderr=%q", code, stderr)
 	}
 
-	childTip := gitOut(t, bare, "rev-parse", "refs/heads/"+child)
+	childTip := gitOut(t, bare, "rev-parse", "refs/heads/todo/"+child)
 	if childTip != parentTip {
 		t.Errorf("child branch tip %q != parent tip %q (expected fast-forward)", childTip, parentTip)
 	}
@@ -135,7 +135,7 @@ func TestFinishAdvancesParentBranchToChildTip(t *testing.T) {
 		t.Fatalf("finish exit=%d stderr=%q", code, stderr)
 	}
 
-	parentBranchTip := gitOut(t, bare, "rev-parse", "refs/heads/"+parent)
+	parentBranchTip := gitOut(t, bare, "rev-parse", "refs/heads/todo/"+parent)
 	if parentBranchTip != childTip {
 		t.Errorf("parent branch tip %q != child tip %q (expected FF-advance)", parentBranchTip, childTip)
 	}

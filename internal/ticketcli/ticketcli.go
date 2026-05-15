@@ -8,20 +8,24 @@
 package ticketcli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"strings"
 	"syscall"
 
 	"framework2/internal/agent"
+	"framework2/internal/bdcli"
 	"framework2/internal/create"
 	"framework2/internal/dir"
 	"framework2/internal/env"
 	"framework2/internal/finish"
 	"framework2/internal/next"
+	"framework2/internal/slug"
 )
 
 const usage = `usage:
@@ -38,6 +42,10 @@ subcommands:
   dir worktree [<id>] <bare-repo>    create a worktree off <bare-repo> for the
                                      ticket and link it (cascades through
                                      parents so ancestors gain the worktree too)
+  dir slug [<id>] <slug>             set the bead's slug (refused once the slug
+                                     has been frozen by a branch/worktree)
+  dir slug --ai [<id>]               refine the slug via Claude Haiku in place;
+                                     silently no-ops if the slug is frozen
   env [<id>]                              create on-disk env folder for a ticket
   env syncback [<id>]                     push <env>/description.md back to the
                                           bead description (one-way file → bead)
@@ -179,9 +187,91 @@ func runDir(db, beadsDir, ticket string, args []string, stdout io.Writer) error 
 		// worktrees belong to tickets whose agents aren't running, so we
 		// only relaunch the explicitly addressed ticket.
 		return agent.RelaunchIfActive(beadsDir, id)
+	case "slug":
+		return runSlug(db, beadsDir, ticket, rest)
 	default:
 		return fmt.Errorf("unknown dir subcommand %q", sub)
 	}
+}
+
+// runSlug handles `ticket dir slug [<id>] <slug>` (set the slug) and
+// `ticket dir slug --ai [<id>]` (refine via Haiku in the background-spawn flow
+// or interactively if invoked by hand). Both forms fail/no-op gracefully when
+// the slug is already frozen.
+func runSlug(db, beadsDir, ticket string, args []string) error {
+	var aiMode bool
+	positional := make([]string, 0, len(args))
+	for _, a := range args {
+		if a == "--ai" {
+			aiMode = true
+			continue
+		}
+		positional = append(positional, a)
+	}
+	if aiMode {
+		id, _, err := resolveID(ticket, positional, 0, "usage: ticket dir slug --ai [<id>]")
+		if err != nil {
+			return err
+		}
+		return refineSlug(db, beadsDir, id)
+	}
+	id, tail, err := resolveID(ticket, positional, 1, "usage: ticket dir slug [<id>] <slug>")
+	if err != nil {
+		return err
+	}
+	newSlug := slug.Derive(tail[0], slug.MaxLen)
+	if newSlug == "" {
+		return fmt.Errorf("slug %q reduces to empty after normalisation", tail[0])
+	}
+	return slug.Set(db, beadsDir, id, newSlug)
+}
+
+// beadTitle returns the title of ticketID via `bd --json show`.
+func beadTitle(db, beadsDir, ticketID string) (string, error) {
+	out, err := bdcli.Cmd(beadsDir, db, "--json", "show", ticketID).Output()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
+			return "", fmt.Errorf("bd show %s: %v: %s", ticketID, err, ee.Stderr)
+		}
+		return "", fmt.Errorf("bd show %s: %w", ticketID, err)
+	}
+	var rows []struct {
+		Title string `json:"title"`
+	}
+	if err := json.Unmarshal(out, &rows); err != nil {
+		return "", err
+	}
+	if len(rows) == 0 {
+		return "", nil
+	}
+	return rows[0].Title, nil
+}
+
+// refineSlug pulls the bead's title, asks Claude Haiku for a polished slug,
+// and writes it back unless the slug has been frozen (which is the common
+// case when the user has already cut a branch). On any failure we exit
+// silently — refinement is an opportunistic upgrade, never required.
+func refineSlug(db, beadsDir, ticketID string) error {
+	info, err := slug.Get(db, beadsDir, ticketID)
+	if err != nil || info.Used {
+		return nil
+	}
+	title, err := beadTitle(db, beadsDir, ticketID)
+	if err != nil || title == "" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), slug.RefineTimeout)
+	defer cancel()
+	improved := slug.Refine(ctx, title, info.Slug)
+	if improved == "" {
+		return nil
+	}
+	// Re-check used: a branch may have been cut while Haiku was thinking.
+	if cur, err := slug.Get(db, beadsDir, ticketID); err != nil || cur.Used {
+		return nil
+	}
+	_ = slug.Set(db, beadsDir, ticketID, improved)
+	return nil
 }
 
 func runEnv(db, beadsDir, ticket string, args []string, stdout io.Writer) error {

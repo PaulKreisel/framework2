@@ -26,18 +26,22 @@ func TestDirWorktreeRootBeadOnMain(t *testing.T) {
 		t.Fatalf("entries=%+v, want 1", entries)
 	}
 	got := entries[0]
+	// testutil.CreateBead drives `bd create` directly (no slug metadata), so
+	// the worktree falls back to the slug-less branch shape "<prefix>/<id>".
+	// Default issue type is "task" → "todo".
+	wantBranch := "todo/" + ticket
 	wantPath := filepath.Join(filepath.Dir(bare), strings.TrimSuffix(filepath.Base(bare), ".git")+"-"+ticket)
 	if got.Path != wantPath {
 		t.Errorf("path=%q want %q", got.Path, wantPath)
 	}
-	if got.Branch != ticket {
-		t.Errorf("branch=%q want %q", got.Branch, ticket)
+	if got.Branch != wantBranch {
+		t.Errorf("branch=%q want %q", got.Branch, wantBranch)
 	}
 	if got.BareRepo != bare {
 		t.Errorf("bareRepo=%q want %q", got.BareRepo, bare)
 	}
-	if !worktreeOnBranch(t, got.Path, ticket) {
-		t.Errorf("worktree at %s is not on branch %s", got.Path, ticket)
+	if !worktreeOnBranch(t, got.Path, wantBranch) {
+		t.Errorf("worktree at %s is not on branch %s", got.Path, wantBranch)
 	}
 	if sha := refSHA(t, got.Path, "HEAD"); sha != bareBranchSHA(t, bare, "main") {
 		t.Errorf("worktree HEAD %q != bare main %q (root should branch off main)", sha, bareBranchSHA(t, bare, "main"))
@@ -79,8 +83,9 @@ func TestDirWorktreeCascadesToParent(t *testing.T) {
 	if len(parentEntries) != 1 {
 		t.Fatalf("parent entries=%+v, want 1 (cascade should have created parent's worktree first)", parentEntries)
 	}
-	if parentEntries[0].Branch != parent {
-		t.Errorf("parent branch=%q want %q", parentEntries[0].Branch, parent)
+	wantParentBranch := "todo/" + parent
+	if parentEntries[0].Branch != wantParentBranch {
+		t.Errorf("parent branch=%q want %q", parentEntries[0].Branch, wantParentBranch)
 	}
 	if sha := refSHA(t, parentEntries[0].Path, "HEAD"); sha != bareBranchSHA(t, bare, "main") {
 		t.Errorf("parent worktree HEAD %q != bare main %q", sha, bareBranchSHA(t, bare, "main"))
@@ -90,8 +95,9 @@ func TestDirWorktreeCascadesToParent(t *testing.T) {
 	if len(childEntries) != 1 {
 		t.Fatalf("child entries=%+v, want 1", childEntries)
 	}
-	if childEntries[0].Branch != child {
-		t.Errorf("child branch=%q want %q", childEntries[0].Branch, child)
+	wantChildBranch := "todo/" + child
+	if childEntries[0].Branch != wantChildBranch {
+		t.Errorf("child branch=%q want %q", childEntries[0].Branch, wantChildBranch)
 	}
 	if sha := refSHA(t, childEntries[0].Path, "HEAD"); sha != refSHA(t, parentEntries[0].Path, "HEAD") {
 		t.Errorf("child HEAD %q != parent HEAD %q (child should branch off parent)", sha, refSHA(t, parentEntries[0].Path, "HEAD"))

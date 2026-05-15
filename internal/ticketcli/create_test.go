@@ -13,7 +13,7 @@ func TestCreateChild(t *testing.T) {
 	beadsDir := testutil.TestDB(t)
 	parent := testutil.CreateBead(t, beadsDir, "create-child-parent")
 
-	out, errOut, code := testutil.RunTicketIn(t, beadsDir, "create", "child", parent, "child of parent")
+	out, errOut, code := testutil.RunTicketIn(t, beadsDir, "create", "child", parent, "Child of Parent")
 	if code != 0 {
 		t.Fatalf("ticket create child: exit=%d stderr=%q", code, errOut)
 	}
@@ -25,6 +25,30 @@ func TestCreateChild(t *testing.T) {
 
 	if got := loadParent(t, beadsDir, childID); got != parent {
 		t.Errorf("child %s parent = %q, want %q", childID, got, parent)
+	}
+	if got := loadSlug(t, beadsDir, childID); got != "child-of-parent" {
+		t.Errorf("child %s slug = %q, want %q", childID, got, "child-of-parent")
+	}
+}
+
+func TestCreateChildPersistsDerivedSlug(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	parent := testutil.CreateBead(t, beadsDir, "slug-derive-parent")
+
+	out, errOut, code := testutil.RunTicketIn(t, beadsDir, "create", "child", parent,
+		"Fix the !!! BROKEN logger, please")
+	if code != 0 {
+		t.Fatalf("create child: exit=%d stderr=%q", code, errOut)
+	}
+	id := strings.TrimSpace(out)
+	t.Cleanup(func() { _ = testutil.BdCmd(beadsDir, "close", id).Run() })
+
+	if got := loadSlug(t, beadsDir, id); got != "fix-the-broken-logger-please" {
+		t.Errorf("slug = %q, want %q", got, "fix-the-broken-logger-please")
+	}
+	if used := loadSlugUsed(t, beadsDir, id); used {
+		t.Errorf("slug_is_used should be false on a fresh bead")
 	}
 }
 
@@ -146,6 +170,48 @@ func loadParent(t *testing.T, beadsDir, ticketID string) string {
 		t.Fatalf("bd show %s: no rows", ticketID)
 	}
 	return rows[0].Parent
+}
+
+// loadSlug returns the slug stored in the bead's metadata.
+func loadSlug(t *testing.T, beadsDir, ticketID string) string {
+	t.Helper()
+	out, err := testutil.BdCmd(beadsDir, "--json", "show", ticketID).Output()
+	if err != nil {
+		t.Fatalf("bd show %s: %v", ticketID, err)
+	}
+	var rows []struct {
+		Metadata struct {
+			Slug string `json:"slug"`
+		} `json:"metadata"`
+	}
+	if err := json.Unmarshal(out, &rows); err != nil {
+		t.Fatalf("parse bd show: %v", err)
+	}
+	if len(rows) == 0 {
+		t.Fatalf("bd show %s: no rows", ticketID)
+	}
+	return rows[0].Metadata.Slug
+}
+
+// loadSlugUsed returns the slug_is_used flag stored in the bead's metadata.
+func loadSlugUsed(t *testing.T, beadsDir, ticketID string) bool {
+	t.Helper()
+	out, err := testutil.BdCmd(beadsDir, "--json", "show", ticketID).Output()
+	if err != nil {
+		t.Fatalf("bd show %s: %v", ticketID, err)
+	}
+	var rows []struct {
+		Metadata struct {
+			SlugIsUsed bool `json:"slug_is_used"`
+		} `json:"metadata"`
+	}
+	if err := json.Unmarshal(out, &rows); err != nil {
+		t.Fatalf("parse bd show: %v", err)
+	}
+	if len(rows) == 0 {
+		return false
+	}
+	return rows[0].Metadata.SlugIsUsed
 }
 
 // hasDependency reports whether ticketID depends on otherID (any
