@@ -71,6 +71,10 @@ func Run(db, beadsDir, ticketID string, mode Mode) error {
 		return fmt.Errorf("env path is not a directory: %s", envPath)
 	}
 
+	if err := Claim(db, ticketID); err != nil {
+		return err
+	}
+
 	sigPath := filepath.Join(envPath, SignalFile)
 	pidPath := filepath.Join(envPath, PIDFile)
 	// Drop any stale signal/pid file before starting; otherwise the very
@@ -139,6 +143,31 @@ type bdIssue struct {
 	ID          string `json:"id"`
 	Title       string `json:"title"`
 	Description string `json:"description"`
+	Status      string `json:"status"`
+}
+
+// Claim marks ticketID as actively being worked on by the current user via
+// `bd update --claim` (sets assignee to the current user, status to
+// in_progress). Refuses if the ticket is already in_progress so two agent
+// sessions can't silently land on the same bead.
+func Claim(db, ticketID string) error {
+	issue, err := loadIssue(db, ticketID)
+	if err != nil {
+		return err
+	}
+	if issue.Status == "in_progress" {
+		return fmt.Errorf("ticket %s is already in_progress; refusing to claim", ticketID)
+	}
+	args := []string{}
+	if db != "" {
+		args = append(args, "--db", db)
+	}
+	args = append(args, "update", ticketID, "--claim")
+	out, err := exec.Command("bd", args...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("bd update %s --claim: %v: %s", ticketID, err, out)
+	}
+	return nil
 }
 
 func loadIssue(db, ticketID string) (*bdIssue, error) {

@@ -199,7 +199,59 @@ func TestSyncbackPushesDescription(t *testing.T) {
 	}
 }
 
+func TestClaimSetsInProgress(t *testing.T) {
+	testutil.SharedBdDB(t)
+	ticket, _ := createBeadWithDescription(t, "agent-claim-sets", "x")
+
+	if got := readStatus(t, ticket); got != "open" {
+		t.Fatalf("precondition: status = %q, want open", got)
+	}
+	if err := agent.Claim("", ticket); err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if got := readStatus(t, ticket); got != "in_progress" {
+		t.Errorf("after Claim, status = %q, want in_progress", got)
+	}
+}
+
+func TestClaimErrorsWhenAlreadyInProgress(t *testing.T) {
+	testutil.SharedBdDB(t)
+	ticket, _ := createBeadWithDescription(t, "agent-claim-already", "x")
+
+	if err := agent.Claim("", ticket); err != nil {
+		t.Fatalf("first Claim: %v", err)
+	}
+	err := agent.Claim("", ticket)
+	if err == nil {
+		t.Fatalf("second Claim: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "in_progress") {
+		t.Errorf("error message = %q, want mention of in_progress", err.Error())
+	}
+	if got := readStatus(t, ticket); got != "in_progress" {
+		t.Errorf("status changed after refused claim: %q, want in_progress", got)
+	}
+}
+
 // helpers
+
+func readStatus(t *testing.T, ticket string) string {
+	t.Helper()
+	out, err := exec.Command("bd", "--json", "show", ticket).Output()
+	if err != nil {
+		t.Fatalf("bd show %s: %v", ticket, err)
+	}
+	var rows []struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(out, &rows); err != nil {
+		t.Fatalf("parse bd show %s: %v\n%s", ticket, err, out)
+	}
+	if len(rows) == 0 {
+		t.Fatalf("bd show %s: no rows", ticket)
+	}
+	return rows[0].Status
+}
 
 func createBeadWithDescription(t *testing.T, title, description string) (id, gotTitle string) {
 	t.Helper()
