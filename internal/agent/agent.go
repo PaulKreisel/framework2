@@ -220,9 +220,7 @@ func BuildSystemPrompt(ticketID, title string, mode Mode, dirs, ancestorDirs []d
 		b.WriteString("`this create child <title>`\n\n")
 		b.WriteString("### For later\n")
 		b.WriteString("`this create followup <title>` — sibling of this ticket, blocked by it\n")
-		b.WriteString("`this create followup --not-blocked <title>` — sibling of this ticket, not blocked\n\n")
-		b.WriteString("## Adding a directory to this session\n")
-		b.WriteString("`this dir worktree <bare-repo>` (or `this dir link <path>`). The wrapper auto-relaunches claude so the new dir is in scope.\n")
+		b.WriteString("`this create followup --not-blocked <title>` — sibling of this ticket, not blocked\n")
 	default:
 		b.WriteString("Execute the task described in description.md. Read it first.\n\n")
 		b.WriteString("## Delegating work for later\n")
