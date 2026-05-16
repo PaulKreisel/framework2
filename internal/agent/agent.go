@@ -193,7 +193,7 @@ func Regenerate(db, beadsDir, envPath, ticketID string, mode Mode) (string, erro
 	if err := writeSettings(envPath, dirs); err != nil {
 		return "", err
 	}
-	return BuildSystemPrompt(issue.ID, issue.Title, mode, dirs, ancestorDirs), nil
+	return BuildSystemPrompt(beadsDir, issue.ID, issue.Title, mode, dirs, ancestorDirs)
 }
 
 type bdIssue struct {
@@ -258,72 +258,31 @@ func writeDescription(envPath string, issue *bdIssue) error {
 }
 
 // BuildSystemPrompt returns the mode-specific text appended to claude's
-// system prompt for this launch. Lists the in-session commands and what
-// they're for; description.md holds the actual task content. dirs are the
-// current bead's linked dirs and ancestorDirs are the union of ancestors'
-// linked dirs — they're used to render a "Repos in this session" block so
-// the agent knows what's wired up and what an ancestor already pulled in.
-func BuildSystemPrompt(ticketID, title string, mode Mode, dirs, ancestorDirs []dir.Entry) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "Ticket %s — %s\n\n", ticketID, title)
-	switch mode {
-	case ModeSpec:
-		b.WriteString("You are spec'ing this ticket, not coding. Do not edit source files.\n")
-		b.WriteString("Read description.md first.\n\n")
-		b.WriteString("## Update the description of this ticket\n")
-		b.WriteString("* Modify the description.md file\n")
-		b.WriteString("* Run `this env syncback`\n\n")
-		b.WriteString("## Delegating work\n")
-		b.WriteString("### Within this ticket: create a child\n")
-		b.WriteString("`this create child <title>`\n\n")
-		b.WriteString("### For later\n")
-		b.WriteString("`this create followup <title>` — sibling of this ticket, blocked by it\n")
-		b.WriteString("`this create followup --not-blocked <title>` — sibling of this ticket, not blocked\n")
-	default:
-		b.WriteString("Execute the task described in description.md. Read it first.\n\n")
-		b.WriteString("## Delegating work for later\n")
-		b.WriteString("`this create followup <title>` — sibling of this ticket, blocked by it\n")
-		b.WriteString("`this create followup --not-blocked <title>` — sibling of this ticket, not blocked\n\n")
-		b.WriteString("## Adding a directory to this session\n")
-		b.WriteString("`this dir worktree <bare-repo>` (or `this dir link <path>`). The wrapper auto-relaunches claude so the new dir is in scope.\n\n")
-		b.WriteString("(Side note: if you intentionally edit description.md, run `this env syncback` to persist it back to the bead.)\n")
+// system prompt for this launch. It loads <beadsDir>/agent-prompt.md (coding
+// mode) or <beadsDir>/spec-prompt.md (spec mode) when present; otherwise the
+// built-in default template ([DefaultPromptTemplate]) is used. Either way the
+// template is expanded against the registered fragments (see prompt.go) — so
+// the default path produces byte-identical output to the prior hard-coded
+// implementation. Errors out (rather than silently falling back to the
+// default) when an operator file is unreadable, contains a parse error, or
+// references an unknown fragment.
+//
+// dirs are the current bead's linked dirs and ancestorDirs are the union of
+// ancestors' linked dirs; both feed the `{{repos}}` fragment.
+func BuildSystemPrompt(beadsDir, ticketID, title string, mode Mode, dirs, ancestorDirs []dir.Entry) (string, error) {
+	tmpl, err := LoadPromptTemplate(beadsDir, mode)
+	if err != nil {
+		return "", err
 	}
-	writeReposSection(&b, dirs, ancestorDirs)
-	return b.String()
-}
-
-// writeReposSection appends a "Repos in this session" block listing the
-// bare-repo-backed dirs currently linked to the bead and, when an ancestor
-// touches a repo the current bead does not yet have, an actionable bullet of
-// repo name and bare path so the agent can run `this dir worktree <path>`.
-// Entries without a BareRepo are skipped — only true bare-repo-backed entries
-// count as "repos" here.
-func writeReposSection(b *strings.Builder, dirs, ancestorDirs []dir.Entry) {
-	currentRepos := bareReposFrom(dirs)
-	currentBares := make(map[string]struct{}, len(currentRepos))
-	for _, r := range currentRepos {
-		currentBares[r.bare] = struct{}{}
+	ctx := PromptContext{
+		TicketID:     ticketID,
+		Title:        title,
+		Mode:         mode,
+		Dirs:         dirs,
+		AncestorDirs: ancestorDirs,
+		BeadsDir:     beadsDir,
 	}
-	parentRepos := bareReposFromExcluding(ancestorDirs, currentBares)
-	if len(currentRepos) == 0 && len(parentRepos) == 0 {
-		return
-	}
-	b.WriteString("\n## Repos in this session\n\n")
-	if len(currentRepos) == 0 {
-		b.WriteString("No repos linked yet.\n")
-	} else {
-		names := make([]string, len(currentRepos))
-		for i, r := range currentRepos {
-			names[i] = r.name
-		}
-		fmt.Fprintf(b, "Repos linked into this session: %s.\n", strings.Join(names, ", "))
-	}
-	if len(parentRepos) > 0 {
-		b.WriteString("\nParent tickets touch the following repos (add with `this dir worktree <path>`):\n\n")
-		for _, r := range parentRepos {
-			fmt.Fprintf(b, "- %s — `%s`\n", r.name, r.bare)
-		}
-	}
+	return RenderPrompt(ctx, tmpl)
 }
 
 // bareRepoRef is one repo surfaced in the system prompt: the bare path is its

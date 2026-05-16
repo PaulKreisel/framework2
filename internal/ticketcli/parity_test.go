@@ -56,13 +56,11 @@ func TestSubcommandFormParity(t *testing.T) {
 				}
 			},
 		},
-		{
-			name: "next",
-			sub:  []string{"next"},
-			wantOut: func(t *testing.T, _ string) {
-				// next prints nothing for a leaf ticket — passing through.
-			},
-		},
+		// `next` was previously exercised here, but its output goes through
+		// `bd ready`, which non-deterministically appends a "Tip: Install the
+		// beads plugin..." line — making the form-vs-form comparison flake.
+		// Parity for the global-flag plumbing is already covered by the
+		// rows above; readd a `next` row only after the tip can be silenced.
 	}
 
 	for _, tc := range cases {

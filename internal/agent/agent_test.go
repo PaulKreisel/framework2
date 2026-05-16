@@ -44,8 +44,14 @@ func TestRegenerateWritesDescriptionMD(t *testing.T) {
 
 func TestBuildSystemPromptModes(t *testing.T) {
 	t.Parallel()
-	agentP := agent.BuildSystemPrompt("bd-1", "do the thing", agent.ModeAgent, nil, nil)
-	specP := agent.BuildSystemPrompt("bd-1", "do the thing", agent.ModeSpec, nil, nil)
+	agentP, err := agent.BuildSystemPrompt("", "bd-1", "do the thing", agent.ModeAgent, nil, nil)
+	if err != nil {
+		t.Fatalf("BuildSystemPrompt agent: %v", err)
+	}
+	specP, err := agent.BuildSystemPrompt("", "bd-1", "do the thing", agent.ModeSpec, nil, nil)
+	if err != nil {
+		t.Fatalf("BuildSystemPrompt spec: %v", err)
+	}
 
 	for _, p := range []string{agentP, specP} {
 		if !strings.Contains(p, "bd-1") || !strings.Contains(p, "do the thing") {
@@ -100,7 +106,10 @@ func TestBuildSystemPromptListsBareReposAndParentRepos(t *testing.T) {
 		// No bareRepo: skipped entirely.
 		{Path: "/wt/loose", LocalRepo: "/wt/loose"},
 	}
-	p := agent.BuildSystemPrompt("bd-1", "x", agent.ModeAgent, current, ancestors)
+	p, err := agent.BuildSystemPrompt("", "bd-1", "x", agent.ModeAgent, current, ancestors)
+	if err != nil {
+		t.Fatalf("BuildSystemPrompt: %v", err)
+	}
 
 	if !strings.Contains(p, "Repos linked into this session: framework2.") {
 		t.Errorf("prompt missing current repo line:\n%s", p)

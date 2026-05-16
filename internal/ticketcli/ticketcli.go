@@ -84,9 +84,17 @@ subcommands:
   agent relaunch [<id>] [extra-args...]   from inside a session: ask the running
                                           wrapper to re-exec claude with --continue
                                           (use after a dir link/worktree)
+  agent --print-default-prompt            print the built-in default coding-mode
+                                          prompt template (copy as a starting
+                                          point for <BEADS_DIR>/agent-prompt.md)
+  agent --list-prompt-fragments           list named fragments operator templates
+                                          can interpolate via {{name}}
   spec [<id>]                             launch claude from a ticket's env folder
                                           in spec mode (edits description.md and
                                           spawns related beads; does not code)
+  spec --print-default-prompt             print the built-in default spec-mode
+                                          prompt template (copy as a starting
+                                          point for <BEADS_DIR>/spec-prompt.md)
   create child <title>                    new bead as a child of the current ticket
   create followup [--not-blocked] <title>
                                           sibling of the current ticket (top-level if
@@ -390,6 +398,24 @@ func isTerminalWriter(w io.Writer) bool {
 }
 
 func runAgent(db, beadsDir, ticket string, args []string, mode agent.Mode, stdout io.Writer) error {
+	// Discovery flags that don't launch claude: print the built-in default
+	// template (useful as a starting point for an operator file) and list the
+	// registered fragment names. Both must be checked before any positional
+	// resolution so they work without a current ticket.
+	for _, a := range args {
+		switch a {
+		case "--print-default-prompt":
+			_, err := io.WriteString(stdout, agent.DefaultPromptTemplate(mode))
+			return err
+		case "--list-prompt-fragments":
+			for _, name := range agent.FragmentNames() {
+				if _, err := fmt.Fprintln(stdout, name); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}
 	if mode == agent.ModeAgent && len(args) > 0 && args[0] == "relaunch" {
 		// `ticket agent relaunch [<id>] [extra-args...]`
 		id, extra, err := resolveIDVariadic(ticket, args[1:], "usage: ticket agent relaunch [<id>] [extra-args...]")
