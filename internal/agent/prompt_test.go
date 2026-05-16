@@ -11,15 +11,14 @@ import (
 )
 
 // TestBuildSystemPromptDefaultByteIdentical pins the output of the default
-// (no-operator-file) path against a literal expected string. This is the
-// regression test for the design goal that adding the template machinery
-// produces byte-identical output to the prior hard-coded prompt.
+// (no-operator-file) path against a literal expected string for both modes.
+// It is the regression test that locks in the new minimal-fragment default
+// template: any change to the default prompt or to fragment expansion must
+// update these pinned strings.
 func TestBuildSystemPromptDefaultByteIdentical(t *testing.T) {
 	t.Parallel()
 
-	// Empty beadsDir -> no operator-file lookup -> built-in default template.
-	// No dirs/ancestors -> no `Repos in this session` block.
-	wantAgent := "Ticket bd-1 — do the thing\n" +
+	wantAgent := "# Ticket bd-1: do the thing\n" +
 		"\n" +
 		"Execute the task described in description.md. Read it first.\n" +
 		"\n" +
@@ -40,7 +39,7 @@ func TestBuildSystemPromptDefaultByteIdentical(t *testing.T) {
 		t.Errorf("agent-mode default prompt drift:\n--- got ---\n%q\n--- want ---\n%q", gotAgent, wantAgent)
 	}
 
-	wantSpec := "Ticket bd-1 — do the thing\n" +
+	wantSpec := "# Ticket bd-1: do the thing\n" +
 		"\n" +
 		"You are spec'ing this ticket, not coding. Do not edit source files.\n" +
 		"Read description.md first.\n" +
@@ -67,8 +66,8 @@ func TestBuildSystemPromptDefaultByteIdentical(t *testing.T) {
 }
 
 // TestBuildSystemPromptDefaultByteIdenticalWithRepos pins the with-repos
-// variant — same default template, dirs/ancestors populate the `{{repos}}`
-// fragment with a leading blank line.
+// variant — same default template, dirs/ancestors populate the
+// `{{repos_current}}` and `{{repos_parents}}` fragments back-to-back.
 func TestBuildSystemPromptDefaultByteIdenticalWithRepos(t *testing.T) {
 	t.Parallel()
 	current := []dir.Entry{{Path: "/wt/framework2", BareRepo: "/bare/framework2.git"}}
@@ -87,13 +86,94 @@ func TestBuildSystemPromptDefaultByteIdenticalWithRepos(t *testing.T) {
 	}
 }
 
+// TestReposFragmentShapes exercises the repos_current/repos_parents split:
+// the four combinations of (current empty, parents empty) produce the right
+// collapsed/uncollapsed shape.
+func TestReposFragmentShapes(t *testing.T) {
+	t.Parallel()
+	currentEntry := dir.Entry{Path: "/wt/framework2", BareRepo: "/bare/framework2.git"}
+	parentEntry := dir.Entry{Path: "/wt/other", BareRepo: "/bare/other.git"}
+
+	cases := []struct {
+		name           string
+		dirs           []dir.Entry
+		ancestors      []dir.Entry
+		wantHasCurrent bool
+		wantHasParents bool
+		wantSummary    string // substring expected in the current-section line, "" if no current section
+	}{
+		{
+			name:           "neither",
+			dirs:           nil,
+			ancestors:      nil,
+			wantHasCurrent: false,
+			wantHasParents: false,
+		},
+		{
+			name:           "only_current",
+			dirs:           []dir.Entry{currentEntry},
+			ancestors:      nil,
+			wantHasCurrent: true,
+			wantHasParents: false,
+			wantSummary:    "Repos linked into this session: framework2.",
+		},
+		{
+			name:           "only_parents",
+			dirs:           nil,
+			ancestors:      []dir.Entry{parentEntry},
+			wantHasCurrent: true, // heading still appears, with "No repos linked yet." body
+			wantHasParents: true,
+			wantSummary:    "No repos linked yet.",
+		},
+		{
+			name:           "both",
+			dirs:           []dir.Entry{currentEntry},
+			ancestors:      []dir.Entry{parentEntry},
+			wantHasCurrent: true,
+			wantHasParents: true,
+			wantSummary:    "Repos linked into this session: framework2.",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := agent.BuildSystemPrompt("", "bd-1", "x", agent.ModeAgent, tc.dirs, tc.ancestors)
+			if err != nil {
+				t.Fatalf("BuildSystemPrompt: %v", err)
+			}
+			hasCurrent := strings.Contains(got, "## Repos in this session")
+			hasParents := strings.Contains(got, "Parent tickets touch the following repos")
+			if hasCurrent != tc.wantHasCurrent {
+				t.Errorf("hasCurrent=%v want %v; got=%q", hasCurrent, tc.wantHasCurrent, got)
+			}
+			if hasParents != tc.wantHasParents {
+				t.Errorf("hasParents=%v want %v; got=%q", hasParents, tc.wantHasParents, got)
+			}
+			if tc.wantSummary != "" && !strings.Contains(got, tc.wantSummary) {
+				t.Errorf("expected substring %q missing from output:\n%q", tc.wantSummary, got)
+			}
+			if !tc.wantHasCurrent && !tc.wantHasParents {
+				// Both empty: rendered prompt must not add any trailing
+				// whitespace beyond the side-note line's own newline.
+				if !strings.HasSuffix(got, "back to the bead.)\n") {
+					t.Errorf("empty-repos prompt has unexpected trailing whitespace: %q", got)
+				}
+				if strings.HasSuffix(got, "\n\n") {
+					t.Errorf("empty-repos prompt ends with a blank line: %q", got)
+				}
+			}
+		})
+	}
+}
+
 // TestBuildSystemPromptOperatorFileOmitsFragment exercises the design point
 // that an operator file can drop a fragment by simply not referencing it.
 func TestBuildSystemPromptOperatorFileOmitsFragment(t *testing.T) {
 	t.Parallel()
 	beadsDir := t.TempDir()
-	// Operator file with no `{{syncback_note}}` and no `{{repos}}`.
-	tmpl := "{{session_header}}\n\n{{agent_intro}}\n"
+	// Operator file with no `{{cmd_env_syncback}}` and no repos fragments.
+	tmpl := "# Ticket {{ticket_id}}: {{title}}\n\nExecute the task described in description.md. Read it first.\n"
 	if err := os.WriteFile(filepath.Join(beadsDir, agent.AgentPromptFile), []byte(tmpl), 0o644); err != nil {
 		t.Fatalf("write operator file: %v", err)
 	}
@@ -102,12 +182,15 @@ func TestBuildSystemPromptOperatorFileOmitsFragment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildSystemPrompt: %v", err)
 	}
-	want := "Ticket bd-1 — title\n\nExecute the task described in description.md. Read it first.\n"
+	want := "# Ticket bd-1: title\n\nExecute the task described in description.md. Read it first.\n"
 	if got != want {
 		t.Errorf("operator file omitting fragments did not produce trimmed output:\n--- got ---\n%q\n--- want ---\n%q", got, want)
 	}
 	if strings.Contains(got, "Side note") {
-		t.Errorf("omitted syncback_note still appeared:\n%s", got)
+		t.Errorf("omitted syncback note still appeared:\n%s", got)
+	}
+	if strings.Contains(got, "env syncback") {
+		t.Errorf("omitted cmd_env_syncback still appeared:\n%s", got)
 	}
 }
 
@@ -117,8 +200,8 @@ func TestBuildSystemPromptOperatorFileOmitsFragment(t *testing.T) {
 func TestBuildSystemPromptOperatorFileAddsProse(t *testing.T) {
 	t.Parallel()
 	beadsDir := t.TempDir()
-	tmpl := "{{session_header}}\n\n" +
-		"{{agent_intro}}\n\n" +
+	tmpl := "# Ticket {{ticket_id}}: {{title}}\n\n" +
+		"Execute the task described in description.md. Read it first.\n\n" +
 		"## Finding code in other knime repos\n\n" +
 		"If a class, file, or symbol referenced by this ticket is not present in the\n" +
 		"repos already linked to this session, invoke the `/code` skill.\n"
@@ -136,8 +219,11 @@ func TestBuildSystemPromptOperatorFileAddsProse(t *testing.T) {
 	if !strings.Contains(got, "invoke the `/code` skill.") {
 		t.Errorf("operator-added prose body missing:\n%s", got)
 	}
+	if !strings.Contains(got, "# Ticket bd-1: x") {
+		t.Errorf("framework-provided fragments did not expand alongside operator prose:\n%s", got)
+	}
 	if !strings.Contains(got, "Execute the task described in description.md. Read it first.") {
-		t.Errorf("framework-provided fragment did not expand alongside operator prose:\n%s", got)
+		t.Errorf("operator prose body missing:\n%s", got)
 	}
 }
 
@@ -151,7 +237,7 @@ func TestBuildSystemPromptSpecOperatorFile(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(beadsDir, agent.AgentPromptFile), []byte("WRONG MODE\n"), 0o644); err != nil {
 		t.Fatalf("write agent file: %v", err)
 	}
-	specTmpl := "SPEC MODE\n{{session_header}}\n"
+	specTmpl := "SPEC MODE\n# Ticket {{ticket_id}}: {{title}}\n"
 	if err := os.WriteFile(filepath.Join(beadsDir, agent.SpecPromptFile), []byte(specTmpl), 0o644); err != nil {
 		t.Fatalf("write spec file: %v", err)
 	}
@@ -160,7 +246,7 @@ func TestBuildSystemPromptSpecOperatorFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildSystemPrompt spec: %v", err)
 	}
-	if !strings.HasPrefix(got, "SPEC MODE\nTicket bd-1 — x\n") {
+	if !strings.HasPrefix(got, "SPEC MODE\n# Ticket bd-1: x\n") {
 		t.Errorf("spec mode did not pick spec-prompt.md:\n%s", got)
 	}
 	if strings.Contains(got, "WRONG MODE") {
@@ -174,7 +260,7 @@ func TestBuildSystemPromptSpecOperatorFile(t *testing.T) {
 func TestBuildSystemPromptUnknownFragmentErrors(t *testing.T) {
 	t.Parallel()
 	beadsDir := t.TempDir()
-	tmpl := "{{session_header}}\n{{not_a_real_fragment}}\n"
+	tmpl := "# Ticket {{ticket_id}}: {{title}}\n{{not_a_real_fragment}}\n"
 	if err := os.WriteFile(filepath.Join(beadsDir, agent.AgentPromptFile), []byte(tmpl), 0o644); err != nil {
 		t.Fatalf("write operator file: %v", err)
 	}
@@ -192,8 +278,8 @@ func TestBuildSystemPromptUnknownFragmentErrors(t *testing.T) {
 func TestBuildSystemPromptParseErrorSurfaced(t *testing.T) {
 	t.Parallel()
 	beadsDir := t.TempDir()
-	// Unclosed action: `{{session_header` without a closing `}}`.
-	tmpl := "{{session_header\n"
+	// Unclosed action: `{{ticket_id` without a closing `}}`.
+	tmpl := "{{ticket_id\n"
 	if err := os.WriteFile(filepath.Join(beadsDir, agent.AgentPromptFile), []byte(tmpl), 0o644); err != nil {
 		t.Fatalf("write operator file: %v", err)
 	}

@@ -25,12 +25,14 @@ Markdown file in `$BEADS_DIR`:
 - `spec-prompt.md` — spec-mode template (used by `ticket spec`)
 
 The file's contents *are* the appended prompt. Framework-maintained chunks
-(repos block, mode-specific delegation help, syncback note, ...) are pulled
-in via `{{fragment_name}}` placeholders — Go `text/template` semantics, so
-operator-supplied Go template directives also work.
+are pulled in via `{{fragment_name}}` placeholders — Go `text/template`
+semantics, so operator-supplied Go template directives also work. The
+fragment set is intentionally minimal: operators own the prose and headings
+(free to reword), while the framework owns the command syntax inside them
+(so e.g. `this create followup ...` stays in sync with the implementation)
+and the data-backed repos block.
 
-When no operator file is present, a built-in default template is used
-(byte-identical to the prior hard-coded prompt).
+When no operator file is present, a built-in default template is used.
 
 ```
 ticket agent --print-default-prompt     # dump the agent-mode default

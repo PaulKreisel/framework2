@@ -36,19 +36,19 @@ type fragmentRenderer func(PromptContext) string
 
 // fragments is the registry of framework-provided template fragments. Each
 // entry can be referenced from an operator template (or the built-in default)
-// as `{{name}}`.
+// as `{{name}}`. The set is intentionally minimal: dynamic values, one
+// fragment per duplicated command line, and data-backed computed content.
+// Static prose lives in the default templates so operators can reword it
+// without losing framework-maintained command syntax.
 var fragments = map[string]fragmentRenderer{
-	"ticket_id":               func(c PromptContext) string { return c.TicketID },
-	"title":                   func(c PromptContext) string { return c.Title },
-	"session_header":          renderSessionHeader,
-	"repos":                   renderRepos,
-	"agent_intro":             renderAgentIntro,
-	"agent_followup":          renderAgentFollowup,
-	"agent_dir_session":       renderAgentDirSession,
-	"syncback_note":           renderSyncbackNote,
-	"spec_intro":              renderSpecIntro,
-	"spec_update_description": renderSpecUpdateDescription,
-	"spec_delegation":         renderSpecDelegation,
+	"ticket_id":           func(c PromptContext) string { return c.TicketID },
+	"title":               func(c PromptContext) string { return c.Title },
+	"cmd_create_followup": renderCmdCreateFollowup,
+	"cmd_create_child":    renderCmdCreateChild,
+	"cmd_dir_add":         renderCmdDirAdd,
+	"cmd_env_syncback":    renderCmdEnvSyncback,
+	"repos_current":       renderReposCurrent,
+	"repos_parents":       renderReposParents,
 }
 
 // FragmentNames returns the registered fragment names in alphabetical order.
@@ -73,30 +73,38 @@ func DefaultPromptTemplate(mode Mode) string {
 }
 
 // defaultAgentTemplate is the implicit operator file used in coding mode when
-// no <beadsDir>/agent-prompt.md is present. It is constructed so that the
-// rendered output is byte-identical to the prior hard-coded BuildSystemPrompt.
-const defaultAgentTemplate = `{{session_header}}
+// no <beadsDir>/agent-prompt.md is present.
+const defaultAgentTemplate = `# Ticket {{ticket_id}}: {{title}}
 
-{{agent_intro}}
+Execute the task described in description.md. Read it first.
 
-{{agent_followup}}
+## Delegating work for later
+{{cmd_create_followup}}
 
-{{agent_dir_session}}
+## Adding a directory to this session
+{{cmd_dir_add}}
 
-{{syncback_note}}
-{{repos}}`
+(Side note: if you intentionally edit description.md, run {{cmd_env_syncback}} to persist it back to the bead.)
+{{repos_current}}{{repos_parents}}`
 
 // defaultSpecTemplate is the implicit operator file used in spec mode when no
-// <beadsDir>/spec-prompt.md is present. Byte-identical output to the prior
-// hard-coded spec-mode prompt.
-const defaultSpecTemplate = `{{session_header}}
+// <beadsDir>/spec-prompt.md is present.
+const defaultSpecTemplate = `# Ticket {{ticket_id}}: {{title}}
 
-{{spec_intro}}
+You are spec'ing this ticket, not coding. Do not edit source files.
+Read description.md first.
 
-{{spec_update_description}}
+## Update the description of this ticket
+* Modify the description.md file
+* Run {{cmd_env_syncback}}
 
-{{spec_delegation}}
-{{repos}}`
+## Delegating work
+### Within this ticket: create a child
+{{cmd_create_child}}
+
+### For later
+{{cmd_create_followup}}
+{{repos_current}}{{repos_parents}}`
 
 // RenderPrompt expands a template against ctx, resolving `{{fragment_name}}`
 // tokens via the registered fragments. Returns an error for unknown fragment
@@ -141,58 +149,30 @@ func LoadPromptTemplate(beadsDir string, mode Mode) (string, error) {
 	return string(body), nil
 }
 
-// renderSessionHeader returns the one-line "Ticket <id> — <title>" header,
-// without a trailing newline so the template controls surrounding whitespace.
-func renderSessionHeader(c PromptContext) string {
-	return fmt.Sprintf("Ticket %s — %s", c.TicketID, c.Title)
-}
-
-const agentIntroText = "Execute the task described in description.md. Read it first."
-
-func renderAgentIntro(PromptContext) string { return agentIntroText }
-
-const agentFollowupText = "## Delegating work for later\n" +
-	"`this create followup <title>` — sibling of this ticket, blocked by it\n" +
+const cmdCreateFollowupText = "`this create followup <title>` — sibling of this ticket, blocked by it\n" +
 	"`this create followup --not-blocked <title>` — sibling of this ticket, not blocked"
 
-func renderAgentFollowup(PromptContext) string { return agentFollowupText }
+func renderCmdCreateFollowup(PromptContext) string { return cmdCreateFollowupText }
 
-const agentDirSessionText = "## Adding a directory to this session\n" +
-	"`this dir worktree <bare-repo>` (or `this dir link <path>`). The wrapper auto-relaunches claude so the new dir is in scope."
+const cmdCreateChildText = "`this create child <title>`"
 
-func renderAgentDirSession(PromptContext) string { return agentDirSessionText }
+func renderCmdCreateChild(PromptContext) string { return cmdCreateChildText }
 
-const syncbackNoteText = "(Side note: if you intentionally edit description.md, run `this env syncback` to persist it back to the bead.)"
+const cmdDirAddText = "`this dir worktree <bare-repo>` (or `this dir link <path>`). The wrapper auto-relaunches claude so the new dir is in scope."
 
-func renderSyncbackNote(PromptContext) string { return syncbackNoteText }
+func renderCmdDirAdd(PromptContext) string { return cmdDirAddText }
 
-const specIntroText = "You are spec'ing this ticket, not coding. Do not edit source files.\n" +
-	"Read description.md first."
+const cmdEnvSyncbackText = "`this env syncback`"
 
-func renderSpecIntro(PromptContext) string { return specIntroText }
+func renderCmdEnvSyncback(PromptContext) string { return cmdEnvSyncbackText }
 
-const specUpdateDescriptionText = "## Update the description of this ticket\n" +
-	"* Modify the description.md file\n" +
-	"* Run `this env syncback`"
-
-func renderSpecUpdateDescription(PromptContext) string { return specUpdateDescriptionText }
-
-const specDelegationText = "## Delegating work\n" +
-	"### Within this ticket: create a child\n" +
-	"`this create child <title>`\n" +
-	"\n" +
-	"### For later\n" +
-	"`this create followup <title>` — sibling of this ticket, blocked by it\n" +
-	"`this create followup --not-blocked <title>` — sibling of this ticket, not blocked"
-
-func renderSpecDelegation(PromptContext) string { return specDelegationText }
-
-// renderRepos returns the "Repos in this session" block, including a leading
-// newline (so it appends cleanly to a preceding line) and a trailing newline
-// on the last bullet. Returns the empty string when neither the current bead
-// nor any ancestor has a bare-repo-backed dir — in that case the template
-// produces no repos block at all.
-func renderRepos(c PromptContext) string {
+// renderReposCurrent returns the "Repos in this session" subsection — the
+// heading + the one-line summary of repos linked to the current bead — with a
+// leading `\n` so it joins cleanly to the line above. Returns "" when there
+// are no current repos AND no ancestor repos either (whole block disappears);
+// returns the "No repos linked yet." variant only when there are ancestor
+// repos to display below (so the parents subsection isn't orphaned).
+func renderReposCurrent(c PromptContext) string {
 	currentRepos := bareReposFrom(c.Dirs)
 	currentBares := make(map[string]struct{}, len(currentRepos))
 	for _, r := range currentRepos {
@@ -213,11 +193,27 @@ func renderRepos(c PromptContext) string {
 		}
 		fmt.Fprintf(&b, "Repos linked into this session: %s.\n", strings.Join(names, ", "))
 	}
-	if len(parentRepos) > 0 {
-		b.WriteString("\nParent tickets touch the following repos (add with `this dir worktree <path>`):\n\n")
-		for _, r := range parentRepos {
-			fmt.Fprintf(&b, "- %s — `%s`\n", r.name, r.bare)
-		}
+	return b.String()
+}
+
+// renderReposParents returns the "Parent tickets touch the following repos"
+// subsection (heading + bullet list of ancestor-only bare repos), with a
+// leading `\n` so it joins cleanly to the subsection above. Returns "" when
+// there are no ancestor-only repos.
+func renderReposParents(c PromptContext) string {
+	currentRepos := bareReposFrom(c.Dirs)
+	currentBares := make(map[string]struct{}, len(currentRepos))
+	for _, r := range currentRepos {
+		currentBares[r.bare] = struct{}{}
+	}
+	parentRepos := bareReposFromExcluding(c.AncestorDirs, currentBares)
+	if len(parentRepos) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\nParent tickets touch the following repos (add with `this dir worktree <path>`):\n\n")
+	for _, r := range parentRepos {
+		fmt.Fprintf(&b, "- %s — `%s`\n", r.name, r.bare)
 	}
 	return b.String()
 }
