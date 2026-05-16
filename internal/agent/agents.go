@@ -29,13 +29,15 @@ import (
 // added later without a schema migration. Empty Status on a legacy entry is
 // treated as "running" by [StateOf].
 type AgentEntry struct {
-	SessionID       string `json:"sessionId"`
-	PID             int    `json:"pid"`
-	Mode            string `json:"mode"`
-	StartedAt       string `json:"startedAt"`
-	Env             string `json:"env"`
-	Status          string `json:"status,omitempty"`
-	StatusUpdatedAt string `json:"statusUpdatedAt,omitempty"`
+	SessionID              string `json:"sessionId"`
+	PID                    int    `json:"pid"`
+	Mode                   string `json:"mode"`
+	StartedAt              string `json:"startedAt"`
+	Env                    string `json:"env"`
+	Status                 string `json:"status,omitempty"`
+	StatusUpdatedAt        string `json:"statusUpdatedAt,omitempty"`
+	ContextTokens          int    `json:"contextTokens,omitempty"`
+	ContextTokensUpdatedAt string `json:"contextTokensUpdatedAt,omitempty"`
 }
 
 // StatusRunning is the value the UserPromptSubmit hook writes when a turn
@@ -169,8 +171,8 @@ func showAgentsRow(db, beadsDir, ticketID string) (*agentsRow, error) {
 
 // ListAgents writes the ticket's agent records to out. With jsonOutput=true
 // the raw entries (newest first) are emitted as indented JSON; otherwise a
-// tab-aligned table with columns SESSION ID, MODE, PID, STARTED, STATE, ENV
-// is written.
+// tab-aligned table with columns SESSION ID, MODE, PID, STARTED, STATE,
+// CONTEXT, ENV is written.
 func ListAgents(db, beadsDir, ticketID string, jsonOutput bool, out io.Writer) error {
 	entries, err := LoadAgents(db, beadsDir, ticketID)
 	if err != nil {
@@ -193,12 +195,31 @@ func ListAgents(db, beadsDir, ticketID string, jsonOutput bool, out io.Writer) e
 		return err
 	}
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "SESSION ID\tMODE\tPID\tSTARTED\tSTATE\tENV")
+	fmt.Fprintln(tw, "SESSION ID\tMODE\tPID\tSTARTED\tSTATE\tCONTEXT\tENV")
 	for _, e := range reversed {
-		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%s\n",
-			e.SessionID, e.Mode, e.PID, FormatStarted(e.StartedAt), StateOf(e), e.Env)
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%s\t%s\n",
+			e.SessionID, e.Mode, e.PID, FormatStarted(e.StartedAt),
+			StateOf(e), FormatContextTokens(e.ContextTokens), e.Env)
 	}
 	return tw.Flush()
+}
+
+// FormatContextTokens renders a token count for the compact list view.
+// Values below 1000 print as-is; 1k–999k use a one-decimal "k" suffix;
+// 1_000_000 and up use "M". Zero (i.e. the field was never populated,
+// since omitempty drops it from JSON) renders as the empty string so the
+// column is blank for sessions that have never reported a usage block.
+func FormatContextTokens(n int) string {
+	switch {
+	case n <= 0:
+		return ""
+	case n < 1000:
+		return fmt.Sprintf("%d", n)
+	case n < 1_000_000:
+		return fmt.Sprintf("%.1fk", float64(n)/1000)
+	default:
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	}
 }
 
 // StateOf collapses (wrapper-pid liveness, recorded Status) into the value
@@ -233,12 +254,20 @@ func StateOf(e AgentEntry) string {
 // launched via `ticket agent` and never registered an entry).
 var ErrSessionNotFound = errors.New("no agent record found for session")
 
-// SetStatus updates the matching agent record's Status and StatusUpdatedAt.
-// Lookup is by sessionID; ticketID, if non-empty, scopes the search to a
-// single ticket. With ticketID empty all open tickets are scanned. A no-op
-// (Status already equal to status) is fast-pathed without touching the bead.
-// Returns [ErrSessionNotFound] when no record matches.
-func SetStatus(db, beadsDir, sessionID, status, ticketID string) error {
+// SetStatus updates the matching agent record's Status and StatusUpdatedAt,
+// and optionally its ContextTokens / ContextTokensUpdatedAt when
+// contextTokens > 0. Lookup is by sessionID; ticketID, if non-empty, scopes
+// the search to a single ticket. With ticketID empty all open tickets are
+// scanned. A no-op (Status already equal to status, contextTokens either 0
+// or already equal to the stored value) is fast-pathed without touching the
+// bead. Returns [ErrSessionNotFound] when no record matches.
+//
+// contextTokens is treated as an absolute snapshot, not a delta — a hook
+// retry passing the same value is idempotent. 0 means "no token information
+// available, leave ContextTokens unchanged"; callers that have a real zero
+// reading shouldn't happen in practice (every Claude turn has at least
+// output_tokens > 0).
+func SetStatus(db, beadsDir, sessionID, status, ticketID string, contextTokens int) error {
 	if sessionID == "" {
 		return errors.New("session id required")
 	}
@@ -263,11 +292,19 @@ func SetStatus(db, beadsDir, sessionID, status, ticketID string) error {
 			if e.SessionID != sessionID {
 				continue
 			}
-			if e.Status == status {
+			statusChanged := e.Status != status
+			tokensChanged := contextTokens > 0 && contextTokens != e.ContextTokens
+			if !statusChanged && !tokensChanged {
 				return nil
 			}
-			entries[i].Status = status
-			entries[i].StatusUpdatedAt = now
+			if statusChanged {
+				entries[i].Status = status
+				entries[i].StatusUpdatedAt = now
+			}
+			if tokensChanged {
+				entries[i].ContextTokens = contextTokens
+				entries[i].ContextTokensUpdatedAt = now
+			}
 			return saveAgents(db, beadsDir, tid, entries)
 		}
 	}

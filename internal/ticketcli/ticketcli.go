@@ -562,18 +562,34 @@ func runAgentSetStatus(db, beadsDir, ticket string, args []string) error {
 			agent.StatusRunning, agent.StatusWaiting, status)
 	}
 	fromHook := false
+	var contextTokens int
 	if session == "" {
-		s, err := sessionFromHookStdin()
+		p, err := hookPayloadFromStdin()
 		if err != nil {
-			return fmt.Errorf("read session id: %w", err)
+			return fmt.Errorf("read hook payload: %w", err)
 		}
-		session = s
+		if p != nil {
+			session = p.SessionID
+			// Prefer an explicit context_tokens field if the caller set
+			// one (manual or future-wrapper invocation); otherwise derive
+			// it from the transcript Claude Code points us at.
+			if p.ContextTokens > 0 {
+				contextTokens = p.ContextTokens
+			} else if p.TranscriptPath != "" {
+				n, err := agent.ContextTokensFromTranscript(p.TranscriptPath)
+				if err == nil {
+					contextTokens = n
+				}
+				// On read error we just skip the token update — a stale
+				// or missing transcript shouldn't fail the status flip.
+			}
+		}
 		fromHook = true
 	}
 	if session == "" {
 		return errors.New("no --session id supplied and stdin payload did not contain session_id")
 	}
-	err := agent.SetStatus(db, beadsDir, session, status, ticket)
+	err := agent.SetStatus(db, beadsDir, session, status, ticket, contextTokens)
 	// Hook-driven invocations fire for every claude session, not just those
 	// launched via `ticket agent` — so a missing record there is expected,
 	// not an error. Explicit --session calls (manual testing backstop) still
@@ -584,32 +600,40 @@ func runAgentSetStatus(db, beadsDir, ticket string, args []string) error {
 	return err
 }
 
-// sessionFromHookStdin parses Claude Code's hook payload from os.Stdin and
-// returns its session_id. The payload arrives as a JSON object with keys
-// session_id, transcript_path, cwd, hook_event_name (we only need the first).
-// Empty stdin returns ("", nil) so callers can fall back to other lookups.
-func sessionFromHookStdin() (string, error) {
+// hookStdinPayload is the subset of the Claude Code hook payload we read
+// from stdin. transcript_path is Claude's path to the session JSONL — we
+// tail it to derive the agent's current context-window size. context_tokens
+// is not part of the native Claude Code payload; it's a passthrough hatch
+// for tests and any future wrapper that wants to inject a pre-computed value.
+type hookStdinPayload struct {
+	SessionID      string `json:"session_id"`
+	TranscriptPath string `json:"transcript_path"`
+	ContextTokens  int    `json:"context_tokens"`
+}
+
+// hookPayloadFromStdin parses Claude Code's hook payload from os.Stdin.
+// Returns (nil, nil) when no payload is attached (interactive stdin or
+// empty body) so callers can fall back to other lookups.
+func hookPayloadFromStdin() (*hookStdinPayload, error) {
 	info, err := os.Stdin.Stat()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if info.Mode()&os.ModeCharDevice != 0 {
-		return "", nil
+		return nil, nil
 	}
 	body, err := io.ReadAll(os.Stdin)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if len(body) == 0 {
-		return "", nil
+		return nil, nil
 	}
-	var payload struct {
-		SessionID string `json:"session_id"`
-	}
+	var payload hookStdinPayload
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return "", fmt.Errorf("parse hook payload: %w", err)
+		return nil, fmt.Errorf("parse hook payload: %w", err)
 	}
-	return payload.SessionID, nil
+	return &payload, nil
 }
 
 func runCreate(db, beadsDir, ticket string, args []string, stdout io.Writer) error {

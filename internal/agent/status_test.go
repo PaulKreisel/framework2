@@ -45,7 +45,7 @@ func TestSetStatusUpdatesStatusAndTimestamp(t *testing.T) {
 
 	if err := agent.SetStatus("", beadsDir,
 		"11111111-1111-4111-8111-111111111111",
-		agent.StatusWaiting, ticket); err != nil {
+		agent.StatusWaiting, ticket, 0); err != nil {
 		t.Fatalf("SetStatus: %v", err)
 	}
 
@@ -89,7 +89,7 @@ func TestSetStatusIsNoOpWhenAlreadyAtTarget(t *testing.T) {
 
 	if err := agent.SetStatus("", beadsDir,
 		"22222222-2222-4222-8222-222222222222",
-		agent.StatusWaiting, ticket); err != nil {
+		agent.StatusWaiting, ticket, 0); err != nil {
 		t.Fatalf("SetStatus: %v", err)
 	}
 
@@ -107,7 +107,7 @@ func TestSetStatusErrorsWhenSessionMissing(t *testing.T) {
 
 	err := agent.SetStatus("", beadsDir,
 		"deadbeef-dead-4dea-8dea-deaddeaddead",
-		agent.StatusRunning, ticket)
+		agent.StatusRunning, ticket, 0)
 	if err == nil {
 		t.Fatalf("SetStatus on missing session: want error, got nil")
 	}
@@ -154,7 +154,7 @@ func TestSetStatusLocatesTicketWhenUnspecified(t *testing.T) {
 
 	if err := agent.SetStatus("", beadsDir,
 		"33333333-3333-4333-8333-333333333333",
-		agent.StatusWaiting, ""); err != nil {
+		agent.StatusWaiting, "", 0); err != nil {
 		t.Fatalf("SetStatus (no ticket id): %v", err)
 	}
 
