@@ -22,10 +22,12 @@ import (
 const nonClosedBuiltinStatuses = "open,in_progress,blocked,deferred"
 
 // RunAgent prints the agents that are currently `waiting` for input across the
-// descendants of ticketID. recursionDepth bounds the walk: 1 means direct
-// children only, 2 means children + grandchildren, and so on; any value <= 0
-// is treated as unlimited and walks the entire subtree. An empty ticketID
-// matches every non-closed bead (no ancestry/depth filter).
+// descendants of ticketID. With includeRunning, `running` agents are listed
+// alongside `waiting` ones; `exited` (dead-PID) records stay hidden either
+// way. recursionDepth bounds the walk: 1 means direct children only, 2 means
+// children + grandchildren, and so on; any value <= 0 is treated as unlimited
+// and walks the entire subtree. An empty ticketID matches every non-closed
+// bead (no ancestry/depth filter).
 //
 // Output is a tab-aligned table whose columns mirror `ticket agent list` with
 // a leading TICKET column. Rows are sorted with mode=agent before mode=spec,
@@ -41,7 +43,7 @@ const nonClosedBuiltinStatuses = "open,in_progress,blocked,deferred"
 // Closed beads with stale `agents` entries never enter the candidate set,
 // so a `waiting` wrapper recorded on a manually-closed bead is silently
 // hidden here; `ticket agent list <closed-id>` still surfaces it.
-func RunAgent(db, beadsDir, ticketID string, recursionDepth int, stdout io.Writer) error {
+func RunAgent(db, beadsDir, ticketID string, recursionDepth int, includeRunning bool, stdout io.Writer) error {
 	candidates, err := bdJSONList(beadsDir, db, "--has-metadata-key", "agents", "--status", nonClosedBuiltinStatuses, "--json", "-n", "0")
 	if err != nil {
 		return err
@@ -89,7 +91,8 @@ func RunAgent(db, beadsDir, ticketID string, recursionDepth int, stdout io.Write
 			continue
 		}
 		for _, e := range c.Agents {
-			if agent.StateOf(e) == agent.StatusWaiting {
+			s := agent.StateOf(e)
+			if s == agent.StatusWaiting || (includeRunning && s == agent.StatusRunning) {
 				rows = append(rows, row{ticket: c.ID, entry: e})
 			}
 		}

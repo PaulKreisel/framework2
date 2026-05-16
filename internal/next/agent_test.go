@@ -219,6 +219,48 @@ func TestNextAgentSkipsClosedDescendants(t *testing.T) {
 	}
 }
 
+// --all includes both running and waiting agents in the subtree.
+func TestNextAgentAllIncludesRunning(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+
+	root := testutil.CreateBead(t, beadsDir, "nextagent-all-root")
+	childRunning := testutil.CreateChildBead(t, beadsDir, "nextagent-all-child-running", root)
+	childWaiting := testutil.CreateChildBead(t, beadsDir, "nextagent-all-child-waiting", root)
+	registerAgent(t, beadsDir, childRunning, "11111111-1111-4111-8111-111111111111", "agent", agent.StatusRunning, 1)
+	registerAgent(t, beadsDir, childWaiting, "22222222-2222-4222-8222-222222222222", "agent", agent.StatusWaiting, 1)
+
+	stdout, stderr, code := testutil.RunTicketIn(t, beadsDir, "next", "agent", root, "--all")
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, stderr)
+	}
+	if !strings.Contains(stdout, childRunning) {
+		t.Errorf("--all output missing running agent on %s:\n%s", childRunning, stdout)
+	}
+	if !strings.Contains(stdout, childWaiting) {
+		t.Errorf("--all output missing waiting agent on %s:\n%s", childWaiting, stdout)
+	}
+}
+
+// --all must not surface exited (dead-PID) records — they're not "active".
+func TestNextAgentAllStillHidesDeadWrapper(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+
+	root := testutil.CreateBead(t, beadsDir, "nextagent-all-deadpid-root")
+	child := testutil.CreateChildBead(t, beadsDir, "nextagent-all-deadpid-child", root)
+	// PID 999999 is dead → StateOf collapses to "exited" — must not appear.
+	registerAgent(t, beadsDir, child, "ffffffff-ffff-4fff-8fff-ffffffffffff", "agent", agent.StatusRunning, 999999)
+
+	stdout, stderr, code := testutil.RunTicketIn(t, beadsDir, "next", "agent", root, "--all")
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, stderr)
+	}
+	if strings.TrimSpace(stdout) != "" {
+		t.Errorf("--all output should hide exited agent, got: %q", stdout)
+	}
+}
+
 func splitNonEmpty(s string) []string {
 	var out []string
 	for _, line := range strings.Split(s, "\n") {

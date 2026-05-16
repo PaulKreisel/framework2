@@ -103,12 +103,14 @@ subcommands:
                                           blocks the new bead; --not-blocked skips
                                           that dep.
   next [<id>]                             show ready descendants of a ticket
-  next agent [<id>] [--recursion-depth <N>]
+  next agent [<id>] [--all] [--recursion-depth <N>]
                                           list agents that are currently waiting
                                           for input across the descendants of a
                                           ticket. Default depth is unlimited;
                                           N=1 restricts the walk to direct
-                                          children.
+                                          children. With --all, running agents
+                                          are listed too (exited records stay
+                                          hidden).
   finish [<id>]                           wrap up: rebase the ticket's worktrees
                                           onto their parent branch (FF when no
                                           divergence, real rebase otherwise),
@@ -671,16 +673,19 @@ func runNext(db, beadsDir, ticket string, args []string, stdout, stderr io.Write
 	return next.Run(db, beadsDir, id, stdout, stderr)
 }
 
-// runNextAgent handles `ticket next agent [<id>] [--recursion-depth <N>]`.
+// runNextAgent handles `ticket next agent [<id>] [--all] [--recursion-depth <N>]`.
 // Depth defaults to 0 (interpreted as "unlimited" by next.RunAgent).
 func runNextAgent(db, beadsDir, ticket string, args []string, stdout io.Writer) error {
-	usage := "usage: ticket next agent [<id>] [--recursion-depth <N>]"
+	usage := "usage: ticket next agent [<id>] [--all] [--recursion-depth <N>]"
 	var depth int
 	var depthSet bool
+	var includeRunning bool
 	positional := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
+		case a == "--all":
+			includeRunning = true
 		case a == "--recursion-depth":
 			if i+1 >= len(args) {
 				return errors.New(usage)
@@ -708,7 +713,7 @@ func runNextAgent(db, beadsDir, ticket string, args []string, stdout io.Writer) 
 	if !depthSet {
 		depth = -1
 	}
-	return next.RunAgent(db, beadsDir, id, depth, stdout)
+	return next.RunAgent(db, beadsDir, id, depth, includeRunning, stdout)
 }
 
 func parseDepth(s string) (int, error) {
