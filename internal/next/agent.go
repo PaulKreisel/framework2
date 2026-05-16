@@ -12,10 +12,20 @@ import (
 	"framework2/internal/bdcli"
 )
 
+// nonClosedBuiltinStatuses is the comma-separated --status filter we pass
+// to `bd list`. bd has no native "not closed" inverse, so we enumerate the
+// built-in non-closed statuses. Custom statuses (e.g. "new") are NOT
+// included: bd 1.0.2 rejects unknown names in a multi-status filter on
+// databases where the custom status isn't registered, which would break
+// the testutil DBs. Acceptable trade-off because beads in custom statuses
+// can't currently hold live `waiting` agents in practice.
+const nonClosedBuiltinStatuses = "open,in_progress,blocked,deferred"
+
 // RunAgent prints the agents that are currently `waiting` for input across the
 // descendants of ticketID. recursionDepth bounds the walk: 1 means direct
 // children only, 2 means children + grandchildren, and so on; any value <= 0
-// is treated as unlimited and walks the entire subtree.
+// is treated as unlimited and walks the entire subtree. An empty ticketID
+// matches every non-closed bead (no ancestry/depth filter).
 //
 // Output is a tab-aligned table whose columns mirror `ticket agent list` with
 // a leading TICKET column. Rows are sorted with mode=agent before mode=spec,
@@ -23,48 +33,64 @@ import (
 // no header row when there is no data to show, matching `ticket next` on a
 // leaf.
 //
-// The walk fetches one level at a time via `bd children`, which returns each
-// child's metadata (including agents) in a single call. We descend into every
-// non-leaf node until depth runs out; we cannot short-circuit on leaves
-// without an explicit "has children" signal from bd, which today's JSON
-// surface doesn't provide.
+// Implementation: instead of a per-node BFS (one `bd children` round-trip
+// per internal node), we fetch the entire candidate set in one shot via
+// `bd list --has-metadata-key agents --status <non-closed>` and — only when
+// a concrete root was requested — verify ancestry against a second
+// `bd list --status <non-closed> --flat` call that supplies the parent map.
+// Closed beads with stale `agents` entries never enter the candidate set,
+// so a `waiting` wrapper recorded on a manually-closed bead is silently
+// hidden here; `ticket agent list <closed-id>` still surfaces it.
 func RunAgent(db, beadsDir, ticketID string, recursionDepth int, stdout io.Writer) error {
-	if ticketID == "" {
-		return fmt.Errorf("ticket id required")
+	candidates, err := bdJSONList(beadsDir, db, "--has-metadata-key", "agents", "--status", nonClosedBuiltinStatuses, "--json", "-n", "0")
+	if err != nil {
+		return err
 	}
+
+	// depthOf[id] gives the candidate's hop count from ticketID along the
+	// open-bead parent chain. A value of 0 means "is the root itself" (which
+	// we always exclude); >0 means a descendant at that depth. When
+	// ticketID is empty we skip ancestry resolution entirely and include
+	// every candidate at synthetic depth 1.
+	depthOf := make(map[string]int, len(candidates))
+	if ticketID == "" {
+		for _, c := range candidates {
+			depthOf[c.ID] = 1
+		}
+	} else {
+		all, err := bdJSONList(beadsDir, db, "--status", nonClosedBuiltinStatuses, "--json", "-n", "0", "--flat")
+		if err != nil {
+			return err
+		}
+		parent := make(map[string]string, len(all))
+		for _, r := range all {
+			parent[r.ID] = r.Parent
+		}
+		for _, c := range candidates {
+			d, ok := hopsToRoot(c.ID, ticketID, parent)
+			if !ok {
+				continue
+			}
+			depthOf[c.ID] = d
+		}
+	}
+
 	type row struct {
 		ticket string
 		entry  agent.AgentEntry
 	}
 	var rows []row
-
-	type frame struct {
-		id    string
-		depth int // remaining levels we are allowed to descend into
-	}
-	queue := []frame{{id: ticketID, depth: recursionDepth}}
-	for len(queue) > 0 {
-		f := queue[0]
-		queue = queue[1:]
-		if f.depth == 0 {
+	for _, c := range candidates {
+		d, ok := depthOf[c.ID]
+		if !ok || d == 0 {
 			continue
 		}
-		children, err := fetchChildren(beadsDir, db, f.id)
-		if err != nil {
-			return err
+		if recursionDepth > 0 && d > recursionDepth {
+			continue
 		}
-		nextDepth := f.depth - 1
-		if f.depth < 0 {
-			nextDepth = f.depth // stay negative — "unlimited" is sticky
-		}
-		for _, c := range children {
-			for _, e := range c.agents {
-				if agent.StateOf(e) == agent.StatusWaiting {
-					rows = append(rows, row{ticket: c.id, entry: e})
-				}
-			}
-			if nextDepth != 0 {
-				queue = append(queue, frame{id: c.id, depth: nextDepth})
+		for _, e := range c.Agents {
+			if agent.StateOf(e) == agent.StatusWaiting {
+				rows = append(rows, row{ticket: c.ID, entry: e})
 			}
 		}
 	}
@@ -92,39 +118,69 @@ func RunAgent(db, beadsDir, ticketID string, recursionDepth int, stdout io.Write
 	return tw.Flush()
 }
 
-// childRecord pairs a child's id with the agents recorded on it. Other
-// metadata fields are intentionally dropped — the walker only ever needs the
-// agents array.
-type childRecord struct {
-	id     string
-	agents []agent.AgentEntry
+// hopsToRoot walks `id` up the parent chain until it reaches root, runs out
+// of parents, or revisits a node. Returns (hops, true) on success — 0 if
+// id == root, >0 for a descendant — and (0, false) otherwise.
+func hopsToRoot(id, root string, parent map[string]string) (int, bool) {
+	seen := make(map[string]struct{})
+	hops := 0
+	cur := id
+	for {
+		if cur == root {
+			return hops, true
+		}
+		if _, dup := seen[cur]; dup {
+			return 0, false
+		}
+		seen[cur] = struct{}{}
+		next, ok := parent[cur]
+		if !ok || next == "" {
+			return 0, false
+		}
+		cur = next
+		hops++
+	}
 }
 
-func fetchChildren(beadsDir, db, parentID string) ([]childRecord, error) {
-	out, err := bdcli.Cmd(beadsDir, db, "--json", "children", parentID).Output()
-	if err != nil {
-		if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
-			return nil, fmt.Errorf("bd children %s: %v: %s", parentID, err, ee.Stderr)
-		}
-		return nil, fmt.Errorf("bd children %s: %w", parentID, err)
-	}
-	var rows []struct {
+// issueRow is the slice of `bd list --json` output the agent walker reads.
+// Other fields are intentionally dropped.
+type issueRow struct {
+	ID     string             `json:"id"`
+	Parent string             `json:"parent"`
+	Agents []agent.AgentEntry `json:"-"`
+}
+
+func (r *issueRow) UnmarshalJSON(data []byte) error {
+	var raw struct {
 		ID       string                     `json:"id"`
+		Parent   string                     `json:"parent"`
 		Metadata map[string]json.RawMessage `json:"metadata"`
 	}
-	if err := json.Unmarshal(out, &rows); err != nil {
-		return nil, fmt.Errorf("parse bd children output for %s: %w", parentID, err)
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
 	}
-	results := make([]childRecord, 0, len(rows))
-	for _, r := range rows {
-		rec := childRecord{id: r.ID}
-		raw, ok := r.Metadata["agents"]
-		if ok && len(raw) > 0 && string(raw) != "null" {
-			if err := json.Unmarshal(raw, &rec.agents); err != nil {
-				return nil, fmt.Errorf("parse agents for %s: %w", r.ID, err)
-			}
+	r.ID = raw.ID
+	r.Parent = raw.Parent
+	if blob, ok := raw.Metadata["agents"]; ok && len(blob) > 0 && string(blob) != "null" {
+		if err := json.Unmarshal(blob, &r.Agents); err != nil {
+			return fmt.Errorf("parse agents for %s: %w", raw.ID, err)
 		}
-		results = append(results, rec)
 	}
-	return results, nil
+	return nil
+}
+
+func bdJSONList(beadsDir, db string, args ...string) ([]issueRow, error) {
+	full := append([]string{"list"}, args...)
+	out, err := bdcli.Cmd(beadsDir, db, full...).Output()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
+			return nil, fmt.Errorf("bd %v: %v: %s", full, err, ee.Stderr)
+		}
+		return nil, fmt.Errorf("bd %v: %w", full, err)
+	}
+	var rows []issueRow
+	if err := json.Unmarshal(out, &rows); err != nil {
+		return nil, fmt.Errorf("parse bd %v output: %w", full, err)
+	}
+	return rows, nil
 }

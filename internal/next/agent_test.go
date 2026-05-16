@@ -194,6 +194,31 @@ func TestNextAgentExcludesRoot(t *testing.T) {
 	}
 }
 
+// Pins the post-ai-vrc.28 "skip closed" semantics: a `waiting` agent
+// recorded on a closed bead must not appear in `ticket next agent` output.
+// (The agent is still visible via `ticket agent list <closed-id>` for
+// recovery — see the comment in agent.go.)
+func TestNextAgentSkipsClosedDescendants(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+
+	root := testutil.CreateBead(t, beadsDir, "nextagent-closed-root")
+	child := testutil.CreateChildBead(t, beadsDir, "nextagent-closed-child", root)
+	registerAgent(t, beadsDir, child, "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", "agent", agent.StatusWaiting, 1)
+
+	if err := testutil.BdCmd(beadsDir, "close", child).Run(); err != nil {
+		t.Fatalf("bd close %s: %v", child, err)
+	}
+
+	stdout, stderr, code := testutil.RunTicketIn(t, beadsDir, "next", "agent", root)
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, stderr)
+	}
+	if strings.TrimSpace(stdout) != "" {
+		t.Errorf("waiting agent on closed child leaked into output: %q", stdout)
+	}
+}
+
 func splitNonEmpty(s string) []string {
 	var out []string
 	for _, line := range strings.Split(s, "\n") {
