@@ -15,6 +15,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -102,6 +103,12 @@ subcommands:
                                           blocks the new bead; --not-blocked skips
                                           that dep.
   next [<id>]                             show ready descendants of a ticket
+  next agent [<id>] [--recursion-depth <N>]
+                                          list agents that are currently waiting
+                                          for input across the descendants of a
+                                          ticket. Default depth is unlimited;
+                                          N=1 restricts the walk to direct
+                                          children.
   finish [<id>]                           wrap up: rebase the ticket's worktrees
                                           onto their parent branch (FF when no
                                           divergence, real rebase otherwise),
@@ -654,11 +661,65 @@ func runFinish(db, beadsDir, ticket string, args []string, stdout io.Writer) err
 }
 
 func runNext(db, beadsDir, ticket string, args []string, stdout, stderr io.Writer) error {
+	if len(args) > 0 && args[0] == "agent" {
+		return runNextAgent(db, beadsDir, ticket, args[1:], stdout)
+	}
 	id, _, err := resolveOptionalID(ticket, args, 0, "usage: ticket next [<id>]")
 	if err != nil {
 		return err
 	}
 	return next.Run(db, beadsDir, id, stdout, stderr)
+}
+
+// runNextAgent handles `ticket next agent [<id>] [--recursion-depth <N>]`.
+// Depth defaults to 0 (interpreted as "unlimited" by next.RunAgent).
+func runNextAgent(db, beadsDir, ticket string, args []string, stdout io.Writer) error {
+	usage := "usage: ticket next agent [<id>] [--recursion-depth <N>]"
+	var depth int
+	var depthSet bool
+	positional := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--recursion-depth":
+			if i+1 >= len(args) {
+				return errors.New(usage)
+			}
+			n, err := parseDepth(args[i+1])
+			if err != nil {
+				return err
+			}
+			depth, depthSet = n, true
+			i++
+		case strings.HasPrefix(a, "--recursion-depth="):
+			n, err := parseDepth(strings.TrimPrefix(a, "--recursion-depth="))
+			if err != nil {
+				return err
+			}
+			depth, depthSet = n, true
+		default:
+			positional = append(positional, a)
+		}
+	}
+	id, _, err := resolveOptionalID(ticket, positional, 0, usage)
+	if err != nil {
+		return err
+	}
+	if !depthSet {
+		depth = -1
+	}
+	return next.RunAgent(db, beadsDir, id, depth, stdout)
+}
+
+func parseDepth(s string) (int, error) {
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, fmt.Errorf("--recursion-depth: %q is not an integer", s)
+	}
+	if n < 1 {
+		return 0, fmt.Errorf("--recursion-depth: must be >= 1, got %d", n)
+	}
+	return n, nil
 }
 
 // resolveID pulls the ticket id from either the global --ticket flag or the

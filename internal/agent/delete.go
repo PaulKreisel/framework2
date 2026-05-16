@@ -16,7 +16,7 @@ import (
 // rejected for the same reason — silently collapsing them would hide a bug
 // in the caller.
 //
-// By default a record whose wrapper is still alive ([stateOf] reports
+// By default a record whose wrapper is still alive ([StateOf] reports
 // "running"/"waiting") is refused: the list exists to track launched
 // sessions, and deleting a live one would lose the user's only handle on
 // the running agent. Pass force=true to delete anyway (the process itself
@@ -57,7 +57,7 @@ func DeleteAgents(db, beadsDir, ticketID string, sessionIDs []string, force bool
 			return unknownSessionError(ticketID, sid, entries)
 		}
 		if !force {
-			state := stateOf(entries[i])
+			state := StateOf(entries[i])
 			if state != "exited" {
 				liveBlockers = append(liveBlockers, fmt.Sprintf("%s (%s)", sid, state))
 			}

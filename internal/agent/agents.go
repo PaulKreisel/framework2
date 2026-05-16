@@ -20,14 +20,14 @@ import (
 //
 // PID is the wrapper process pid (the Go process running [Run]), which is
 // stable across the wrapper's relaunch loop — unlike the claude pid recorded
-// in [PIDFile], which changes each iteration. Liveness checks ([stateOf]) use
+// in [PIDFile], which changes each iteration. Liveness checks ([StateOf]) use
 // this pid to decide whether the agent is still running.
 //
 // Status is a free-form string driven by Claude Code hooks via
 // `this agent set-status`. Today's writers only emit "running" and "waiting";
 // the field is intentionally not an enum so finer waiting states can be
 // added later without a schema migration. Empty Status on a legacy entry is
-// treated as "running" by [stateOf].
+// treated as "running" by [StateOf].
 type AgentEntry struct {
 	SessionID       string `json:"sessionId"`
 	PID             int    `json:"pid"`
@@ -196,12 +196,12 @@ func ListAgents(db, beadsDir, ticketID string, jsonOutput bool, out io.Writer) e
 	fmt.Fprintln(tw, "SESSION ID\tMODE\tPID\tSTARTED\tSTATE\tENV")
 	for _, e := range reversed {
 		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%s\n",
-			e.SessionID, e.Mode, e.PID, formatStarted(e.StartedAt), stateOf(e), e.Env)
+			e.SessionID, e.Mode, e.PID, FormatStarted(e.StartedAt), StateOf(e), e.Env)
 	}
 	return tw.Flush()
 }
 
-// stateOf collapses (wrapper-pid liveness, recorded Status) into the value
+// StateOf collapses (wrapper-pid liveness, recorded Status) into the value
 // shown in the STATE column: "exited" wins when the wrapper is dead so a
 // stale "running"/"waiting" record never masks a dead session; otherwise the
 // hook-driven Status is surfaced (defaulting to "running" for legacy entries
@@ -211,7 +211,7 @@ func ListAgents(db, beadsDir, ticketID string, jsonOutput bool, out io.Writer) e
 // exists but we don't own it (e.g. init on macOS). EPERM therefore counts as
 // alive — denying that would falsely report any running wrapper as "exited"
 // whenever it runs under a different uid.
-func stateOf(e AgentEntry) string {
+func StateOf(e AgentEntry) string {
 	if e.PID <= 0 {
 		return "exited"
 	}
@@ -307,10 +307,10 @@ func ticketsWithAgents(db, beadsDir string) ([]string, error) {
 	return ids, nil
 }
 
-// formatStarted re-renders an RFC 3339 timestamp as "YYYY-MM-DD HH:MM" in
+// FormatStarted re-renders an RFC 3339 timestamp as "YYYY-MM-DD HH:MM" in
 // local time for the table view. Invalid input is passed through verbatim so
 // no agent record ever silently disappears.
-func formatStarted(s string) string {
+func FormatStarted(s string) string {
 	if s == "" {
 		return ""
 	}

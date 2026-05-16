@@ -73,7 +73,7 @@ func Attach(db, beadsDir, ticketID, sessionID string) error {
 	if entry == nil {
 		return unknownSessionError(ticketID, sessionID, entries)
 	}
-	state := stateOf(*entry)
+	state := StateOf(*entry)
 	if state == StatusRunning || state == StatusWaiting {
 		if runtime.GOOS != "darwin" {
 			return fmt.Errorf("focus is macOS-only (GOOS=%s); no portable terminal API yet", runtime.GOOS)

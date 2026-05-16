@@ -61,6 +61,17 @@ func TestSubcommandFormParity(t *testing.T) {
 		// beads plugin..." line — making the form-vs-form comparison flake.
 		// Parity for the global-flag plumbing is already covered by the
 		// rows above; readd a `next` row only after the tip can be silenced.
+		// `next agent` is fine to include — it doesn't go through bd ready.
+		{
+			name: "next agent",
+			sub:  []string{"next", "agent"},
+			wantOut: func(t *testing.T, out string) {
+				// No descendants, no waiting agents — empty output.
+				if strings.TrimSpace(out) != "" {
+					t.Errorf("expected empty output, got %q", out)
+				}
+			},
+		},
 	}
 
 	for _, tc := range cases {
