@@ -239,12 +239,13 @@ func renderSubtreeTable(rows []agentRow, stdout io.Writer) error {
 		return nil
 	}
 	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "TICKET\tSESSION ID\tMODE\tPID\tSTARTED\tSTATE\tENV")
+	fmt.Fprintln(tw, "TICKET\tSESSION ID\tMODE\tPID\tSTARTED\tSTATE\tENV\tWAITING REASON")
 	for _, r := range rows {
 		e := r.entry
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\t%s\t%s\n",
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\n",
 			r.ticket, e.SessionID, e.Mode, e.PID,
-			agent.FormatStarted(e.StartedAt), agent.StateOf(e), e.Env)
+			agent.FormatStarted(e.StartedAt), agent.StateOf(e), e.Env,
+			agent.FormatWaitingReason(e))
 	}
 	return tw.Flush()
 }
