@@ -327,6 +327,167 @@ func TestRunSpecModeDoesNotClaim(t *testing.T) {
 	}
 }
 
+// TestRunAgentModeInitialPrompt asserts that a fresh `ticket agent` launch
+// passes [agent.InitialAgentPrompt] as the trailing positional argument so
+// claude dispatches it as turn 1 instead of opening to a blank input.
+func TestRunAgentModeInitialPrompt(t *testing.T) {
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBeadFull(t, beadsDir, "agent-initial-prompt", "x", "")
+	mustEnv(t, beadsDir, ticket)
+
+	workDir := t.TempDir()
+	argvFile := filepath.Join(workDir, "argv")
+	// Fake claude: dump $@ one arg per line.
+	script := fmt.Sprintf(`printf "%%s\n" "$@" > %q`, argvFile)
+
+	prevCmd, prevArgs := agent.AgentCommand, agent.AgentDefaultArgs
+	t.Cleanup(func() { agent.AgentCommand, agent.AgentDefaultArgs = prevCmd, prevArgs })
+	agent.AgentCommand = "/bin/sh"
+	agent.AgentDefaultArgs = []string{"-c", script, "fake-claude"}
+
+	done := make(chan error, 1)
+	go func() { done <- agent.Run("", beadsDir, ticket, agent.ModeAgent) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("agent.Run: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("agent.Run hung")
+	}
+
+	body, err := os.ReadFile(argvFile)
+	if err != nil {
+		t.Fatalf("read argv: %v", err)
+	}
+	args := strings.Split(strings.TrimRight(string(body), "\n"), "\n")
+	if len(args) == 0 || args[len(args)-1] != agent.InitialAgentPrompt {
+		t.Errorf("trailing argv = %q, want %q\nfull argv:\n%s",
+			args[len(args)-1], agent.InitialAgentPrompt, strings.Join(args, "\n"))
+	}
+}
+
+// TestRunSpecModeNoInitialPrompt asserts spec mode does NOT auto-submit a
+// kickoff prompt: the operator must type the first input.
+func TestRunSpecModeNoInitialPrompt(t *testing.T) {
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBeadFull(t, beadsDir, "spec-no-initial-prompt", "x", "")
+	mustEnv(t, beadsDir, ticket)
+
+	workDir := t.TempDir()
+	argvFile := filepath.Join(workDir, "argv")
+	script := fmt.Sprintf(`printf "%%s\n" "$@" > %q`, argvFile)
+
+	prevCmd, prevArgs := agent.AgentCommand, agent.AgentDefaultArgs
+	t.Cleanup(func() { agent.AgentCommand, agent.AgentDefaultArgs = prevCmd, prevArgs })
+	agent.AgentCommand = "/bin/sh"
+	agent.AgentDefaultArgs = []string{"-c", script, "fake-claude"}
+
+	done := make(chan error, 1)
+	go func() { done <- agent.Run("", beadsDir, ticket, agent.ModeSpec) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("agent.Run (spec): %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("agent.Run (spec) hung")
+	}
+
+	body, _ := os.ReadFile(argvFile)
+	if strings.Contains(string(body), agent.InitialAgentPrompt) {
+		t.Errorf("spec mode must not pass InitialAgentPrompt; argv:\n%s", string(body))
+	}
+}
+
+// TestRunResumeNoInitialPrompt asserts that a resume (existing transcript)
+// does NOT re-inject the kickoff prompt — the transcript already has turn 1.
+func TestRunResumeNoInitialPrompt(t *testing.T) {
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBeadFull(t, beadsDir, "agent-resume-no-prompt", "x", "")
+	mustEnv(t, beadsDir, ticket)
+
+	workDir := t.TempDir()
+	argvFile := filepath.Join(workDir, "argv")
+	script := fmt.Sprintf(`printf "%%s\n" "$@" > %q`, argvFile)
+
+	prevCmd, prevArgs := agent.AgentCommand, agent.AgentDefaultArgs
+	t.Cleanup(func() { agent.AgentCommand, agent.AgentDefaultArgs = prevCmd, prevArgs })
+	agent.AgentCommand = "/bin/sh"
+	agent.AgentDefaultArgs = []string{"-c", script, "fake-claude"}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- agent.RunWithResume("", beadsDir, ticket,
+			"00000000-0000-4000-8000-000000000abc", agent.ModeAgent)
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("agent.RunWithResume: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("agent.RunWithResume hung")
+	}
+
+	body, _ := os.ReadFile(argvFile)
+	if strings.Contains(string(body), agent.InitialAgentPrompt) {
+		t.Errorf("resume must not pass InitialAgentPrompt; argv:\n%s", string(body))
+	}
+}
+
+// TestRunRegistersAgentAsWaiting asserts the agent is registered with
+// status="waiting" at launch — the UserPromptSubmit hook flips it to
+// "running" once the first turn actually starts. Uniform across modes.
+func TestRunRegistersAgentAsWaiting(t *testing.T) {
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBeadFull(t, beadsDir, "agent-initial-waiting", "x", "")
+	mustEnv(t, beadsDir, ticket)
+
+	// Fake claude that blocks until we let it exit, so we can read the
+	// registered record while the wrapper is still inside the loop.
+	gate := filepath.Join(t.TempDir(), "gate")
+	script := fmt.Sprintf(`while [ ! -f %q ]; do sleep 0.05; done`, gate)
+
+	prevCmd, prevArgs := agent.AgentCommand, agent.AgentDefaultArgs
+	t.Cleanup(func() { agent.AgentCommand, agent.AgentDefaultArgs = prevCmd, prevArgs })
+	agent.AgentCommand = "/bin/sh"
+	agent.AgentDefaultArgs = []string{"-c", script, "fake-claude"}
+
+	done := make(chan error, 1)
+	go func() { done <- agent.Run("", beadsDir, ticket, agent.ModeAgent) }()
+
+	// Poll for the registered record (registration happens before fork).
+	deadline := time.Now().Add(5 * time.Second)
+	var entries []agent.AgentEntry
+	for time.Now().Before(deadline) {
+		es, err := agent.LoadAgents("", beadsDir, ticket)
+		if err == nil && len(es) > 0 {
+			entries = es
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if len(entries) == 0 {
+		_ = os.WriteFile(gate, nil, 0o644)
+		<-done
+		t.Fatal("no agent record registered within 5s")
+	}
+	if got := entries[0].Status; got != agent.StatusWaiting {
+		t.Errorf("registered Status = %q, want %q", got, agent.StatusWaiting)
+	}
+
+	_ = os.WriteFile(gate, nil, 0o644)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("agent.Run: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("agent.Run hung")
+	}
+}
+
 func writePID(t *testing.T, envPath string, pid int) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(envPath, agent.PIDFile), []byte(strconv.Itoa(pid)+"\n"), 0o644); err != nil {

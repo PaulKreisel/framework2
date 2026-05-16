@@ -38,13 +38,13 @@ type AgentEntry struct {
 	StatusUpdatedAt string `json:"statusUpdatedAt,omitempty"`
 }
 
-// StatusRunning is the initial status assigned when an agent is registered,
-// and the value the UserPromptSubmit hook writes back when the user submits
-// a prompt.
+// StatusRunning is the value the UserPromptSubmit hook writes when a turn
+// starts (including the auto-submitted kickoff prompt in agent mode).
 const StatusRunning = "running"
 
-// StatusWaiting is what the Stop hook writes when an assistant turn ends and
-// claude is waiting for the next user input.
+// StatusWaiting is the initial status assigned when an agent is registered
+// (claude hasn't received any turn yet) and the value the Stop hook writes
+// when an assistant turn ends and claude is waiting for the next user input.
 const StatusWaiting = "waiting"
 
 // String returns "agent" or "spec".

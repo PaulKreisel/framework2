@@ -46,6 +46,13 @@ const (
 // by `this env syncback` / `ticket env syncback`.
 const DescriptionFile = "description.md"
 
+// InitialAgentPrompt is the auto-submitted first user prompt for [ModeAgent]
+// fresh launches. The leading `/goal` is a slash command claude dispatches on
+// the first turn. [ModeSpec] does not auto-submit a prompt — it opens to a
+// blank input and waits for the operator. Resumes/relaunches also skip this:
+// they already have a transcript.
+const InitialAgentPrompt = `/goal implement what is described in "./description.md". Only stop if there are unclarities. Create a commit when done and state what was done. As soon as we need to deviate from the description.md, stop to check with the user.`
+
 // Run is the fresh-launch variant of [RunWithResume]: it generates a new
 // session id, claims the bead, and lets claude allocate the session via
 // `--session-id`. See [RunWithResume] for the resume-on-existing-transcript
@@ -114,7 +121,7 @@ func RunWithResume(db, beadsDir, ticketID, resumeSessionID string, mode Mode) er
 		Mode:            mode.String(),
 		StartedAt:       startedAt,
 		Env:             envPath,
-		Status:          StatusRunning,
+		Status:          StatusWaiting,
 		StatusUpdatedAt: startedAt,
 	}); err != nil {
 		return fmt.Errorf("register agent: %w", err)
@@ -144,6 +151,12 @@ func RunWithResume(db, beadsDir, ticketID, resumeSessionID string, mode Mode) er
 			}
 		}
 		argv = append(argv, extraArgs...)
+		// Fresh-launch agent mode gets a kickoff prompt as the trailing
+		// positional, so claude dispatches it on turn 1 instead of opening
+		// to a blank input. Spec mode and resumes/relaunches skip this.
+		if len(extraArgs) == 0 && resumeSessionID == "" && mode == ModeAgent {
+			argv = append(argv, InitialAgentPrompt)
+		}
 		cmd := exec.Command(AgentCommand, argv...)
 		cmd.Dir = envPath
 		cmd.Stdin = os.Stdin
