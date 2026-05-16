@@ -45,7 +45,7 @@ func TestSetStatusUpdatesStatusAndTimestamp(t *testing.T) {
 
 	if err := agent.SetStatus("", beadsDir,
 		"11111111-1111-4111-8111-111111111111",
-		agent.StatusWaiting, ticket, 0); err != nil {
+		agent.StatusWaiting, "", ticket, 0); err != nil {
 		t.Fatalf("SetStatus: %v", err)
 	}
 
@@ -89,7 +89,7 @@ func TestSetStatusIsNoOpWhenAlreadyAtTarget(t *testing.T) {
 
 	if err := agent.SetStatus("", beadsDir,
 		"22222222-2222-4222-8222-222222222222",
-		agent.StatusWaiting, ticket, 0); err != nil {
+		agent.StatusWaiting, "", ticket, 0); err != nil {
 		t.Fatalf("SetStatus: %v", err)
 	}
 
@@ -107,7 +107,7 @@ func TestSetStatusErrorsWhenSessionMissing(t *testing.T) {
 
 	err := agent.SetStatus("", beadsDir,
 		"deadbeef-dead-4dea-8dea-deaddeaddead",
-		agent.StatusRunning, ticket, 0)
+		agent.StatusRunning, "", ticket, 0)
 	if err == nil {
 		t.Fatalf("SetStatus on missing session: want error, got nil")
 	}
@@ -154,7 +154,7 @@ func TestSetStatusLocatesTicketWhenUnspecified(t *testing.T) {
 
 	if err := agent.SetStatus("", beadsDir,
 		"33333333-3333-4333-8333-333333333333",
-		agent.StatusWaiting, "", 0); err != nil {
+		agent.StatusWaiting, "", "", 0); err != nil {
 		t.Fatalf("SetStatus (no ticket id): %v", err)
 	}
 
@@ -306,6 +306,332 @@ func TestSetStatusCLIRejectsUnknownState(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "frobnicating") {
 		t.Errorf("error %q should mention the bad state", stderr)
+	}
+}
+
+// TestSetStatusRoundTripsWaitingReason covers the round-trip described in
+// description.md: register, flip to waiting with a reason, reload, assert
+// persisted; flip back to running (empty reason), assert cleared.
+func TestSetStatusRoundTripsWaitingReason(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBeadFull(t, beadsDir, "setstatus-reason", "x", "")
+
+	sid := "abababab-abab-4bab-8bab-ababababab01"
+	if err := agent.RegisterAgent("", beadsDir, ticket, agent.AgentEntry{
+		SessionID: sid, PID: 1, Mode: "agent",
+		StartedAt: "2026-05-15T14:00:00Z", Env: "/env-r",
+		Status: agent.StatusRunning,
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	reason := "Waiting for the user to confirm the schema migration."
+	if err := agent.SetStatus("", beadsDir, sid, agent.StatusWaiting, reason, ticket, 0); err != nil {
+		t.Fatalf("SetStatus waiting: %v", err)
+	}
+	if got := loadOne(t, beadsDir, ticket); got.WaitingReason != reason {
+		t.Errorf("WaitingReason = %q, want %q", got.WaitingReason, reason)
+	}
+
+	// Back to running: reason must clear so a stale message can't
+	// survive a UserPromptSubmit.
+	if err := agent.SetStatus("", beadsDir, sid, agent.StatusRunning, "", ticket, 0); err != nil {
+		t.Fatalf("SetStatus running: %v", err)
+	}
+	got := loadOne(t, beadsDir, ticket)
+	if got.WaitingReason != "" {
+		t.Errorf("WaitingReason after running transition = %q, want empty", got.WaitingReason)
+	}
+	if got.Status != agent.StatusRunning {
+		t.Errorf("Status = %q, want %q", got.Status, agent.StatusRunning)
+	}
+}
+
+// TestSetStatusClearsReasonEvenWhenCallerPassesOne pins the "running implies
+// no reason" rule end-to-end: even a misuse where a reason is passed
+// alongside StatusRunning must clear the stored value.
+func TestSetStatusClearsReasonEvenWhenCallerPassesOne(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBeadFull(t, beadsDir, "setstatus-reason-clear", "x", "")
+
+	sid := "abababab-abab-4bab-8bab-ababababab02"
+	if err := agent.RegisterAgent("", beadsDir, ticket, agent.AgentEntry{
+		SessionID: sid, PID: 1, Mode: "agent",
+		StartedAt: "2026-05-15T14:00:00Z", Env: "/env",
+		Status: agent.StatusWaiting, WaitingReason: "previous turn",
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if err := agent.SetStatus("", beadsDir, sid, agent.StatusRunning, "ignored", ticket, 0); err != nil {
+		t.Fatalf("SetStatus: %v", err)
+	}
+	if got := loadOne(t, beadsDir, ticket); got.WaitingReason != "" {
+		t.Errorf("WaitingReason = %q, want empty", got.WaitingReason)
+	}
+}
+
+func TestSetStatusCLIParsesLastAssistantMessageFromStdin(t *testing.T) {
+	// The hook signature: session_id and last_assistant_message arrive
+	// together on stdin. The CLI must forward the message through to the
+	// stored WaitingReason.
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBeadFull(t, beadsDir, "setstatus-stdin-reason", "x", "")
+
+	sid := "abababab-abab-4bab-8bab-ababababab03"
+	if err := agent.RegisterAgent("", beadsDir, ticket, agent.AgentEntry{
+		SessionID: sid, PID: 1, Mode: "agent",
+		StartedAt: "2026-05-15T14:00:00Z", Env: "/env",
+		Status: agent.StatusRunning,
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	payload := `{"session_id":"abababab-abab-4bab-8bab-ababababab03",` +
+		`"hook_event_name":"Stop",` +
+		`"last_assistant_message":"I have applied the rename and am ready for the next step."}`
+	if _, err := w.Write([]byte(payload)); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	w.Close()
+	origStdin := os.Stdin
+	os.Stdin = r
+	t.Cleanup(func() { os.Stdin = origStdin })
+
+	_, stderr, code := testutil.RunTicketIn(t, beadsDir, "agent", "set-status", "waiting")
+	if code != 0 {
+		t.Fatalf("set-status: exit=%d stderr=%q", code, stderr)
+	}
+	got := loadOne(t, beadsDir, ticket)
+	if got.WaitingReason != "I have applied the rename and am ready for the next step." {
+		t.Errorf("WaitingReason = %q, want the message from stdin", got.WaitingReason)
+	}
+}
+
+func TestSetStatusCLIToleratesMissingLastAssistantMessage(t *testing.T) {
+	// A stdin payload without last_assistant_message must not error — older
+	// hook payloads or non-Stop events (UserPromptSubmit) lack the field
+	// and should still succeed.
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBeadFull(t, beadsDir, "setstatus-stdin-noreason", "x", "")
+
+	sid := "abababab-abab-4bab-8bab-ababababab04"
+	if err := agent.RegisterAgent("", beadsDir, ticket, agent.AgentEntry{
+		SessionID: sid, PID: 1, Mode: "agent",
+		StartedAt: "2026-05-15T14:00:00Z", Env: "/env",
+		Status: agent.StatusRunning,
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	if _, err := w.Write([]byte(`{"session_id":"abababab-abab-4bab-8bab-ababababab04","hook_event_name":"Stop"}`)); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	w.Close()
+	origStdin := os.Stdin
+	os.Stdin = r
+	t.Cleanup(func() { os.Stdin = origStdin })
+
+	_, stderr, code := testutil.RunTicketIn(t, beadsDir, "agent", "set-status", "waiting")
+	if code != 0 {
+		t.Fatalf("set-status: exit=%d stderr=%q", code, stderr)
+	}
+	if got := loadOne(t, beadsDir, ticket); got.WaitingReason != "" {
+		t.Errorf("WaitingReason = %q, want empty when payload omits the field", got.WaitingReason)
+	}
+}
+
+func TestListAgentsTruncatesWaitingReason(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBeadFull(t, beadsDir, "list-truncates-reason", "x", "")
+
+	// Reason longer than the column max, with a newline that must be
+	// collapsed to a single space in the table view.
+	reason := "line one is short\nline two adds enough text that the rendered cell goes past the eighty-character cap that the table view enforces"
+	if err := agent.RegisterAgent("", beadsDir, ticket, agent.AgentEntry{
+		SessionID: "ccccccc1-cccc-4ccc-8ccc-cccccccccccc",
+		PID:       1, Mode: "agent",
+		StartedAt: "2026-05-15T14:00:00Z", Env: "/env",
+		Status:        agent.StatusWaiting,
+		WaitingReason: reason,
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	stdout, stderr, code := testutil.RunTicketIn(t, beadsDir, "agent", "list", ticket)
+	if code != 0 {
+		t.Fatalf("agent list: exit=%d stderr=%q", code, stderr)
+	}
+	if !strings.Contains(stdout, "WAITING REASON") {
+		t.Errorf("WAITING REASON header missing:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "line one is short line two") {
+		t.Errorf("collapsed reason missing:\n%s", stdout)
+	}
+	if strings.Contains(stdout, "\nline two") {
+		t.Errorf("multi-line reason leaked into table view:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "…") {
+		t.Errorf("ellipsis missing for over-long reason:\n%s", stdout)
+	}
+}
+
+func TestListAgentsOmitsReasonForRunningAgent(t *testing.T) {
+	// Only waiting agents own a meaningful reason. A row that's running (or
+	// exited) must have a blank cell even if a stale reason somehow survived.
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBeadFull(t, beadsDir, "list-running-blank-reason", "x", "")
+
+	if err := agent.RegisterAgent("", beadsDir, ticket, agent.AgentEntry{
+		SessionID: "ccccccc2-cccc-4ccc-8ccc-cccccccccccc",
+		PID:       1, Mode: "agent",
+		StartedAt:     "2026-05-15T14:00:00Z",
+		Env:           "/env",
+		Status:        agent.StatusRunning,
+		WaitingReason: "stale-reason-should-not-render",
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	stdout, stderr, code := testutil.RunTicketIn(t, beadsDir, "agent", "list", ticket)
+	if code != 0 {
+		t.Fatalf("agent list: exit=%d stderr=%q", code, stderr)
+	}
+	if strings.Contains(stdout, "stale-reason-should-not-render") {
+		t.Errorf("running row leaked a stale reason:\n%s", stdout)
+	}
+}
+
+func TestAgentStatusCLIPrintsFullReason(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBeadFull(t, beadsDir, "agent-status-full-reason", "x", "")
+
+	full := "I just finished applying the rename across all callers.\nNext I'll re-run the suite, but I want you to confirm the surrounding files look right first."
+	if err := agent.RegisterAgent("", beadsDir, ticket, agent.AgentEntry{
+		SessionID: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+		PID:       1, Mode: "agent",
+		StartedAt:     "2026-05-15T14:00:00Z",
+		Env:           "/env",
+		Status:        agent.StatusWaiting,
+		WaitingReason: full,
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	stdout, stderr, code := testutil.RunTicketIn(t, beadsDir,
+		"agent", "status", ticket, "dddddddd-dddd-4ddd-8ddd-dddddddddddd")
+	if code != 0 {
+		t.Fatalf("agent status: exit=%d stderr=%q", code, stderr)
+	}
+	// Full reason, including its embedded newline, must appear verbatim.
+	if !strings.Contains(stdout, full) {
+		t.Errorf("untruncated reason missing from output:\n%s", stdout)
+	}
+	for _, want := range []string{"dddddddd-dddd-4ddd-8ddd-dddddddddddd", "agent", "waiting"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("expected %q in output:\n%s", want, stdout)
+		}
+	}
+}
+
+func TestAgentStatusCLIRejectsUnknownSession(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBeadFull(t, beadsDir, "agent-status-typo", "x", "")
+
+	known := "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+	if err := agent.RegisterAgent("", beadsDir, ticket, agent.AgentEntry{
+		SessionID: known, PID: 999999, Mode: "agent",
+		StartedAt: "2026-05-15T14:00:00Z", Env: "/env",
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	_, stderr, code := testutil.RunTicketIn(t, beadsDir,
+		"agent", "status", ticket, "ffffffff-ffff-4fff-8fff-ffffffffffff")
+	if code == 0 {
+		t.Fatalf("agent status with bad id: want non-zero exit, got 0 (stderr=%q)", stderr)
+	}
+	if !strings.Contains(stderr, "not found") {
+		t.Errorf("error %q should say 'not found'", stderr)
+	}
+	if !strings.Contains(stderr, known) {
+		t.Errorf("error %q should list the valid session id %q", stderr, known)
+	}
+}
+
+func TestAgentStatusCLIJSONShape(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBeadFull(t, beadsDir, "agent-status-json", "x", "")
+
+	sid := "f1f1f1f1-f1f1-4f1f-8f1f-f1f1f1f1f1f1"
+	reason := "Waiting on user input for X."
+	if err := agent.RegisterAgent("", beadsDir, ticket, agent.AgentEntry{
+		SessionID: sid, PID: 1, Mode: "agent",
+		StartedAt:     "2026-05-15T14:00:00Z",
+		Env:           "/env",
+		Status:        agent.StatusWaiting,
+		WaitingReason: reason,
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	stdout, stderr, code := testutil.RunTicketIn(t, beadsDir,
+		"agent", "status", ticket, sid, "--json")
+	if code != 0 {
+		t.Fatalf("agent status --json: exit=%d stderr=%q", code, stderr)
+	}
+	var got agent.AgentEntry
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatalf("parse json: %v\n%s", err, stdout)
+	}
+	if got.SessionID != sid {
+		t.Errorf("SessionID = %q, want %q", got.SessionID, sid)
+	}
+	if got.WaitingReason != reason {
+		t.Errorf("WaitingReason = %q, want %q", got.WaitingReason, reason)
+	}
+}
+
+func TestAgentListJSONExposesWaitingReason(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBeadFull(t, beadsDir, "agent-list-json-reason", "x", "")
+
+	reason := "Need confirmation before I drop the old column."
+	if err := agent.RegisterAgent("", beadsDir, ticket, agent.AgentEntry{
+		SessionID: "aaaa1111-aaaa-4aaa-8aaa-aaaa11111111", PID: 1, Mode: "agent",
+		StartedAt:     "2026-05-15T14:00:00Z",
+		Env:           "/env",
+		Status:        agent.StatusWaiting,
+		WaitingReason: reason,
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	stdout, stderr, code := testutil.RunTicketIn(t, beadsDir, "agent", "list", ticket, "--json")
+	if code != 0 {
+		t.Fatalf("agent list --json: exit=%d stderr=%q", code, stderr)
+	}
+	var entries []agent.AgentEntry
+	if err := json.Unmarshal([]byte(stdout), &entries); err != nil {
+		t.Fatalf("parse json: %v\n%s", err, stdout)
+	}
+	if len(entries) != 1 || entries[0].WaitingReason != reason {
+		t.Errorf("entries = %+v, want one with WaitingReason=%q", entries, reason)
 	}
 }
 

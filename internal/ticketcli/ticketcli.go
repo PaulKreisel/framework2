@@ -70,6 +70,11 @@ subcommands:
                                           (with --resume) for an exited one. macOS
                                           only; missing/unknown session id errors
                                           with the list of valid ids.
+  agent status [<id>] <session-id> [--json]
+                                          print one agent record's metadata plus
+                                          the untruncated waiting reason captured
+                                          from the Stop hook. Unknown session id
+                                          errors with the list of valid ids.
   agent delete [<id>] <session-id>...     remove agent record(s) from the ticket's
                                           agent list. Operates on the record, not
                                           the process — refuses to delete a record
@@ -468,6 +473,10 @@ func runAgent(db, beadsDir, ticket string, args []string, mode agent.Mode, stdou
 		}
 		return agent.Attach(db, beadsDir, id, tail[0])
 	}
+	if mode == agent.ModeAgent && len(args) > 0 && args[0] == "status" {
+		// `ticket agent status [<id>] <session-id> [--json]`
+		return runAgentStatus(db, beadsDir, ticket, args[1:], stdout)
+	}
 	if mode == agent.ModeAgent && len(args) > 0 && args[0] == "delete" {
 		// `ticket agent delete [<id>] <session-id>... [--force]`
 		return runAgentDelete(db, beadsDir, ticket, args[1:])
@@ -504,6 +513,28 @@ func runAgent(db, beadsDir, ticket string, args []string, mode agent.Mode, stdou
 		return err
 	}
 	return agent.RunWithResume(db, beadsDir, id, resume, mode)
+}
+
+// runAgentStatus handles `ticket agent status [<id>] <session-id> [--json]`.
+// Prints the matched record's full metadata plus the untruncated waiting
+// reason. Lookup is strict — a typo errors with the list of valid session
+// ids on the ticket, matching the shape used by `agent attach`/`agent delete`.
+func runAgentStatus(db, beadsDir, ticket string, args []string, stdout io.Writer) error {
+	usage := "usage: ticket agent status [<id>] <session-id> [--json]"
+	var jsonOut bool
+	positional := make([]string, 0, len(args))
+	for _, a := range args {
+		if a == "--json" {
+			jsonOut = true
+			continue
+		}
+		positional = append(positional, a)
+	}
+	id, tail, err := resolveID(ticket, positional, 1, usage)
+	if err != nil {
+		return err
+	}
+	return agent.Status(db, beadsDir, id, tail[0], jsonOut, stdout)
 }
 
 // runAgentDelete handles `ticket agent delete [<id>] <session-id>... [--force]`.
@@ -565,6 +596,7 @@ func runAgentSetStatus(db, beadsDir, ticket string, args []string) error {
 	}
 	fromHook := false
 	var contextTokens int
+	var reason string
 	if session == "" {
 		p, err := hookPayloadFromStdin()
 		if err != nil {
@@ -572,6 +604,7 @@ func runAgentSetStatus(db, beadsDir, ticket string, args []string) error {
 		}
 		if p != nil {
 			session = p.SessionID
+			reason = p.LastAssistantMessage
 			// Prefer an explicit context_tokens field if the caller set
 			// one (manual or future-wrapper invocation); otherwise derive
 			// it from the transcript Claude Code points us at.
@@ -591,7 +624,7 @@ func runAgentSetStatus(db, beadsDir, ticket string, args []string) error {
 	if session == "" {
 		return errors.New("no --session id supplied and stdin payload did not contain session_id")
 	}
-	err := agent.SetStatus(db, beadsDir, session, status, ticket, contextTokens)
+	err := agent.SetStatus(db, beadsDir, session, status, reason, ticket, contextTokens)
 	// Hook-driven invocations fire for every claude session, not just those
 	// launched via `ticket agent` — so a missing record there is expected,
 	// not an error. Explicit --session calls (manual testing backstop) still
@@ -604,13 +637,17 @@ func runAgentSetStatus(db, beadsDir, ticket string, args []string) error {
 
 // hookStdinPayload is the subset of the Claude Code hook payload we read
 // from stdin. transcript_path is Claude's path to the session JSONL — we
-// tail it to derive the agent's current context-window size. context_tokens
-// is not part of the native Claude Code payload; it's a passthrough hatch
-// for tests and any future wrapper that wants to inject a pre-computed value.
+// tail it to derive the agent's current context-window size.
+// last_assistant_message is set on Stop payloads and holds the assistant's
+// final reply for the turn; we store it as the agent's WaitingReason so
+// callers know what the session is waiting on. context_tokens is not part
+// of the native Claude Code payload; it's a passthrough hatch for tests
+// and any future wrapper that wants to inject a pre-computed value.
 type hookStdinPayload struct {
-	SessionID      string `json:"session_id"`
-	TranscriptPath string `json:"transcript_path"`
-	ContextTokens  int    `json:"context_tokens"`
+	SessionID            string `json:"session_id"`
+	TranscriptPath       string `json:"transcript_path"`
+	LastAssistantMessage string `json:"last_assistant_message"`
+	ContextTokens        int    `json:"context_tokens"`
 }
 
 // hookPayloadFromStdin parses Claude Code's hook payload from os.Stdin.

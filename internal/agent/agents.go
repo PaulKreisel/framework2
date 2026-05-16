@@ -34,6 +34,7 @@ type AgentEntry struct {
 	Env                    string `json:"env"`
 	Status                 string `json:"status,omitempty"`
 	StatusUpdatedAt        string `json:"statusUpdatedAt,omitempty"`
+	WaitingReason          string `json:"waitingReason,omitempty"`
 	ContextTokens          int    `json:"contextTokens,omitempty"`
 	ContextTokensUpdatedAt string `json:"contextTokensUpdatedAt,omitempty"`
 }
@@ -221,21 +222,30 @@ var ErrSessionNotFound = errors.New("no agent record found for session")
 // and optionally its ContextTokens / ContextTokensUpdatedAt when
 // contextTokens > 0. Lookup is by sessionID; ticketID, if non-empty, scopes
 // the search to a single ticket. With ticketID empty all open tickets are
-// scanned. A no-op (Status already equal to status, contextTokens either 0
-// or already equal to the stored value) is fast-pathed without touching the
-// bead. Returns [ErrSessionNotFound] when no record matches.
+// scanned. A no-op (Status already equal to status, reason already equal to
+// the stored value, contextTokens either 0 or already equal to the stored
+// value) is fast-pathed without touching the bead. Returns
+// [ErrSessionNotFound] when no record matches.
+//
+// reason is the assistant's last message captured by the Stop hook. It is
+// only meaningful when status == [StatusWaiting]; on a transition back to
+// [StatusRunning] the stored reason is cleared so a stale reason can't
+// survive a UserPromptSubmit.
 //
 // contextTokens is treated as an absolute snapshot, not a delta — a hook
 // retry passing the same value is idempotent. 0 means "no token information
 // available, leave ContextTokens unchanged"; callers that have a real zero
 // reading shouldn't happen in practice (every Claude turn has at least
 // output_tokens > 0).
-func SetStatus(db, beadsDir, sessionID, status, ticketID string, contextTokens int) error {
+func SetStatus(db, beadsDir, sessionID, status, reason, ticketID string, contextTokens int) error {
 	if sessionID == "" {
 		return errors.New("session id required")
 	}
 	if status == "" {
 		return errors.New("status required")
+	}
+	if status != StatusWaiting {
+		reason = ""
 	}
 	tickets := []string{ticketID}
 	if ticketID == "" {
@@ -256,13 +266,17 @@ func SetStatus(db, beadsDir, sessionID, status, ticketID string, contextTokens i
 				continue
 			}
 			statusChanged := e.Status != status
+			reasonChanged := e.WaitingReason != reason
 			tokensChanged := contextTokens > 0 && contextTokens != e.ContextTokens
-			if !statusChanged && !tokensChanged {
+			if !statusChanged && !reasonChanged && !tokensChanged {
 				return nil
 			}
-			if statusChanged {
+			if statusChanged || reasonChanged {
 				entries[i].Status = status
 				entries[i].StatusUpdatedAt = now
+			}
+			if reasonChanged {
+				entries[i].WaitingReason = reason
 			}
 			if tokensChanged {
 				entries[i].ContextTokens = contextTokens
@@ -305,6 +319,57 @@ func ticketsWithAgents(db, beadsDir string) ([]string, error) {
 		ids = append(ids, r.ID)
 	}
 	return ids, nil
+}
+
+// waitingReasonTableMax caps the number of runes shown in the table view's
+// WAITING REASON cell. Wide enough to read a short sentence, narrow enough
+// to keep the row roughly one terminal width when other columns are filled.
+const waitingReasonTableMax = 80
+
+// FormatWaitingReason returns the single-line, truncated form of an entry's
+// waiting reason for the list table. Empty unless the agent is in
+// [StatusWaiting]: only waiting agents own a meaningful reason, and a stale
+// reason from a previous turn must not bleed into a "running"/"exited" row.
+//
+// Newlines, carriage returns and tabs are collapsed to single spaces; runs of
+// whitespace are squeezed and leading/trailing whitespace is dropped. The
+// result is truncated to [waitingReasonTableMax] runes with a trailing "…"
+// when the original was longer.
+func FormatWaitingReason(e AgentEntry) string {
+	if StateOf(e) != StatusWaiting {
+		return ""
+	}
+	return truncateSingleLine(e.WaitingReason, waitingReasonTableMax)
+}
+
+func truncateSingleLine(s string, max int) string {
+	if s == "" {
+		return ""
+	}
+	// Collapse all whitespace (including newlines) to single spaces and trim
+	// leading/trailing space so the cell is one tidy line.
+	var b []rune
+	prevSpace := true // start at "space" so leading whitespace is dropped
+	for _, r := range s {
+		isSpace := r == ' ' || r == '\t' || r == '\n' || r == '\r'
+		if isSpace {
+			if !prevSpace {
+				b = append(b, ' ')
+			}
+			prevSpace = true
+			continue
+		}
+		b = append(b, r)
+		prevSpace = false
+	}
+	// Drop trailing space if any.
+	if len(b) > 0 && b[len(b)-1] == ' ' {
+		b = b[:len(b)-1]
+	}
+	if len(b) <= max {
+		return string(b)
+	}
+	return string(b[:max]) + "…"
 }
 
 // FormatStarted re-renders an RFC 3339 timestamp as "YYYY-MM-DD HH:MM" in

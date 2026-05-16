@@ -221,12 +221,13 @@ func renderSingleTicketTable(rows []agentRow, stdout io.Writer) error {
 	// Header is always emitted in single-ticket mode — matches the legacy
 	// `ticket agent list` empty-table behaviour.
 	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "SESSION ID\tMODE\tPID\tSTARTED\tSTATE\tCONTEXT\tENV")
+	fmt.Fprintln(tw, "SESSION ID\tMODE\tPID\tSTARTED\tSTATE\tCONTEXT\tENV\tWAITING REASON")
 	for _, r := range rows {
 		e := r.entry
-		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\n",
 			e.SessionID, e.Mode, e.PID, agent.FormatStarted(e.StartedAt),
-			agent.StateOf(e), agent.FormatContextTokens(e.ContextTokens), e.Env)
+			agent.StateOf(e), agent.FormatContextTokens(e.ContextTokens), e.Env,
+			agent.FormatWaitingReason(e))
 	}
 	return tw.Flush()
 }
