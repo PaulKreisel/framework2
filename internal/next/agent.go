@@ -22,12 +22,14 @@ import (
 const nonClosedBuiltinStatuses = "open,in_progress,blocked,deferred"
 
 // RunAgent prints the agents that are currently `waiting` for input across the
-// descendants of ticketID. With includeRunning, `running` agents are listed
-// alongside `waiting` ones; `exited` (dead-PID) records stay hidden either
-// way. recursionDepth bounds the walk: 1 means direct children only, 2 means
-// children + grandchildren, and so on; any value <= 0 is treated as unlimited
-// and walks the entire subtree. An empty ticketID matches every non-closed
-// bead (no ancestry/depth filter).
+// ticketID subtree. With includeRunning, `running` agents are listed alongside
+// `waiting` ones; `exited` (dead-PID) records stay hidden either way. minDepth
+// and maxDepth bound the walk by hop count from ticketID: 0 is the root
+// itself, 1 is direct children, 2 is grandchildren, and so on. A node at
+// depth d is included when minDepth <= d <= maxDepth. maxDepth < 0 means
+// unlimited (walks the entire subtree). An empty ticketID matches every
+// non-closed bead (no ancestry filter); minDepth/maxDepth then gate against
+// a synthetic depth of 1.
 //
 // Output is a tab-aligned table whose columns mirror `ticket agent list` with
 // a leading TICKET column. Rows are sorted with mode=agent before mode=spec,
@@ -43,17 +45,17 @@ const nonClosedBuiltinStatuses = "open,in_progress,blocked,deferred"
 // Closed beads with stale `agents` entries never enter the candidate set,
 // so a `waiting` wrapper recorded on a manually-closed bead is silently
 // hidden here; `ticket agent list <closed-id>` still surfaces it.
-func RunAgent(db, beadsDir, ticketID string, recursionDepth int, includeRunning bool, stdout io.Writer) error {
+func RunAgent(db, beadsDir, ticketID string, minDepth, maxDepth int, includeRunning bool, stdout io.Writer) error {
 	candidates, err := bdJSONList(beadsDir, db, "--has-metadata-key", "agents", "--status", nonClosedBuiltinStatuses, "--json", "-n", "0")
 	if err != nil {
 		return err
 	}
 
 	// depthOf[id] gives the candidate's hop count from ticketID along the
-	// open-bead parent chain. A value of 0 means "is the root itself" (which
-	// we always exclude); >0 means a descendant at that depth. When
-	// ticketID is empty we skip ancestry resolution entirely and include
-	// every candidate at synthetic depth 1.
+	// open-bead parent chain. A value of 0 means "is the root itself"; >0
+	// means a descendant at that depth. Inclusion is gated below by the
+	// [minDepth, maxDepth] window. When ticketID is empty we skip ancestry
+	// resolution entirely and include every candidate at synthetic depth 1.
 	depthOf := make(map[string]int, len(candidates))
 	if ticketID == "" {
 		for _, c := range candidates {
@@ -84,10 +86,13 @@ func RunAgent(db, beadsDir, ticketID string, recursionDepth int, includeRunning 
 	var rows []row
 	for _, c := range candidates {
 		d, ok := depthOf[c.ID]
-		if !ok || d == 0 {
+		if !ok {
 			continue
 		}
-		if recursionDepth > 0 && d > recursionDepth {
+		if d < minDepth {
+			continue
+		}
+		if maxDepth >= 0 && d > maxDepth {
 			continue
 		}
 		for _, e := range c.Agents {

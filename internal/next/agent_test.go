@@ -178,19 +178,140 @@ func TestNextAgentRecursionDepth2IncludesGrandchildrenOnly(t *testing.T) {
 	}
 }
 
-func TestNextAgentExcludesRoot(t *testing.T) {
+// With --min-recursion-depth 1, the root bead's own waiting agents must not
+// appear — only descendants are walked. (Ports the original ai-vrc.22
+// "excludes root by default" assertion to the explicit M=1 path.)
+func TestNextAgentMinRecursionDepth1ExcludesRoot(t *testing.T) {
 	t.Parallel()
 	beadsDir := testutil.TestDB(t)
 
 	root := testutil.CreateBead(t, beadsDir, "nextagent-rootexcluded")
 	registerAgent(t, beadsDir, root, "99999999-9999-4999-8999-999999999999", "agent", agent.StatusWaiting, 1)
 
-	stdout, stderr, code := testutil.RunTicketIn(t, beadsDir, "next", "agent", root)
+	stdout, stderr, code := testutil.RunTicketIn(t, beadsDir, "next", "agent", root, "--min-recursion-depth", "1")
 	if code != 0 {
 		t.Fatalf("exit=%d stderr=%q", code, stderr)
 	}
 	if strings.Contains(stdout, "99999999") {
 		t.Errorf("root's own agent should not be listed:\n%s", stdout)
+	}
+}
+
+// The post-ai-vrc.26 default (--min-recursion-depth 0) surfaces the root's
+// own waiting agents alongside descendants.
+func TestNextAgentDefaultIncludesRoot(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+
+	root := testutil.CreateBead(t, beadsDir, "nextagent-rootincluded")
+	registerAgent(t, beadsDir, root, "99999999-9999-4999-8999-999999999999", "agent", agent.StatusWaiting, 1)
+
+	stdout, stderr, code := testutil.RunTicketIn(t, beadsDir, "next", "agent", root)
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, stderr)
+	}
+	if !strings.Contains(stdout, root) {
+		t.Errorf("root's own waiting agent should be listed by default:\n%s", stdout)
+	}
+}
+
+// --min-recursion-depth 0 --recursion-depth 0 limits the walk to the root
+// bead alone — descendants must not appear even if they have waiting agents.
+func TestNextAgentMin0Max0RootOnly(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+
+	rootSession := "11111111-1111-4111-8111-111111111111"
+	childSession := "22222222-2222-4222-8222-222222222222"
+
+	root := testutil.CreateBead(t, beadsDir, "nextagent-min0max0-root")
+	child := testutil.CreateChildBead(t, beadsDir, "nextagent-min0max0-child", root)
+	registerAgent(t, beadsDir, root, rootSession, "agent", agent.StatusWaiting, 1)
+	registerAgent(t, beadsDir, child, childSession, "agent", agent.StatusWaiting, 1)
+
+	stdout, stderr, code := testutil.RunTicketIn(t, beadsDir, "next", "agent", root, "--min-recursion-depth", "0", "--recursion-depth", "0")
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, stderr)
+	}
+	if !strings.Contains(stdout, rootSession) {
+		t.Errorf("root's own waiting agent missing:\n%s", stdout)
+	}
+	if strings.Contains(stdout, childSession) {
+		t.Errorf("child should not appear with N=M=0:\n%s", stdout)
+	}
+}
+
+// --recursion-depth 0 with the default min (0) is the same as M=0 N=0:
+// just the root's waiting agents.
+func TestNextAgentRecursionDepth0RootOnly(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+
+	rootSession := "11111111-1111-4111-8111-111111111111"
+	childSession := "22222222-2222-4222-8222-222222222222"
+
+	root := testutil.CreateBead(t, beadsDir, "nextagent-max0-root")
+	child := testutil.CreateChildBead(t, beadsDir, "nextagent-max0-child", root)
+	registerAgent(t, beadsDir, root, rootSession, "agent", agent.StatusWaiting, 1)
+	registerAgent(t, beadsDir, child, childSession, "agent", agent.StatusWaiting, 1)
+
+	stdout, stderr, code := testutil.RunTicketIn(t, beadsDir, "next", "agent", root, "--recursion-depth", "0")
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, stderr)
+	}
+	if !strings.Contains(stdout, rootSession) {
+		t.Errorf("root's own waiting agent missing:\n%s", stdout)
+	}
+	if strings.Contains(stdout, childSession) {
+		t.Errorf("child should not appear with N=0:\n%s", stdout)
+	}
+}
+
+// --min-recursion-depth 2 skips both root and direct children.
+func TestNextAgentMinRecursionDepth2SkipsRootAndChildren(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+
+	rootSession := "11111111-1111-4111-8111-111111111111"
+	childSession := "22222222-2222-4222-8222-222222222222"
+	grandSession := "33333333-3333-4333-8333-333333333333"
+
+	root := testutil.CreateBead(t, beadsDir, "nextagent-min2-root")
+	child := testutil.CreateChildBead(t, beadsDir, "nextagent-min2-child", root)
+	grand := testutil.CreateChildBead(t, beadsDir, "nextagent-min2-grand", child)
+	registerAgent(t, beadsDir, root, rootSession, "agent", agent.StatusWaiting, 1)
+	registerAgent(t, beadsDir, child, childSession, "agent", agent.StatusWaiting, 1)
+	registerAgent(t, beadsDir, grand, grandSession, "agent", agent.StatusWaiting, 1)
+
+	stdout, stderr, code := testutil.RunTicketIn(t, beadsDir, "next", "agent", root, "--min-recursion-depth", "2")
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, stderr)
+	}
+	if strings.Contains(stdout, rootSession) {
+		t.Errorf("root should not appear with M=2:\n%s", stdout)
+	}
+	if strings.Contains(stdout, childSession) {
+		t.Errorf("direct child should not appear with M=2:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, grandSession) {
+		t.Errorf("grandchild missing with M=2:\n%s", stdout)
+	}
+}
+
+// N < M is rejected up front with a non-zero exit and no table output.
+func TestNextAgentMaxLessThanMinRejected(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+
+	root := testutil.CreateBead(t, beadsDir, "nextagent-nlm-root")
+	registerAgent(t, beadsDir, root, "11111111-1111-4111-8111-111111111111", "agent", agent.StatusWaiting, 1)
+
+	stdout, stderr, code := testutil.RunTicketIn(t, beadsDir, "next", "agent", root, "--min-recursion-depth", "2", "--recursion-depth", "1")
+	if code == 0 {
+		t.Fatalf("expected non-zero exit when N < M, got 0; stdout=%q stderr=%q", stdout, stderr)
+	}
+	if strings.TrimSpace(stdout) != "" {
+		t.Errorf("expected no stdout on validation error, got %q", stdout)
 	}
 }
 
