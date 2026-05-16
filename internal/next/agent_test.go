@@ -382,6 +382,52 @@ func TestNextAgentAllStillHidesDeadWrapper(t *testing.T) {
 	}
 }
 
+// In single-ticket mode (depth 0..0 with a concrete id) the unified renderer
+// drops the TICKET column — `agent list` shares the same path and expects
+// the legacy column shape.
+func TestNextAgentDepth0HidesTicketColumn(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+
+	root := testutil.CreateBead(t, beadsDir, "nextagent-depth0-hide-ticket")
+	registerAgent(t, beadsDir, root, "11111111-1111-4111-8111-111111111111", "agent", agent.StatusWaiting, 1)
+
+	stdout, stderr, code := testutil.RunTicketIn(t, beadsDir, "next", "agent", root, "--recursion-depth", "0")
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, stderr)
+	}
+	lines := splitNonEmpty(stdout)
+	if len(lines) == 0 {
+		t.Fatalf("expected header + row, got empty stdout")
+	}
+	if strings.HasPrefix(lines[0], "TICKET") {
+		t.Errorf("depth=0 header still carries TICKET column:\n%s", stdout)
+	}
+	if !strings.HasPrefix(lines[0], "SESSION ID") {
+		t.Errorf("depth=0 header should start with SESSION ID, got %q", lines[0])
+	}
+}
+
+// Subtree mode (the default) keeps the TICKET column on the header even if
+// only one row matches.
+func TestNextAgentSubtreeKeepsTicketColumn(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+
+	root := testutil.CreateBead(t, beadsDir, "nextagent-subtree-keeps-ticket")
+	child := testutil.CreateChildBead(t, beadsDir, "nextagent-subtree-child", root)
+	registerAgent(t, beadsDir, child, "11111111-1111-4111-8111-111111111111", "agent", agent.StatusWaiting, 1)
+
+	stdout, stderr, code := testutil.RunTicketIn(t, beadsDir, "next", "agent", root)
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, stderr)
+	}
+	lines := splitNonEmpty(stdout)
+	if len(lines) == 0 || !strings.HasPrefix(lines[0], "TICKET") {
+		t.Errorf("subtree header should start with TICKET, got:\n%s", stdout)
+	}
+}
+
 func splitNonEmpty(s string) []string {
 	var out []string
 	for _, line := range strings.Split(s, "\n") {

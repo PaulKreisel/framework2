@@ -5,10 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os/exec"
 	"syscall"
-	"text/tabwriter"
 	"time"
 
 	"framework2/internal/bdcli"
@@ -167,41 +165,6 @@ func showAgentsRow(db, beadsDir, ticketID string) (*agentsRow, error) {
 		return nil, fmt.Errorf("ticket not found: %s", ticketID)
 	}
 	return &rows[0], nil
-}
-
-// ListAgents writes the ticket's agent records to out. With jsonOutput=true
-// the raw entries (newest first) are emitted as indented JSON; otherwise a
-// tab-aligned table with columns SESSION ID, MODE, PID, STARTED, STATE,
-// CONTEXT, ENV is written.
-func ListAgents(db, beadsDir, ticketID string, jsonOutput bool, out io.Writer) error {
-	entries, err := LoadAgents(db, beadsDir, ticketID)
-	if err != nil {
-		return err
-	}
-	// Newest first.
-	reversed := make([]AgentEntry, len(entries))
-	for i, e := range entries {
-		reversed[len(entries)-1-i] = e
-	}
-	if jsonOutput {
-		// reversed is always a (possibly empty) slice from make, so
-		// MarshalIndent emits "[]" rather than "null" for empty input —
-		// no nil guard needed.
-		b, err := json.MarshalIndent(reversed, "", "  ")
-		if err != nil {
-			return err
-		}
-		_, err = fmt.Fprintln(out, string(b))
-		return err
-	}
-	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "SESSION ID\tMODE\tPID\tSTARTED\tSTATE\tCONTEXT\tENV")
-	for _, e := range reversed {
-		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%s\t%s\n",
-			e.SessionID, e.Mode, e.PID, FormatStarted(e.StartedAt),
-			StateOf(e), FormatContextTokens(e.ContextTokens), e.Env)
-	}
-	return tw.Flush()
 }
 
 // FormatContextTokens renders a token count for the compact list view.
