@@ -436,6 +436,39 @@ func TestRunResumeNoInitialPrompt(t *testing.T) {
 	}
 }
 
+// TestRunWithResumeRefusesModeMismatch asserts a resume can't silently
+// re-classify the agent's type: `ticket agent --resume <spec-id>` (and the
+// reverse) must fail before the UpsertAgent would overwrite the recorded
+// mode.
+func TestRunWithResumeRefusesModeMismatch(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBeadFull(t, beadsDir, "agent-resume-mode-mismatch", "x", "")
+	mustEnv(t, beadsDir, ticket)
+
+	sid := "11111111-2222-4333-8444-555555555555"
+	if err := agent.RegisterAgent("", beadsDir, ticket, agent.AgentEntry{
+		SessionID: sid, PID: 1, Mode: agent.ModeSpec.String(),
+		StartedAt: "2026-05-15T14:56:00Z", Env: "/env",
+		Status: agent.StatusWaiting,
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	err := agent.RunWithResume("", beadsDir, ticket, sid, agent.ModeAgent)
+	if err == nil {
+		t.Fatal("RunWithResume across modes succeeded; want refusal")
+	}
+	if !strings.Contains(err.Error(), "recorded as spec") {
+		t.Errorf("error = %q, want to mention 'recorded as spec'", err.Error())
+	}
+
+	got, _ := agent.LoadAgents("", beadsDir, ticket)
+	if len(got) != 1 || got[0].Mode != agent.ModeSpec.String() {
+		t.Errorf("entry mutated despite refusal: %+v", got)
+	}
+}
+
 // TestRunRegistersAgentAsWaiting asserts the agent is registered with
 // status="waiting" at launch — the UserPromptSubmit hook flips it to
 // "running" once the first turn actually starts. Uniform across modes.

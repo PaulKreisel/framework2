@@ -142,7 +142,6 @@ func TestListAgentsTableLayoutAndStatus(t *testing.T) {
 	beadsDir := testutil.TestDB(t)
 	ticket := testutil.CreateBeadFull(t, beadsDir, "agents-list-table", "x", "")
 
-	// PID 1 (init) is always alive on a unix system → running.
 	if err := agent.RegisterAgent("", beadsDir, ticket, agent.AgentEntry{
 		SessionID: "11111111-1111-4111-8111-111111111111",
 		PID:       1,
@@ -153,16 +152,15 @@ func TestListAgentsTableLayoutAndStatus(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Register running: %v", err)
 	}
-	// A pid that's almost certainly not in use → exited.
 	if err := agent.RegisterAgent("", beadsDir, ticket, agent.AgentEntry{
 		SessionID: "22222222-2222-4222-8222-222222222222",
-		PID:       999999,
+		PID:       2,
 		Mode:      "spec",
 		StartedAt: "2026-05-15T13:15:00Z",
-		Env:       "/env-exited",
-		Status:    agent.StatusRunning,
+		Env:       "/env-waiting",
+		Status:    agent.StatusWaiting,
 	}); err != nil {
-		t.Fatalf("Register exited: %v", err)
+		t.Fatalf("Register waiting: %v", err)
 	}
 
 	stdout, stderr, code := testutil.RunTicketIn(t, beadsDir, "agent", "list", ticket)
@@ -174,20 +172,20 @@ func TestListAgentsTableLayoutAndStatus(t *testing.T) {
 		t.Errorf("table header missing:\n%s", stdout)
 	}
 	if !strings.Contains(stdout, "running") {
-		t.Errorf("alive pid not reported running:\n%s", stdout)
+		t.Errorf("running status missing:\n%s", stdout)
 	}
-	if !strings.Contains(stdout, "exited") {
-		t.Errorf("dead pid not reported exited:\n%s", stdout)
+	if !strings.Contains(stdout, "waiting") {
+		t.Errorf("waiting status missing:\n%s", stdout)
 	}
 	// Newest first: the running record (registered first) should appear AFTER
-	// the exited one in textual order.
-	idxExited := strings.Index(stdout, "22222222")
+	// the waiting one in textual order.
+	idxWaiting := strings.Index(stdout, "22222222")
 	idxRunning := strings.Index(stdout, "11111111")
-	if idxExited == -1 || idxRunning == -1 {
+	if idxWaiting == -1 || idxRunning == -1 {
 		t.Fatalf("table missing session ids:\n%s", stdout)
 	}
-	if idxExited > idxRunning {
-		t.Errorf("ordering not newest-first; running came before exited:\n%s", stdout)
+	if idxWaiting > idxRunning {
+		t.Errorf("ordering not newest-first; running came before waiting:\n%s", stdout)
 	}
 }
 

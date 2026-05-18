@@ -194,20 +194,22 @@ func TestListAgentsShowsWaitingState(t *testing.T) {
 	}
 }
 
-func TestListAgentsExitedWinsOverStoredStatus(t *testing.T) {
-	// If the wrapper process is dead, a stale Status="running" must not mask
-	// that — stateOf collapses to "exited" so triage stays accurate.
+func TestListAgentsKeepsStoredStatusForDeadWrapper(t *testing.T) {
+	// StateOf does not probe the wrapper pid: a record whose terminal was
+	// killed keeps its last hook-recorded Status. This preserves the user's
+	// only handle on a waiting-then-killed agent — they can still see it in
+	// the list and resume it via `agent attach`.
 	t.Parallel()
 	beadsDir := testutil.TestDB(t)
-	ticket := testutil.CreateBeadFull(t, beadsDir, "list-exited-wins", "x", "")
+	ticket := testutil.CreateBeadFull(t, beadsDir, "list-deadpid-keeps-status", "x", "")
 
 	if err := agent.RegisterAgent("", beadsDir, ticket, agent.AgentEntry{
 		SessionID: "55555555-5555-4555-8555-555555555555",
-		PID:       999999, // not in use
+		PID:       999999, // dead
 		Mode:      "agent",
 		StartedAt: "2026-05-15T14:56:00Z",
 		Env:       "/env-zombie",
-		Status:    agent.StatusRunning,
+		Status:    agent.StatusWaiting,
 	}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -216,8 +218,11 @@ func TestListAgentsExitedWinsOverStoredStatus(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("agent list: exit=%d stderr=%q", code, stderr)
 	}
-	if !strings.Contains(stdout, "exited") {
-		t.Errorf("dead wrapper not reported exited:\n%s", stdout)
+	if !strings.Contains(stdout, "waiting") {
+		t.Errorf("dead-wrapper agent lost its waiting Status:\n%s", stdout)
+	}
+	if strings.Contains(stdout, "exited") {
+		t.Errorf("dead-wrapper agent should keep stored Status, not auto-flip to exited:\n%s", stdout)
 	}
 }
 

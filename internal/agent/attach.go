@@ -30,28 +30,25 @@ var LookupTTY = func(pid int) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// errNoTerminal signals that the wrapper PID has no live Terminal.app tab to
+// focus — either the process is gone (ps fails) or its tty isn't owned by a
+// Terminal.app window. Attach uses this to fall through to spawn-resume.
+var errNoTerminal = errors.New("no terminal")
+
 // Attach is the entry point for `ticket agent attach`: it finds the
 // AgentEntry for sessionID under ticketID and either focuses the macOS
-// Terminal.app tab hosting a live wrapper or spawns a fresh wrapper resuming
-// the same claude transcript.
+// Terminal.app tab hosting the wrapper or, when no live tab exists, spawns
+// a fresh wrapper that resumes the same claude transcript.
 //
 // Lookup is strict: when sessionID does not match any record an error is
 // returned listing the known session ids so the caller (often a script) can
 // recover without an interactive picker.
 //
-// Behaviour by state of the matched entry:
-//
-//   - running / waiting: focus the Terminal.app tab whose TTY belongs to the
-//     wrapper PID via osascript. If the wrapper has no controlling terminal
-//     (e.g. backgrounded with nohup) the call returns a useful error.
-//   - exited (wrapper PID is gone): open a new Terminal.app window that
-//     execs `<ticket> agent --resume <sessionID>` from the env folder. The
-//     spawned wrapper updates the existing agent record in place via
-//     [RunWithResume]; claude reattaches to the original transcript so the
-//     same session id stays valid.
-//
-// macOS-only: callers on other platforms get an explicit error rather than
-// a silent no-op so scripts can branch on it.
+// Focus attempt fails over to spawn-resume when ps -p reports no such pid,
+// the wrapper has no controlling tty, or no Terminal.app tab owns that tty
+// (terminal already closed). The fallback opens a new Terminal.app window
+// that execs `ticket <recorded-mode> --resume <sessionID>` from the env
+// folder. macOS only.
 func Attach(db, beadsDir, ticketID, sessionID string) error {
 	if ticketID == "" {
 		return errors.New("ticket id required")
@@ -73,22 +70,22 @@ func Attach(db, beadsDir, ticketID, sessionID string) error {
 	if entry == nil {
 		return unknownSessionError(ticketID, sessionID, entries)
 	}
-	state := StateOf(*entry)
-	if state == StatusRunning || state == StatusWaiting {
-		if runtime.GOOS != "darwin" {
-			return fmt.Errorf("focus is macOS-only (GOOS=%s); no portable terminal API yet", runtime.GOOS)
-		}
-		return focusTerminal(entry.PID)
+	if runtime.GOOS != "darwin" {
+		return fmt.Errorf("attach is macOS-only (GOOS=%s); no portable terminal API yet", runtime.GOOS)
 	}
-	// Treat anything that isn't running/waiting as "exited" — the wrapper's
-	// PID is gone, so we resume.
+	err = focusTerminal(entry.PID)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, errNoTerminal) {
+		return err
+	}
+	// Fall through: focus found no live tab. Spawn a fresh wrapper that
+	// resumes the same claude transcript.
 	if _, statErr := os.Stat(entry.Env); os.IsNotExist(statErr) {
 		return fmt.Errorf("env folder %s no longer exists; bead was probably finished", entry.Env)
 	}
-	if runtime.GOOS != "darwin" {
-		return fmt.Errorf("resume-in-new-window is macOS-only (GOOS=%s); no portable terminal API yet", runtime.GOOS)
-	}
-	return spawnResumeWindow(entry.Env, ticketID, sessionID)
+	return spawnResumeWindow(entry.Env, ticketID, sessionID, entry.Mode)
 }
 
 func unknownSessionError(ticketID, sessionID string, entries []AgentEntry) error {
@@ -104,16 +101,16 @@ func unknownSessionError(ticketID, sessionID string, entries []AgentEntry) error
 }
 
 // focusTerminal walks Terminal.app's windows looking for the tab whose `tty`
-// matches the wrapper's controlling tty. Mirrors the bash `claude-session
-// focus` reference at framework/commands/claude-session so behaviour is easy
-// to verify side-by-side.
+// matches the wrapper's controlling tty. Returns errNoTerminal (wrapped)
+// when there is nothing live to focus, so Attach can fall over to spawning
+// a resume window.
 func focusTerminal(pid int) error {
 	tty, err := LookupTTY(pid)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: ps -p %d failed: %v", errNoTerminal, pid, err)
 	}
 	if tty == "" || tty == "?" || tty == "??" {
-		return fmt.Errorf("pid %d has no controlling terminal — wrapper is probably backgrounded", pid)
+		return fmt.Errorf("%w: pid %d has no controlling terminal", errNoTerminal, pid)
 	}
 	script := fmt.Sprintf(`tell application "Terminal"
     repeat with w in windows
@@ -133,21 +130,28 @@ end tell`, tty)
 		return fmt.Errorf("osascript focus: %w", err)
 	}
 	if strings.TrimSpace(out) != "OK" {
-		return fmt.Errorf("no Terminal.app tab owns /dev/%s (pid %d) — wrapper is probably backgrounded", tty, pid)
+		return fmt.Errorf("%w: no Terminal.app tab owns /dev/%s (pid %d)", errNoTerminal, tty, pid)
 	}
 	return nil
 }
 
 // spawnResumeWindow opens a new Terminal.app window that re-runs the current
-// `ticket` binary in resume mode. The new shell first cd's into envPath so
-// the wrapper inherits the same cwd a fresh `ticket agent` would.
-func spawnResumeWindow(envPath, ticketID, sessionID string) error {
+// `ticket` binary in resume mode. recordedMode is the agent record's Mode
+// field — passed as the subcommand so a spec session resumes as spec and an
+// agent session resumes as agent (the recorded mode is the source of truth;
+// see [RunWithResume]). The new shell cd's into envPath so the wrapper
+// inherits the same cwd a fresh launch would.
+func spawnResumeWindow(envPath, ticketID, sessionID, recordedMode string) error {
 	bin, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("locate ticket binary: %w", err)
 	}
-	cmd := fmt.Sprintf("cd %s && exec %s --ticket %s agent --resume %s",
-		shellQuote(envPath), shellQuote(bin), shellQuote(ticketID), shellQuote(sessionID))
+	sub := recordedMode
+	if sub == "" {
+		sub = ModeAgent.String()
+	}
+	cmd := fmt.Sprintf("cd %s && exec %s --ticket %s %s --resume %s",
+		shellQuote(envPath), shellQuote(bin), shellQuote(ticketID), shellQuote(sub), shellQuote(sessionID))
 	script := fmt.Sprintf(`tell application "Terminal"
     do script %s
     activate

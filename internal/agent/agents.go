@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
-	"syscall"
 	"time"
 
 	"framework2/internal/bdcli"
@@ -19,8 +18,7 @@ import (
 //
 // PID is the wrapper process pid (the Go process running [Run]), which is
 // stable across the wrapper's relaunch loop — unlike the claude pid recorded
-// in [PIDFile], which changes each iteration. Liveness checks ([StateOf]) use
-// this pid to decide whether the agent is still running.
+// in [PIDFile], which changes each iteration.
 //
 // Status is a free-form string driven by Claude Code hooks via
 // `this agent set-status`. Today's writers only emit "running" and "waiting";
@@ -198,24 +196,15 @@ func FormatContextTokens(n int) string {
 	}
 }
 
-// StateOf collapses (wrapper-pid liveness, recorded Status) into the value
-// shown in the STATE column: "exited" wins when the wrapper is dead so a
-// stale "running"/"waiting" record never masks a dead session; otherwise the
-// hook-driven Status is surfaced (defaulting to "running" for legacy entries
-// that predate the status field).
-//
-// Liveness uses signal 0: ESRCH means the pid is gone, EPERM means the pid
-// exists but we don't own it (e.g. init on macOS). EPERM therefore counts as
-// alive — denying that would falsely report any running wrapper as "exited"
-// whenever it runs under a different uid.
+// StateOf returns the hook-driven Status for an agent record (defaulting to
+// "running" for legacy entries that predate the status field). It does not
+// probe wrapper-pid liveness: a wrapper killed mid-flight (e.g. terminal
+// closed) can't reliably write a final status, and silently demoting such
+// records to "exited" hides them from `next agent` so the user loses the
+// ability to find and resume a waiting agent whose terminal died. The
+// trade-off is that dead-wrapper records stay in their last hook-recorded
+// state until manually cleaned via `agent delete`.
 func StateOf(e AgentEntry) string {
-	if e.PID <= 0 {
-		return "exited"
-	}
-	err := syscall.Kill(e.PID, 0)
-	if errors.Is(err, syscall.ESRCH) {
-		return "exited"
-	}
 	if e.Status == "" {
 		return StatusRunning
 	}

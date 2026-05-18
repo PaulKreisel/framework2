@@ -74,11 +74,12 @@ func Run(db, beadsDir, ticketID string, mode Mode) error {
 // first claude invocation passes `--session-id <newID>` so the id is stable
 // from the start.
 //
-// When resumeSessionID is non-empty (the path used by [Attach] for an exited
-// agent), the bead is NOT re-claimed (it's already in_progress from the prior
-// wrapper), the existing agent record for that session id is updated in
-// place, and the first claude invocation passes `--resume <sessionID>` so it
-// reattaches to the same transcript instead of starting a new one.
+// When resumeSessionID is non-empty (the path the user takes after a wrapper
+// has been killed), the bead is NOT re-claimed (it's already in_progress from
+// the prior wrapper), the existing agent record for that session id is
+// updated in place, and the first claude invocation passes `--resume
+// <sessionID>` so it reattaches to the same transcript instead of starting
+// a new one.
 //
 // While AgentCommand is running, its pid is recorded at <env>/[PIDFile] so
 // [Relaunch] can target it.
@@ -92,6 +93,28 @@ func RunWithResume(db, beadsDir, ticketID, resumeSessionID string, mode Mode) er
 	envPath, err := env.Create(db, beadsDir, ticketID)
 	if err != nil {
 		return fmt.Errorf("create env dir: %w", err)
+	}
+
+	if resumeSessionID != "" {
+		// Refuse to resume in a mode that doesn't match what was recorded:
+		// `ticket agent --resume <spec-id>` (and the reverse) would otherwise
+		// silently change the agent's type via the UpsertAgent below.
+		// Sessions without a recorded entry slip through — `ticket agent
+		// --resume <unknown-id>` keeps working as a manual-paste escape hatch.
+		entries, err := LoadAgents(db, beadsDir, ticketID)
+		if err != nil {
+			return fmt.Errorf("load agents: %w", err)
+		}
+		for i := range entries {
+			if entries[i].SessionID != resumeSessionID {
+				continue
+			}
+			if entries[i].Mode != "" && entries[i].Mode != mode.String() {
+				return fmt.Errorf("session %s was recorded as %s mode; use `ticket %s --resume %s` instead",
+					resumeSessionID, entries[i].Mode, entries[i].Mode, resumeSessionID)
+			}
+			break
+		}
 	}
 
 	if resumeSessionID == "" && mode != ModeSpec {

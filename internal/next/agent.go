@@ -23,9 +23,8 @@ const nonClosedBuiltinStatuses = "open,in_progress,blocked,deferred"
 
 // StateFilter values understood by [RunAgent].
 //
-// StateFilterNone disables state filtering — every recorded agent (including
-// "exited" wrappers with a dead pid) is surfaced. This is the path
-// `ticket agent list` takes.
+// StateFilterNone disables state filtering — every recorded agent is
+// surfaced. This is the path `ticket agent list` takes.
 //
 // StateFilterWaiting is the original `ticket next agent` behaviour: only
 // rows whose [agent.StateOf] is "waiting" appear (pair with includeRunning
@@ -45,9 +44,9 @@ const (
 // ignores minDepth/maxDepth entirely.
 //
 // State filter: stateFilter == "" lets every row through (this is how
-// `agent list` surfaces exited records too). stateFilter == "waiting"
-// keeps only waiting rows; pair with includeRunning to also surface
-// running wrappers (the `--all` flag on `next agent`).
+// `agent list` surfaces every record). stateFilter == "waiting" keeps only
+// waiting rows; pair with includeRunning to also surface running wrappers
+// (the `--all` flag on `next agent`).
 //
 // Rendering modes:
 //   - Single-ticket (ticketID != "" and minDepth == maxDepth == 0):

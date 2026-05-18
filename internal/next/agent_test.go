@@ -8,10 +8,9 @@ import (
 	"framework2/internal/testutil"
 )
 
-// registerAgent inserts an agent record on ticket. PID 1 is "init" — always
-// alive on macOS — so the [agent.StateOf] liveness check reports the
-// recorded Status. PID 999999 stands in for a dead wrapper and collapses to
-// "exited" regardless of Status.
+// registerAgent inserts an agent record on ticket. PID is recorded but not
+// probed: [agent.StateOf] returns the recorded Status verbatim so callers can
+// pass any int (the field stays meaningful for `agent attach`).
 func registerAgent(t *testing.T, beadsDir, ticket, sessionID, mode, status string, pid int) {
 	t.Helper()
 	err := agent.RegisterAgent("", beadsDir, ticket, agent.AgentEntry{
@@ -109,21 +108,24 @@ func TestNextAgentReturnsWaitingMixedDepths(t *testing.T) {
 	}
 }
 
-func TestNextAgentSkipsDeadWrapperEvenIfStatusWaiting(t *testing.T) {
+// A waiting agent whose terminal was killed (dead PID) must still show up in
+// `next agent` — otherwise the user loses the ability to find and resume it.
+// StateOf no longer probes the pid; it returns the last hook-recorded Status.
+func TestNextAgentShowsWaitingEvenWithDeadWrapper(t *testing.T) {
 	t.Parallel()
 	beadsDir := testutil.TestDB(t)
 
 	root := testutil.CreateBead(t, beadsDir, "nextagent-deadpid-root")
 	child := testutil.CreateChildBead(t, beadsDir, "nextagent-deadpid-child", root)
-	// PID 999999 is dead → StateOf collapses to "exited" — must not appear.
-	registerAgent(t, beadsDir, child, "ffffffff-ffff-4fff-8fff-ffffffffffff", "agent", agent.StatusWaiting, 999999)
+	sid := "ffffffff-ffff-4fff-8fff-ffffffffffff"
+	registerAgent(t, beadsDir, child, sid, "agent", agent.StatusWaiting, 999999)
 
 	stdout, stderr, code := testutil.RunTicketIn(t, beadsDir, "next", "agent", root)
 	if code != 0 {
 		t.Fatalf("exit=%d stderr=%q", code, stderr)
 	}
-	if strings.TrimSpace(stdout) != "" {
-		t.Errorf("dead-pid waiting agent leaked into output: %q", stdout)
+	if !strings.Contains(stdout, sid) {
+		t.Errorf("dead-wrapper waiting agent missing from output:\n%s", stdout)
 	}
 }
 
@@ -363,22 +365,24 @@ func TestNextAgentAllIncludesRunning(t *testing.T) {
 	}
 }
 
-// --all must not surface exited (dead-PID) records — they're not "active".
-func TestNextAgentAllStillHidesDeadWrapper(t *testing.T) {
+// --all surfaces running records as well as waiting ones. A dead-wrapper
+// record stays at its last hook-recorded Status (no liveness probe), so a
+// terminal-killed "running" agent must still appear under --all.
+func TestNextAgentAllShowsDeadWrapperRunning(t *testing.T) {
 	t.Parallel()
 	beadsDir := testutil.TestDB(t)
 
 	root := testutil.CreateBead(t, beadsDir, "nextagent-all-deadpid-root")
 	child := testutil.CreateChildBead(t, beadsDir, "nextagent-all-deadpid-child", root)
-	// PID 999999 is dead → StateOf collapses to "exited" — must not appear.
-	registerAgent(t, beadsDir, child, "ffffffff-ffff-4fff-8fff-ffffffffffff", "agent", agent.StatusRunning, 999999)
+	sid := "ffffffff-ffff-4fff-8fff-ffffffffffff"
+	registerAgent(t, beadsDir, child, sid, "agent", agent.StatusRunning, 999999)
 
 	stdout, stderr, code := testutil.RunTicketIn(t, beadsDir, "next", "agent", root, "--all")
 	if code != 0 {
 		t.Fatalf("exit=%d stderr=%q", code, stderr)
 	}
-	if strings.TrimSpace(stdout) != "" {
-		t.Errorf("--all output should hide exited agent, got: %q", stdout)
+	if !strings.Contains(stdout, sid) {
+		t.Errorf("--all output missing dead-wrapper running agent:\n%s", stdout)
 	}
 }
 

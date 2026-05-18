@@ -16,11 +16,12 @@ import (
 // rejected for the same reason — silently collapsing them would hide a bug
 // in the caller.
 //
-// By default a record whose wrapper is still alive ([StateOf] reports
-// "running"/"waiting") is refused: the list exists to track launched
-// sessions, and deleting a live one would lose the user's only handle on
-// the running agent. Pass force=true to delete anyway (the process itself
-// is unaffected — the user is on their own to stop it).
+// All records require force=true to delete: there is no liveness probe, so
+// from outside the wrapper there is no reliable way to tell whether the
+// underlying process is still alive. Requiring --force keeps the list
+// (which is the user's only handle on the running agent) from being lost to
+// a typo. The process itself is unaffected — the user is on their own to
+// stop it.
 func DeleteAgents(db, beadsDir, ticketID string, sessionIDs []string, force bool) error {
 	if ticketID == "" {
 		return errors.New("ticket id required")
@@ -57,14 +58,11 @@ func DeleteAgents(db, beadsDir, ticketID string, sessionIDs []string, force bool
 			return unknownSessionError(ticketID, sid, entries)
 		}
 		if !force {
-			state := StateOf(entries[i])
-			if state != "exited" {
-				liveBlockers = append(liveBlockers, fmt.Sprintf("%s (%s)", sid, state))
-			}
+			liveBlockers = append(liveBlockers, fmt.Sprintf("%s (%s)", sid, StateOf(entries[i])))
 		}
 	}
 	if len(liveBlockers) > 0 {
-		return fmt.Errorf("refusing to delete live agent record(s); stop the agent(s) first or pass --force:\n  %s",
+		return fmt.Errorf("refusing to delete agent record(s) without --force:\n  %s",
 			strings.Join(liveBlockers, "\n  "))
 	}
 

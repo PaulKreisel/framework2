@@ -19,7 +19,6 @@ func TestDeleteAgentsRemovesNamedRecords(t *testing.T) {
 		"33333333-3333-4333-8333-333333333333",
 	}
 	for i, sid := range sids {
-		// PID 999999 → already exited, no --force needed.
 		if err := agent.RegisterAgent("", beadsDir, ticket, agent.AgentEntry{
 			SessionID: sid, PID: 999999, Mode: "agent",
 			StartedAt: "2026-05-15T14:0" + string(rune('0'+i)) + ":00Z",
@@ -29,7 +28,7 @@ func TestDeleteAgentsRemovesNamedRecords(t *testing.T) {
 		}
 	}
 
-	if err := agent.DeleteAgents("", beadsDir, ticket, []string{sids[0], sids[2]}, false); err != nil {
+	if err := agent.DeleteAgents("", beadsDir, ticket, []string{sids[0], sids[2]}, true); err != nil {
 		t.Fatalf("DeleteAgents: %v", err)
 	}
 	got, err := agent.LoadAgents("", beadsDir, ticket)
@@ -182,7 +181,7 @@ func TestDeleteAgentsCLIMultipleIDs(t *testing.T) {
 		}
 	}
 
-	_, stderr, code := testutil.RunTicketIn(t, beadsDir, "agent", "delete", ticket, sids[0], sids[1])
+	_, stderr, code := testutil.RunTicketIn(t, beadsDir, "agent", "delete", ticket, "--force", sids[0], sids[1])
 	if code != 0 {
 		t.Fatalf("agent delete: exit=%d stderr=%q", code, stderr)
 	}

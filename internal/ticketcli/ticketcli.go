@@ -67,11 +67,17 @@ subcommands:
                                           ticket (newest first). See WAITING
                                           REASON below for what the column /
                                           --json field carry.
-  agent attach [<id>] <session-id>        focus the terminal hosting a running or
-                                          waiting agent, or spawn a fresh wrapper
-                                          (with --resume) for an exited one. macOS
-                                          only; missing/unknown session id errors
-                                          with the list of valid ids.
+  agent attach [<id>] <session-id>        focus the macOS Terminal.app tab
+                                          hosting the wrapper. If no live tab
+                                          owns the wrapper's tty (e.g. the
+                                          terminal was killed), fall through
+                                          to spawning a fresh wrapper that
+                                          reattaches to the same claude
+                                          transcript via --resume, in the
+                                          recorded mode (agent or spec).
+                                          macOS only; missing/unknown session
+                                          id errors with the list of valid
+                                          ids.
   agent status [<id>] <session-id> [--json]
                                           print one agent record's metadata plus
                                           the untruncated waiting reason. Unknown
@@ -80,10 +86,11 @@ subcommands:
                                           for how the reason is sourced.
   agent delete [<id>] <session-id>...     remove agent record(s) from the ticket's
                                           agent list. Operates on the record, not
-                                          the process — refuses to delete a record
-                                          whose wrapper is still running/waiting
-                                          unless --force is passed. Unknown id
-                                          errors with the list of valid ids.
+                                          the process — refuses to delete any
+                                          record unless --force is passed (there
+                                          is no liveness probe; users must
+                                          confirm intent). Unknown id errors
+                                          with the list of valid ids.
   agent set-status <running|waiting> [--session <id>] [--source <kind>]
                                           update an agent record's running/waiting
                                           status. Driven by Claude Code Stop /
@@ -127,10 +134,9 @@ subcommands:
                                           --min-recursion-depth 0 with
                                           --recursion-depth 0 to list only the
                                           root's waiting agents. With --all,
-                                          running agents are listed too (exited
-                                          records stay hidden). See WAITING
-                                          REASON below for the column /
-                                          --json field semantics.
+                                          running agents are listed too. See
+                                          WAITING REASON below for the column
+                                          / --json field semantics.
   finish [<id>]                           wrap up: rebase the ticket's worktrees
                                           onto their parent branch (FF when no
                                           divergence, real rebase otherwise),
@@ -498,7 +504,7 @@ func runAgent(db, beadsDir, ticket string, args []string, mode agent.Mode, stdou
 			return err
 		}
 		// `agent list` is the depth-0 shape of `next agent`: just this
-		// ticket, no state filter (so "exited" rows show up too).
+		// ticket, no state filter (every row shows up).
 		return next.RunAgent(db, beadsDir, id, 0, 0, false, next.StateFilterNone, jsonOut, stdout)
 	}
 	if mode == agent.ModeAgent && len(args) > 0 && args[0] == "set-status" {
@@ -521,8 +527,8 @@ func runAgent(db, beadsDir, ticket string, args []string, mode agent.Mode, stdou
 		// `ticket agent delete [<id>] <session-id>... [--force]`
 		return runAgentDelete(db, beadsDir, ticket, args[1:])
 	}
-	// --resume <session-id> turns `ticket agent` into the resume path used by
-	// `ticket agent attach` to re-launch an exited wrapper. It's only valid in
+	// --resume <session-id> turns `ticket agent` into the resume path used to
+	// re-launch a wrapper whose terminal was killed. It's only valid in
 	// ModeAgent (spec sessions don't share a transcript with a coding agent).
 	var resume string
 	positional := make([]string, 0, len(args))
@@ -543,10 +549,7 @@ func runAgent(db, beadsDir, ticket string, args []string, mode agent.Mode, stdou
 	}
 	usage := "usage: ticket agent [<id>] [--resume <session-id>]"
 	if mode == agent.ModeSpec {
-		if resume != "" {
-			return errors.New("--resume is not supported in spec mode")
-		}
-		usage = "usage: ticket spec [<id>]"
+		usage = "usage: ticket spec [<id>] [--resume <session-id>]"
 	}
 	id, _, err := resolveID(ticket, positional, 0, usage)
 	if err != nil {

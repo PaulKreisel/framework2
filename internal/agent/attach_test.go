@@ -11,6 +11,13 @@ import (
 	"framework2/internal/testutil"
 )
 
+// shellSingleQuote mirrors the (unexported) shellQuote helper in attach.go
+// for use in spawn-script assertions. Inputs in tests never contain single
+// quotes, so a straight wrap is sufficient.
+func shellSingleQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 // stubOsascript redirects ExecOsascript to a recorder for the lifetime of t.
 // Returns the recorder slice the test can inspect. The recorder is appended
 // to under a mutex so callers can stub concurrent flows safely.
@@ -137,64 +144,128 @@ func TestAttachFocusesRunningWrapper(t *testing.T) {
 	}
 }
 
-func TestAttachFocusErrorsWhenNoTab(t *testing.T) {
+// When no Terminal.app tab owns the wrapper's tty, Attach falls through to
+// spawning a fresh wrapper with --resume in the recorded mode.
+func TestAttachFallsThroughToResumeWhenNoTab(t *testing.T) {
 	if runtime.GOOS != "darwin" {
-		t.Skipf("focus path is macOS-only; GOOS=%s", runtime.GOOS)
+		t.Skipf("attach is macOS-only; GOOS=%s", runtime.GOOS)
 	}
 	beadsDir := testutil.TestDB(t)
-	ticket := testutil.CreateBeadFull(t, beadsDir, "attach-focus-notab", "x", "")
+	ticket := testutil.CreateBeadFull(t, beadsDir, "attach-fallthrough-notab", "x", "")
 
+	envPath := t.TempDir()
 	sid := "44444444-4444-4444-8444-444444444444"
 	if err := agent.RegisterAgent("", beadsDir, ticket, agent.AgentEntry{
 		SessionID: sid, PID: 1, Mode: "agent",
-		StartedAt: "2026-05-15T14:56:00Z", Env: t.TempDir(),
-		Status: agent.StatusRunning,
+		StartedAt: "2026-05-15T14:56:00Z", Env: envPath,
+		Status: agent.StatusWaiting,
 	}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	stubLookupTTY(t, func(int) (string, error) { return "ttys999", nil })
-	stubOsascript(t, func(string) (string, error) { return "NOT_FOUND\n", nil })
+	calls := stubOsascript(t, func(script string) (string, error) {
+		// First call (focus) returns NOT_FOUND; second (spawn) succeeds.
+		if strings.Contains(script, "do script") {
+			return "", nil
+		}
+		return "NOT_FOUND\n", nil
+	})
 
-	err := agent.Attach("", beadsDir, ticket, sid)
-	if err == nil {
-		t.Fatal("Attach with NOT_FOUND succeeded; want error")
+	if err := agent.Attach("", beadsDir, ticket, sid); err != nil {
+		t.Fatalf("Attach: %v", err)
 	}
-	if !strings.Contains(err.Error(), "backgrounded") {
-		t.Errorf("error = %q, want to mention 'backgrounded'", err.Error())
+	if len(*calls) != 2 {
+		t.Fatalf("want 2 osascript calls (focus + spawn), got %d", len(*calls))
+	}
+	spawn := (*calls)[1].script
+	if !strings.Contains(spawn, "do script") {
+		t.Errorf("second osascript call should be a spawn:\n%s", spawn)
+	}
+	if !strings.Contains(spawn, "--resume "+shellSingleQuote(sid)) {
+		t.Errorf("spawn missing --resume %s:\n%s", sid, spawn)
+	}
+	if !strings.Contains(spawn, " 'agent' --resume ") {
+		t.Errorf("spawn should invoke recorded mode 'agent' as subcommand:\n%s", spawn)
 	}
 }
 
-func TestAttachFocusErrorsWhenNoTTY(t *testing.T) {
+// Same fallthrough when ps reports no controlling tty.
+func TestAttachFallsThroughToResumeWhenNoTTY(t *testing.T) {
 	if runtime.GOOS != "darwin" {
-		t.Skipf("focus path is macOS-only; GOOS=%s", runtime.GOOS)
+		t.Skipf("attach is macOS-only; GOOS=%s", runtime.GOOS)
 	}
 	beadsDir := testutil.TestDB(t)
-	ticket := testutil.CreateBeadFull(t, beadsDir, "attach-focus-notty", "x", "")
+	ticket := testutil.CreateBeadFull(t, beadsDir, "attach-fallthrough-notty", "x", "")
 
+	envPath := t.TempDir()
 	sid := "55555555-5555-4555-8555-555555555555"
 	if err := agent.RegisterAgent("", beadsDir, ticket, agent.AgentEntry{
-		SessionID: sid, PID: 1, Mode: "agent",
-		StartedAt: "2026-05-15T14:56:00Z", Env: t.TempDir(),
-		Status: agent.StatusRunning,
+		SessionID: sid, PID: 1, Mode: "spec",
+		StartedAt: "2026-05-15T14:56:00Z", Env: envPath,
+		Status: agent.StatusWaiting,
 	}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	stubLookupTTY(t, func(int) (string, error) { return "??", nil })
-	osaCalled := false
-	stubOsascript(t, func(string) (string, error) {
-		osaCalled = true
-		return "OK", nil
+	calls := stubOsascript(t, func(string) (string, error) { return "", nil })
+
+	if err := agent.Attach("", beadsDir, ticket, sid); err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	if len(*calls) != 1 {
+		t.Fatalf("want 1 osascript call (spawn only — focus skipped), got %d", len(*calls))
+	}
+	spawn := (*calls)[0].script
+	if !strings.Contains(spawn, "do script") {
+		t.Errorf("osascript should be a spawn:\n%s", spawn)
+	}
+	// Spec-mode session must resume via the 'spec' subcommand.
+	if !strings.Contains(spawn, " 'spec' --resume ") {
+		t.Errorf("spawn should invoke recorded mode 'spec' as subcommand:\n%s", spawn)
+	}
+}
+
+// Env folder removed (e.g. bead was finished) → fallthrough errors before
+// touching osascript.
+func TestAttachFallthroughErrorsWhenEnvMissing(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skipf("attach is macOS-only; GOOS=%s", runtime.GOOS)
+	}
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBeadFull(t, beadsDir, "attach-fallthrough-noenv", "x", "")
+
+	envPath := t.TempDir()
+	sid := "88888888-8888-4888-8888-888888888888"
+	if err := agent.RegisterAgent("", beadsDir, ticket, agent.AgentEntry{
+		SessionID: sid, PID: 1, Mode: "agent",
+		StartedAt: "2026-05-15T14:56:00Z", Env: envPath,
+		Status: agent.StatusWaiting,
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	stubLookupTTY(t, func(int) (string, error) { return "??", nil })
+	osaSpawnCalled := false
+	stubOsascript(t, func(script string) (string, error) {
+		if strings.Contains(script, "do script") {
+			osaSpawnCalled = true
+		}
+		return "", nil
 	})
+	// Drop the env directory after registering so the fallthrough hits the
+	// env-missing branch.
+	if err := os.RemoveAll(envPath); err != nil {
+		t.Fatalf("remove env: %v", err)
+	}
 
 	err := agent.Attach("", beadsDir, ticket, sid)
 	if err == nil {
-		t.Fatal("Attach with no tty succeeded; want error")
+		t.Fatal("Attach with missing env succeeded; want error")
 	}
-	if !strings.Contains(err.Error(), "no controlling terminal") {
-		t.Errorf("error = %q, want to mention 'no controlling terminal'", err.Error())
+	if !strings.Contains(err.Error(), "no longer exists") {
+		t.Errorf("error = %q, want to mention 'no longer exists'", err.Error())
 	}
-	if osaCalled {
-		t.Errorf("osascript should not run when no tty is available")
+	if osaSpawnCalled {
+		t.Errorf("spawn osascript should not run when env is missing")
 	}
 }
 
@@ -218,80 +289,6 @@ func TestAttachFocusesWaitingWrapper(t *testing.T) {
 
 	if err := agent.Attach("", beadsDir, ticket, sid); err != nil {
 		t.Fatalf("Attach (waiting): %v", err)
-	}
-}
-
-func TestAttachSpawnsResumeWindowForExited(t *testing.T) {
-	if runtime.GOOS != "darwin" {
-		t.Skipf("spawn path is macOS-only; GOOS=%s", runtime.GOOS)
-	}
-	beadsDir := testutil.TestDB(t)
-	ticket := testutil.CreateBeadFull(t, beadsDir, "attach-spawn-exited", "x", "")
-
-	envPath := t.TempDir()
-	sid := "77777777-7777-4777-8777-777777777777"
-	if err := agent.RegisterAgent("", beadsDir, ticket, agent.AgentEntry{
-		SessionID: sid, PID: 999999, Mode: "agent",
-		StartedAt: "2026-05-15T14:56:00Z", Env: envPath,
-		Status: agent.StatusRunning,
-	}); err != nil {
-		t.Fatalf("Register: %v", err)
-	}
-
-	calls := stubOsascript(t, func(string) (string, error) { return "", nil })
-
-	if err := agent.Attach("", beadsDir, ticket, sid); err != nil {
-		t.Fatalf("Attach: %v", err)
-	}
-	if len(*calls) != 1 {
-		t.Fatalf("osascript invoked %d times, want 1", len(*calls))
-	}
-	script := (*calls)[0].script
-	if !strings.Contains(script, "do script") {
-		t.Errorf("spawn script missing 'do script':\n%s", script)
-	}
-	if !strings.Contains(script, "--resume "+shellSingleQuote(sid)) {
-		t.Errorf("spawn script missing '--resume %s':\n%s", sid, script)
-	}
-	if !strings.Contains(script, "cd "+shellSingleQuote(envPath)) {
-		t.Errorf("spawn script missing cd to env path %s:\n%s", envPath, script)
-	}
-	if !strings.Contains(script, "--ticket "+shellSingleQuote(ticket)) {
-		t.Errorf("spawn script missing --ticket %s:\n%s", ticket, script)
-	}
-}
-
-func TestAttachExitedWithMissingEnvFails(t *testing.T) {
-	if runtime.GOOS != "darwin" {
-		t.Skipf("spawn path is macOS-only; GOOS=%s", runtime.GOOS)
-	}
-	beadsDir := testutil.TestDB(t)
-	ticket := testutil.CreateBeadFull(t, beadsDir, "attach-spawn-no-env", "x", "")
-
-	envPath := t.TempDir()
-	sid := "88888888-8888-4888-8888-888888888888"
-	if err := agent.RegisterAgent("", beadsDir, ticket, agent.AgentEntry{
-		SessionID: sid, PID: 999999, Mode: "agent",
-		StartedAt: "2026-05-15T14:56:00Z", Env: envPath,
-		Status: agent.StatusRunning,
-	}); err != nil {
-		t.Fatalf("Register: %v", err)
-	}
-	if err := os.RemoveAll(envPath); err != nil {
-		t.Fatalf("remove env: %v", err)
-	}
-	osaCalled := false
-	stubOsascript(t, func(string) (string, error) { osaCalled = true; return "", nil })
-
-	err := agent.Attach("", beadsDir, ticket, sid)
-	if err == nil {
-		t.Fatal("Attach with missing env succeeded; want error")
-	}
-	if !strings.Contains(err.Error(), "no longer exists") {
-		t.Errorf("error = %q, want to mention 'no longer exists'", err.Error())
-	}
-	if osaCalled {
-		t.Errorf("osascript should not run when env is missing")
 	}
 }
 
@@ -365,10 +362,3 @@ func TestAttachCLINoArg(t *testing.T) {
 	}
 }
 
-// shellSingleQuote mirrors the (unexported) shellQuote helper in attach.go
-// so the spawn-script assertions don't have to pin the exact escape rules.
-// The session ids and env paths used in tests never contain single quotes,
-// so a straight wrap is sufficient.
-func shellSingleQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
-}
