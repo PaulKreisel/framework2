@@ -13,7 +13,7 @@ func TestCreateChild(t *testing.T) {
 	beadsDir := testutil.TestDB(t)
 	parent := testutil.CreateBead(t, beadsDir, "create-child-parent")
 
-	out, errOut, code := testutil.RunTicketIn(t, beadsDir, "create", "child", parent, "Child of Parent")
+	out, errOut, code := testutil.RunTicketIn(t, beadsDir, "create", "child", parent, "Child of Parent", "--description", "child body")
 	if code != 0 {
 		t.Fatalf("ticket create child: exit=%d stderr=%q", code, errOut)
 	}
@@ -29,6 +29,9 @@ func TestCreateChild(t *testing.T) {
 	if got := loadSlug(t, beadsDir, childID); got != "child-of-parent" {
 		t.Errorf("child %s slug = %q, want %q", childID, got, "child-of-parent")
 	}
+	if got := loadDescription(t, beadsDir, childID); got != "child body" {
+		t.Errorf("child %s description = %q, want %q", childID, got, "child body")
+	}
 }
 
 func TestCreateChildPersistsDerivedSlug(t *testing.T) {
@@ -37,7 +40,7 @@ func TestCreateChildPersistsDerivedSlug(t *testing.T) {
 	parent := testutil.CreateBead(t, beadsDir, "slug-derive-parent")
 
 	out, errOut, code := testutil.RunTicketIn(t, beadsDir, "create", "child", parent,
-		"Fix the !!! BROKEN logger, please")
+		"Fix the !!! BROKEN logger, please", "--description", "fix it")
 	if code != 0 {
 		t.Fatalf("create child: exit=%d stderr=%q", code, errOut)
 	}
@@ -56,14 +59,14 @@ func TestCreateFollowupUnderSharedParent(t *testing.T) {
 	t.Parallel()
 	beadsDir := testutil.TestDB(t)
 	parent := testutil.CreateBead(t, beadsDir, "create-followup-parent")
-	out, errOut, code := testutil.RunTicketIn(t, beadsDir, "create", "child", parent, "current for followup")
+	out, errOut, code := testutil.RunTicketIn(t, beadsDir, "create", "child", parent, "current for followup", "--description", "seed")
 	if code != 0 {
 		t.Fatalf("seed child: exit=%d stderr=%q", code, errOut)
 	}
 	current := strings.TrimSpace(out)
 	t.Cleanup(func() { _ = testutil.BdCmd(beadsDir, "close", current).Run() })
 
-	out, errOut, code = testutil.RunTicketIn(t, beadsDir, "create", "followup", current, "the followup")
+	out, errOut, code = testutil.RunTicketIn(t, beadsDir, "create", "followup", current, "the followup", "--description", "follow-up body")
 	if code != 0 {
 		t.Fatalf("ticket create followup: exit=%d stderr=%q", code, errOut)
 	}
@@ -84,7 +87,7 @@ func TestCreateFollowupTopLevel(t *testing.T) {
 	beadsDir := testutil.TestDB(t)
 	current := testutil.CreateBead(t, beadsDir, "create-followup-no-parent")
 
-	out, errOut, code := testutil.RunTicketIn(t, beadsDir, "create", "followup", current, "top-level followup")
+	out, errOut, code := testutil.RunTicketIn(t, beadsDir, "create", "followup", current, "top-level followup", "--description", "top-level body")
 	if code != 0 {
 		t.Fatalf("ticket create followup: exit=%d stderr=%q", code, errOut)
 	}
@@ -103,14 +106,14 @@ func TestCreateFollowupNotBlocked(t *testing.T) {
 	t.Parallel()
 	beadsDir := testutil.TestDB(t)
 	parent := testutil.CreateBead(t, beadsDir, "create-followup-notblocked-parent")
-	out, errOut, code := testutil.RunTicketIn(t, beadsDir, "create", "child", parent, "current for notblocked")
+	out, errOut, code := testutil.RunTicketIn(t, beadsDir, "create", "child", parent, "current for notblocked", "--description", "seed")
 	if code != 0 {
 		t.Fatalf("seed child: exit=%d stderr=%q", code, errOut)
 	}
 	current := strings.TrimSpace(out)
 	t.Cleanup(func() { _ = testutil.BdCmd(beadsDir, "close", current).Run() })
 
-	out, errOut, code = testutil.RunTicketIn(t, beadsDir, "create", "followup", current, "--not-blocked", "plain sibling")
+	out, errOut, code = testutil.RunTicketIn(t, beadsDir, "create", "followup", current, "--not-blocked", "plain sibling", "--description", "sibling body")
 	if code != 0 {
 		t.Fatalf("ticket create followup --not-blocked: exit=%d stderr=%q", code, errOut)
 	}
@@ -130,7 +133,7 @@ func TestCreateChildRejectsNotBlocked(t *testing.T) {
 	beadsDir := testutil.TestDB(t)
 	current := testutil.CreateBead(t, beadsDir, "create-child-rejects-flag")
 
-	_, errOut, code := testutil.RunTicketIn(t, beadsDir, "create", "child", current, "--not-blocked", "x")
+	_, errOut, code := testutil.RunTicketIn(t, beadsDir, "create", "child", current, "--not-blocked", "x", "--description", "d")
 	if code == 0 {
 		t.Fatalf("expected nonzero exit for --not-blocked on child")
 	}
@@ -144,13 +147,74 @@ func TestCreateUnknownRelation(t *testing.T) {
 	beadsDir := testutil.TestDB(t)
 	current := testutil.CreateBead(t, beadsDir, "create-unknown-rel")
 
-	_, errOut, code := testutil.RunTicketIn(t, beadsDir, "create", "sibling", current, "x")
+	_, errOut, code := testutil.RunTicketIn(t, beadsDir, "create", "sibling", current, "x", "--description", "d")
 	if code == 0 {
 		t.Fatalf("expected nonzero exit for unknown relation")
 	}
 	if !strings.Contains(errOut, "unknown create relation") {
 		t.Errorf("stderr missing message; got %q", errOut)
 	}
+}
+
+func TestCreateChildRejectsMissingDescription(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	parent := testutil.CreateBead(t, beadsDir, "create-child-no-desc")
+
+	_, errOut, code := testutil.RunTicketIn(t, beadsDir, "create", "child", parent, "no description here")
+	if code == 0 {
+		t.Fatalf("expected nonzero exit when --description is omitted")
+	}
+	if !strings.Contains(errOut, "--description") {
+		t.Errorf("stderr missing --description message; got %q", errOut)
+	}
+}
+
+func TestCreateChildRejectsEmptyDescription(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	parent := testutil.CreateBead(t, beadsDir, "create-child-empty-desc")
+
+	_, errOut, code := testutil.RunTicketIn(t, beadsDir, "create", "child", parent, "empty description", "--description", "")
+	if code == 0 {
+		t.Fatalf("expected nonzero exit when --description is empty")
+	}
+	if !strings.Contains(errOut, "--description") {
+		t.Errorf("stderr missing --description message; got %q", errOut)
+	}
+}
+
+func TestCreateFollowupRejectsMissingDescription(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	current := testutil.CreateBead(t, beadsDir, "create-followup-no-desc")
+
+	_, errOut, code := testutil.RunTicketIn(t, beadsDir, "create", "followup", current, "no description here")
+	if code == 0 {
+		t.Fatalf("expected nonzero exit when --description is omitted")
+	}
+	if !strings.Contains(errOut, "--description") {
+		t.Errorf("stderr missing --description message; got %q", errOut)
+	}
+}
+
+// loadDescription returns the bead's description field as stored by bd.
+func loadDescription(t *testing.T, beadsDir, ticketID string) string {
+	t.Helper()
+	out, err := testutil.BdCmd(beadsDir, "--json", "show", ticketID).Output()
+	if err != nil {
+		t.Fatalf("bd show %s: %v", ticketID, err)
+	}
+	var rows []struct {
+		Description string `json:"description"`
+	}
+	if err := json.Unmarshal(out, &rows); err != nil {
+		t.Fatalf("parse bd show: %v", err)
+	}
+	if len(rows) == 0 {
+		t.Fatalf("bd show %s: no rows", ticketID)
+	}
+	return rows[0].Description
 }
 
 // loadParent returns the parent id of ticketID, or "" if it has none.

@@ -126,12 +126,17 @@ subcommands:
   spec --print-default-prompt             print the built-in default spec-mode
                                           prompt template (copy as a starting
                                           point for <BEADS_DIR>/spec-prompt.md)
-  create child <title>                    new bead as a child of the current ticket
-  create followup [--not-blocked] <title>
+  create child <title> --description <text>
+                                          new bead as a child of the current ticket.
+                                          --description seeds the new bead's
+                                          description (and its env description.md)
+                                          and is required.
+  create followup [--not-blocked] <title> --description <text>
                                           sibling of the current ticket (top-level if
                                           current has no parent). By default current
                                           blocks the new bead; --not-blocked skips
-                                          that dep.
+                                          that dep. --description is required (same
+                                          as for create child).
   next [<id>]                             show ready descendants of a ticket
   next agent [<id>] [--all] [--min-recursion-depth <M>] [--recursion-depth <N>] [--json]
                                           list agents that are currently waiting
@@ -827,20 +832,43 @@ func hookPayloadFromStdin() (*hookStdinPayload, error) {
 
 func runCreate(db, beadsDir, ticket string, args []string, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: ticket create <child|followup> [<id>] [--not-blocked] <title>")
+		return errors.New("usage: ticket create <child|followup> [<id>] [--not-blocked] <title> --description <text>")
 	}
 	sub, rest := args[0], args[1:]
 
-	// Extract --not-blocked flag from anywhere in rest; surrounding tokens
-	// are positionals (id, title) handled by resolveID below.
-	var notBlocked bool
+	// Extract --not-blocked / --description flags from anywhere in rest;
+	// surrounding tokens are positionals (id, title) handled by resolveID
+	// below.
+	var (
+		notBlocked     bool
+		description    string
+		descriptionSet bool
+	)
 	positional := make([]string, 0, len(rest))
-	for _, a := range rest {
-		if a == "--not-blocked" {
+	for i := 0; i < len(rest); i++ {
+		a := rest[i]
+		switch {
+		case a == "--not-blocked":
 			notBlocked = true
-			continue
+		case a == "--description":
+			if i+1 >= len(rest) {
+				return errors.New("--description requires a value")
+			}
+			description = rest[i+1]
+			descriptionSet = true
+			i++
+		case strings.HasPrefix(a, "--description="):
+			description = strings.TrimPrefix(a, "--description=")
+			descriptionSet = true
+		default:
+			positional = append(positional, a)
 		}
-		positional = append(positional, a)
+	}
+	if !descriptionSet {
+		return errors.New("--description <text> is required")
+	}
+	if description == "" {
+		return errors.New("--description value must not be empty")
 	}
 
 	var rel create.Relation
@@ -855,11 +883,11 @@ func runCreate(db, beadsDir, ticket string, args []string, stdout io.Writer) err
 	default:
 		return fmt.Errorf("unknown create relation %q (want child|followup)", sub)
 	}
-	id, tail, err := resolveID(ticket, positional, 1, fmt.Sprintf("usage: ticket create %s [<id>] [--not-blocked] <title>", sub))
+	id, tail, err := resolveID(ticket, positional, 1, fmt.Sprintf("usage: ticket create %s [<id>] [--not-blocked] <title> --description <text>", sub))
 	if err != nil {
 		return err
 	}
-	return create.Run(db, beadsDir, id, tail[0], rel, !notBlocked, stdout)
+	return create.Run(db, beadsDir, id, tail[0], description, rel, !notBlocked, stdout)
 }
 
 func runFinish(db, beadsDir, ticket string, args []string, stdout io.Writer) error {

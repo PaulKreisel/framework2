@@ -133,15 +133,15 @@ func LoadPromptTemplate(beadsDir string, mode Mode) (string, error) {
 // The cmd_* fragments return raw command syntax with no surrounding
 // formatting. Templates wrap them as needed — inline backticks when used in
 // running prose, a fenced code block when used as a standalone command.
-const cmdCreateFollowupBlockingText = "this create followup <title>"
+const cmdCreateFollowupBlockingText = "this create followup <title> --description <text>"
 
 func renderCmdCreateFollowupBlocking(PromptContext) string { return cmdCreateFollowupBlockingText }
 
-const cmdCreateFollowupNotBlockedText = "this create followup --not-blocked <title>"
+const cmdCreateFollowupNotBlockedText = "this create followup --not-blocked <title> --description <text>"
 
 func renderCmdCreateFollowupNotBlocked(PromptContext) string { return cmdCreateFollowupNotBlockedText }
 
-const cmdCreateChildText = "this create child <title>"
+const cmdCreateChildText = "this create child <title> --description <text>"
 
 func renderCmdCreateChild(PromptContext) string { return cmdCreateChildText }
 

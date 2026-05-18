@@ -31,13 +31,18 @@ const (
 
 // Run creates a new bead related to currentID by rel with the given title and
 // prints the new bead's id to stdout. db may be empty to use bd's default.
-// blocked is only consulted for Followup.
-func Run(db, beadsDir, currentID, title string, rel Relation, blocked bool, stdout io.Writer) error {
+// blocked is only consulted for Followup. description becomes the new bead's
+// initial description (and thus seeds the env folder's description.md); it
+// must be non-empty.
+func Run(db, beadsDir, currentID, title, description string, rel Relation, blocked bool, stdout io.Writer) error {
 	if currentID == "" {
 		return errors.New("ticket id required")
 	}
 	if title == "" {
 		return errors.New("title required")
+	}
+	if description == "" {
+		return errors.New("description required")
 	}
 
 	var parent string
@@ -56,7 +61,7 @@ func Run(db, beadsDir, currentID, title string, rel Relation, blocked bool, stdo
 
 	initialSlug := slug.Derive(title, slug.MaxLen)
 
-	args := []string{"create", title, "--silent"}
+	args := []string{"create", title, "--silent", "--description", description}
 	if parent != "" {
 		args = append(args, "--parent", parent)
 	}
