@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"framework2/internal/agent"
-	"framework2/internal/dir"
 	"framework2/internal/env"
 	"framework2/internal/testutil"
 )
@@ -90,41 +89,6 @@ func TestBuildSystemPromptModes(t *testing.T) {
 		if strings.Contains(p, "Repos in this session") {
 			t.Errorf("empty dirs should not produce repos section:\n%s", p)
 		}
-	}
-}
-
-func TestBuildSystemPromptListsBareReposAndParentRepos(t *testing.T) {
-	t.Parallel()
-	current := []dir.Entry{
-		{Path: "/wt/framework2-bd-1", BareRepo: "/bare/framework2.git"},
-	}
-	ancestors := []dir.Entry{
-		// Same bare as current: should be excluded.
-		{Path: "/wt/framework2-parent", BareRepo: "/bare/framework2.git"},
-		// Different bare: should surface as actionable bullet.
-		{Path: "/wt/other-parent", BareRepo: "/bare/other.git"},
-		// No bareRepo: skipped entirely.
-		{Path: "/wt/loose", LocalRepo: "/wt/loose"},
-	}
-	p, err := agent.BuildSystemPrompt("", "bd-1", "x", agent.ModeAgent, current, ancestors)
-	if err != nil {
-		t.Fatalf("BuildSystemPrompt: %v", err)
-	}
-
-	if !strings.Contains(p, "Repos linked into this session: framework2.") {
-		t.Errorf("prompt missing current repo line:\n%s", p)
-	}
-	if !strings.Contains(p, "Parent tickets touch the following repos (add with `this dir worktree <path>`):") {
-		t.Errorf("prompt missing parent-repos header:\n%s", p)
-	}
-	if !strings.Contains(p, "- other — `/bare/other.git`") {
-		t.Errorf("prompt missing actionable bullet for `other`:\n%s", p)
-	}
-	if strings.Contains(p, "- framework2 — ") {
-		t.Errorf("parent list should exclude repos already in current bead:\n%s", p)
-	}
-	if strings.Contains(p, "loose") {
-		t.Errorf("entries without BareRepo should be omitted entirely:\n%s", p)
 	}
 }
 

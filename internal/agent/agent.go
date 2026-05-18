@@ -293,6 +293,31 @@ func writeDescription(envPath string, issue *bdIssue) error {
 	return os.WriteFile(filepath.Join(envPath, DescriptionFile), []byte(body), 0o644)
 }
 
+// DryRunPrompt returns the system prompt that a fresh launch of `ticket
+// agent <id>` / `ticket spec <id>` would pass to claude via
+// `--append-system-prompt`, without any of the launch's side effects (the env
+// folder isn't created, description.md / settings.json aren't written, the
+// bead isn't claimed, claude isn't execed). Used by the `--dry-run` flag to
+// preview operator-template / default-template edits against a real ticket.
+func DryRunPrompt(db, beadsDir, ticketID string, mode Mode) (string, error) {
+	if ticketID == "" {
+		return "", errors.New("ticket id required")
+	}
+	issue, err := loadIssue(db, beadsDir, ticketID)
+	if err != nil {
+		return "", err
+	}
+	dirs, err := dir.Load(db, beadsDir, ticketID)
+	if err != nil {
+		return "", err
+	}
+	ancestorDirs, err := dir.LoadAncestorEntries(db, beadsDir, ticketID)
+	if err != nil {
+		return "", err
+	}
+	return BuildSystemPrompt(beadsDir, issue.ID, issue.Title, mode, dirs, ancestorDirs)
+}
+
 // BuildSystemPrompt returns the mode-specific text appended to claude's
 // system prompt for this launch. It loads <beadsDir>/agent-prompt.md (coding
 // mode) or <beadsDir>/spec-prompt.md (spec mode) when present; otherwise the

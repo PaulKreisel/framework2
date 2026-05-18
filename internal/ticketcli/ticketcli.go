@@ -57,12 +57,18 @@ subcommands:
   env [<id>]                              create on-disk env folder for a ticket
   env syncback [<id>]                     push <env>/description.md back to the
                                           bead description (one-way file → bead)
-  agent [<id>] [--resume <session-id>]    launch claude from a ticket's env folder
+  agent [<id>] [--resume <session-id> | --dry-run]
+                                          launch claude from a ticket's env folder
                                           in coding mode. With --resume, claude
                                           reattaches to the named transcript
                                           instead of starting a fresh session;
                                           the existing agent record is updated
-                                          in place.
+                                          in place. With --dry-run, print the
+                                          rendered system prompt that would be
+                                          appended on a fresh launch and do
+                                          nothing else (no env folder, no
+                                          claim, no claude). Mutually exclusive
+                                          with --resume.
   agent list [<id>] [--json]              list agents that have been launched on a
                                           ticket (newest first). See WAITING
                                           REASON below for what the column /
@@ -111,9 +117,12 @@ subcommands:
                                           point for <BEADS_DIR>/agent-prompt.md)
   agent --list-prompt-fragments           list named fragments operator templates
                                           can interpolate via {{name}}
-  spec [<id>]                             launch claude from a ticket's env folder
+  spec [<id>] [--dry-run]                 launch claude from a ticket's env folder
                                           in spec mode (edits description.md and
-                                          spawns related beads; does not code)
+                                          spawns related beads; does not code).
+                                          With --dry-run, print the rendered
+                                          system prompt that would be appended
+                                          on a fresh launch and do nothing else.
   spec --print-default-prompt             print the built-in default spec-mode
                                           prompt template (copy as a starting
                                           point for <BEADS_DIR>/spec-prompt.md)
@@ -530,11 +539,16 @@ func runAgent(db, beadsDir, ticket string, args []string, mode agent.Mode, stdou
 	// --resume <session-id> turns `ticket agent` into the resume path used to
 	// re-launch a wrapper whose terminal was killed. It's only valid in
 	// ModeAgent (spec sessions don't share a transcript with a coding agent).
+	// --dry-run short-circuits to printing the rendered system prompt and is
+	// mutually exclusive with --resume.
 	var resume string
+	var dryRun bool
 	positional := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
+		case a == "--dry-run":
+			dryRun = true
 		case a == "--resume":
 			if i+1 >= len(args) {
 				return errors.New("--resume requires a session id")
@@ -547,12 +561,23 @@ func runAgent(db, beadsDir, ticket string, args []string, mode agent.Mode, stdou
 			positional = append(positional, a)
 		}
 	}
-	usage := "usage: ticket agent [<id>] [--resume <session-id>]"
+	usage := "usage: ticket agent [<id>] [--resume <session-id> | --dry-run]"
 	if mode == agent.ModeSpec {
-		usage = "usage: ticket spec [<id>] [--resume <session-id>]"
+		usage = "usage: ticket spec [<id>] [--resume <session-id> | --dry-run]"
+	}
+	if dryRun && resume != "" {
+		return errors.New("--dry-run and --resume are mutually exclusive")
 	}
 	id, _, err := resolveID(ticket, positional, 0, usage)
 	if err != nil {
+		return err
+	}
+	if dryRun {
+		prompt, err := agent.DryRunPrompt(db, beadsDir, id, mode)
+		if err != nil {
+			return err
+		}
+		_, err = io.WriteString(stdout, prompt)
 		return err
 	}
 	return agent.RunWithResume(db, beadsDir, id, resume, mode)

@@ -42,14 +42,16 @@ type fragmentRenderer func(PromptContext) string
 // Static prose lives in the default templates so operators can reword it
 // without losing framework-maintained command syntax.
 var fragments = map[string]fragmentRenderer{
-	"ticket_id":           func(c PromptContext) string { return c.TicketID },
-	"title":               func(c PromptContext) string { return c.Title },
-	"cmd_create_followup": renderCmdCreateFollowup,
-	"cmd_create_child":    renderCmdCreateChild,
-	"cmd_dir_add":         renderCmdDirAdd,
-	"cmd_env_syncback":    renderCmdEnvSyncback,
-	"repos_current":       renderReposCurrent,
-	"repos_parents":       renderReposParents,
+	"ticket_id":                       func(c PromptContext) string { return c.TicketID },
+	"title":                           func(c PromptContext) string { return c.Title },
+	"cmd_create_followup_blocking":    renderCmdCreateFollowupBlocking,
+	"cmd_create_followup_not_blocked": renderCmdCreateFollowupNotBlocked,
+	"cmd_create_child":                renderCmdCreateChild,
+	"cmd_dir_add":                     renderCmdDirAdd,
+	"cmd_env_syncback":                renderCmdEnvSyncback,
+	"cmd_finish_ticket":               renderCmdFinishTicket,
+	"list_of_linked_repos":            renderListOfLinkedRepos,
+	"repos_parents":                   renderReposParents,
 }
 
 // FragmentNames returns the registered fragment names in alphabetical order.
@@ -128,57 +130,73 @@ func LoadPromptTemplate(beadsDir string, mode Mode) (string, error) {
 	return string(body), nil
 }
 
-const cmdCreateFollowupText = "`this create followup <title>` — sibling of this ticket, blocked by it\n" +
-	"`this create followup --not-blocked <title>` — sibling of this ticket, not blocked"
+// The cmd_* fragments return raw command syntax with no surrounding
+// formatting. Templates wrap them as needed — inline backticks when used in
+// running prose, a fenced code block when used as a standalone command.
+const cmdCreateFollowupBlockingText = "this create followup <title>"
 
-func renderCmdCreateFollowup(PromptContext) string { return cmdCreateFollowupText }
+func renderCmdCreateFollowupBlocking(PromptContext) string { return cmdCreateFollowupBlockingText }
 
-const cmdCreateChildText = "`this create child <title>`"
+const cmdCreateFollowupNotBlockedText = "this create followup --not-blocked <title>"
+
+func renderCmdCreateFollowupNotBlocked(PromptContext) string { return cmdCreateFollowupNotBlockedText }
+
+const cmdCreateChildText = "this create child <title>"
 
 func renderCmdCreateChild(PromptContext) string { return cmdCreateChildText }
 
-const cmdDirAddText = "`this dir worktree <bare-repo>` (or `this dir link <path>`). The wrapper auto-relaunches claude so the new dir is in scope."
+const cmdDirAddText = "this dir worktree <path-to-bare-repo>"
 
 func renderCmdDirAdd(PromptContext) string { return cmdDirAddText }
 
-const cmdEnvSyncbackText = "`this env syncback`"
+const cmdEnvSyncbackText = "this env syncback"
 
 func renderCmdEnvSyncback(PromptContext) string { return cmdEnvSyncbackText }
 
-// renderReposCurrent returns the "Repos in this session" subsection — the
-// heading + the one-line summary of repos linked to the current bead — with a
-// leading `\n` so it joins cleanly to the line above. Returns "" when there
-// are no current repos AND no ancestor repos either (whole block disappears);
-// returns the "No repos linked yet." variant only when there are ancestor
-// repos to display below (so the parents subsection isn't orphaned).
-func renderReposCurrent(c PromptContext) string {
-	currentRepos := bareReposFrom(c.Dirs)
-	currentBares := make(map[string]struct{}, len(currentRepos))
-	for _, r := range currentRepos {
-		currentBares[r.bare] = struct{}{}
+const cmdFinishTicketText = "this finish"
+
+func renderCmdFinishTicket(PromptContext) string { return cmdFinishTicketText }
+
+// renderListOfLinkedRepos returns the body of the "Repos in this session"
+// subsection — one bullet per bare-repo-backed dir linked to the current
+// bead, including the worktree and bare paths. Heading is intentionally left
+// to the template (so operators control its level). Returns "" when neither
+// the current bead nor its ancestors have bare-repo-backed dirs (so the
+// surrounding `{{if}}` collapses the whole block); returns the "No repos
+// linked yet." stub when only the ancestors have repos (so the parents
+// subsection below isn't orphaned under an empty heading).
+func renderListOfLinkedRepos(c PromptContext) string {
+	currentBares := map[string]struct{}{}
+	var current []dir.Entry
+	for _, e := range c.Dirs {
+		if e.BareRepo == "" {
+			continue
+		}
+		if _, dup := currentBares[e.BareRepo]; dup {
+			continue
+		}
+		currentBares[e.BareRepo] = struct{}{}
+		current = append(current, e)
 	}
 	parentRepos := bareReposFromExcluding(c.AncestorDirs, currentBares)
-	if len(currentRepos) == 0 && len(parentRepos) == 0 {
+	if len(current) == 0 && len(parentRepos) == 0 {
 		return ""
 	}
+	if len(current) == 0 {
+		return "No repos linked yet.\n"
+	}
 	var b strings.Builder
-	b.WriteString("\n## Repos in this session\n\n")
-	if len(currentRepos) == 0 {
-		b.WriteString("No repos linked yet.\n")
-	} else {
-		names := make([]string, len(currentRepos))
-		for i, r := range currentRepos {
-			names[i] = r.name
-		}
-		fmt.Fprintf(&b, "Repos linked into this session: %s.\n", strings.Join(names, ", "))
+	for _, e := range current {
+		fmt.Fprintf(&b, "- %s — `%s` (bare: `%s`)\n", repoNameFromBarePath(e.BareRepo), e.Path, e.BareRepo)
 	}
 	return b.String()
 }
 
-// renderReposParents returns the "Parent tickets touch the following repos"
-// subsection (heading + bullet list of ancestor-only bare repos), with a
-// leading `\n` so it joins cleanly to the subsection above. Returns "" when
-// there are no ancestor-only repos.
+// renderReposParents returns the bullet list of ancestor-only bare repos —
+// no heading, no surrounding whitespace. Returns "" when there are no
+// ancestor-only repos, so a surrounding `{{if repos_parents}}` block in the
+// template collapses cleanly. The heading and the "add via" command reference
+// live in the operator templates so operators can reword them.
 func renderReposParents(c PromptContext) string {
 	currentRepos := bareReposFrom(c.Dirs)
 	currentBares := make(map[string]struct{}, len(currentRepos))
@@ -190,7 +208,6 @@ func renderReposParents(c PromptContext) string {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString("\nParent tickets touch the following repos (add with `this dir worktree <path>`):\n\n")
 	for _, r := range parentRepos {
 		fmt.Fprintf(&b, "- %s — `%s`\n", r.name, r.bare)
 	}
