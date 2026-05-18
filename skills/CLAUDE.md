@@ -7,14 +7,14 @@ and `ticket spec` session by materialising the embedded tree into
 ## Manual-invocation only
 
 All skills shipped here are intended to be **manually invoked by the
-operator** (slash-command style — `/<skill-name>`), never auto-triggered
-by the model based on conversational context.
+operator** as slash commands — the operator types `/<skill-name>` in the
+Claude Code input — never auto-triggered by the model based on
+conversational context.
 
-This isn't enforced by Claude Code — the `description:` frontmatter is
-what Claude reads to decide whether to auto-invoke. Authors of new
-skills here should phrase that field so it reads as "Use when the user
-asks to ..." rather than "Use when ..." — i.e. predicated on an explicit
-operator request, not on inferred intent.
+Enforce this in every SKILL.md by setting `disable-model-invocation:
+true` in the YAML frontmatter. With that flag Claude Code will not load
+the skill on its own initiative; only an explicit `/<name>` from the
+operator triggers it.
 
 ## Layout
 

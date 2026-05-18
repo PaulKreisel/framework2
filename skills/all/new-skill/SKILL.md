@@ -1,6 +1,7 @@
 ---
 name: new-skill
-description: Use only when the user explicitly asks to add or propose a new Claude Code skill for framework2 agent / spec sessions (manual invocation — do not auto-trigger). Files the request as a child bead via `ticket create child` after asking which agent(s) it targets.
+description: Capture a request to add a new Claude Code skill to framework2 agent / spec sessions, as a child bead via `ticket create child`. Manual invocation only — operator types `/new-skill`.
+disable-model-invocation: true
 ---
 
 # new-skill
