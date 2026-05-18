@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"strings"
 	"syscall"
 	"time"
 
@@ -35,9 +36,20 @@ type AgentEntry struct {
 	Status                 string `json:"status,omitempty"`
 	StatusUpdatedAt        string `json:"statusUpdatedAt,omitempty"`
 	WaitingReason          string `json:"waitingReason,omitempty"`
+	WaitingReasonSource    string `json:"waitingReasonSource,omitempty"`
 	ContextTokens          int    `json:"contextTokens,omitempty"`
 	ContextTokensUpdatedAt string `json:"contextTokensUpdatedAt,omitempty"`
 }
+
+// WaitingReason source tags. Empty means the legacy form — the Stop hook's
+// captured assistant message — and is rendered as-is. The named sources
+// flag richer payloads (raw tool_input JSON, plan markdown, or a
+// matcher[:message] string) and route through source-aware formatting.
+const (
+	WaitingReasonSourceAskUserQuestion = "ask-user-question"
+	WaitingReasonSourceExitPlanMode    = "exit-plan-mode"
+	WaitingReasonSourceStopFailure     = "stop-failure"
+)
 
 // StatusRunning is the value the UserPromptSubmit hook writes when a turn
 // starts (including the auto-submitted kickoff prompt in agent mode).
@@ -227,17 +239,19 @@ var ErrSessionNotFound = errors.New("no agent record found for session")
 // value) is fast-pathed without touching the bead. Returns
 // [ErrSessionNotFound] when no record matches.
 //
-// reason is the assistant's last message captured by the Stop hook. It is
-// only meaningful when status == [StatusWaiting]; on a transition back to
-// [StatusRunning] the stored reason is cleared so a stale reason can't
-// survive a UserPromptSubmit.
+// reason and source describe what claude is waiting on. reason is either
+// the assistant's last message (Stop hook, source == "") or a richer
+// payload chosen by the caller — raw tool_input JSON, plan markdown, or
+// a stop-failure matcher line. Both are only meaningful when
+// status == [StatusWaiting]; on a transition back to [StatusRunning] they
+// are cleared so a stale value can't survive a UserPromptSubmit.
 //
 // contextTokens is treated as an absolute snapshot, not a delta — a hook
 // retry passing the same value is idempotent. 0 means "no token information
 // available, leave ContextTokens unchanged"; callers that have a real zero
 // reading shouldn't happen in practice (every Claude turn has at least
 // output_tokens > 0).
-func SetStatus(db, beadsDir, sessionID, status, reason, ticketID string, contextTokens int) error {
+func SetStatus(db, beadsDir, sessionID, status, reason, source, ticketID string, contextTokens int) error {
 	if sessionID == "" {
 		return errors.New("session id required")
 	}
@@ -246,6 +260,7 @@ func SetStatus(db, beadsDir, sessionID, status, reason, ticketID string, context
 	}
 	if status != StatusWaiting {
 		reason = ""
+		source = ""
 	}
 	tickets := []string{ticketID}
 	if ticketID == "" {
@@ -267,16 +282,20 @@ func SetStatus(db, beadsDir, sessionID, status, reason, ticketID string, context
 			}
 			statusChanged := e.Status != status
 			reasonChanged := e.WaitingReason != reason
+			sourceChanged := e.WaitingReasonSource != source
 			tokensChanged := contextTokens > 0 && contextTokens != e.ContextTokens
-			if !statusChanged && !reasonChanged && !tokensChanged {
+			if !statusChanged && !reasonChanged && !sourceChanged && !tokensChanged {
 				return nil
 			}
-			if statusChanged || reasonChanged {
+			if statusChanged || reasonChanged || sourceChanged {
 				entries[i].Status = status
 				entries[i].StatusUpdatedAt = now
 			}
 			if reasonChanged {
 				entries[i].WaitingReason = reason
+			}
+			if sourceChanged {
+				entries[i].WaitingReasonSource = source
 			}
 			if tokensChanged {
 				entries[i].ContextTokens = contextTokens
@@ -331,15 +350,72 @@ const waitingReasonTableMax = 80
 // [StatusWaiting]: only waiting agents own a meaningful reason, and a stale
 // reason from a previous turn must not bleed into a "running"/"exited" row.
 //
-// Newlines, carriage returns and tabs are collapsed to single spaces; runs of
-// whitespace are squeezed and leading/trailing whitespace is dropped. The
-// result is truncated to [waitingReasonTableMax] runes with a trailing "…"
-// when the original was longer.
+// When [AgentEntry.WaitingReasonSource] is one of the structured tags, the
+// row shows a short summary derived from the payload (e.g. "asking: which
+// library?", "plan: refactor X…", "rate_limit"). Otherwise the raw
+// [AgentEntry.WaitingReason] is collapsed to one line and truncated.
 func FormatWaitingReason(e AgentEntry) string {
 	if StateOf(e) != StatusWaiting {
 		return ""
 	}
-	return truncateSingleLine(e.WaitingReason, waitingReasonTableMax)
+	summary := summarizeWaitingReason(e.WaitingReasonSource, e.WaitingReason)
+	return truncateSingleLine(summary, waitingReasonTableMax)
+}
+
+// summarizeWaitingReason maps a (source, raw payload) pair to the short
+// human-readable form shown in the table. The raw payload stays in
+// [AgentEntry.WaitingReason] so `agent status` keeps full fidelity.
+func summarizeWaitingReason(source, raw string) string {
+	switch source {
+	case WaitingReasonSourceAskUserQuestion:
+		if q := firstAskQuestion(raw); q != "" {
+			return "asking: " + q
+		}
+		return "asking"
+	case WaitingReasonSourceExitPlanMode:
+		if line := firstNonEmptyLine(raw); line != "" {
+			return "plan: " + line
+		}
+		return "plan"
+	case WaitingReasonSourceStopFailure:
+		return raw
+	default:
+		return raw
+	}
+}
+
+// firstAskQuestion parses the AskUserQuestion tool_input JSON and returns
+// the text of the first question. Returns "" if the JSON doesn't carry a
+// recognisable questions[].question field — better to show "asking" alone
+// than crash the table render.
+func firstAskQuestion(raw string) string {
+	var payload struct {
+		Questions []struct {
+			Question string `json:"question"`
+		} `json:"questions"`
+	}
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return ""
+	}
+	for _, q := range payload.Questions {
+		if q.Question != "" {
+			return q.Question
+		}
+	}
+	return ""
+}
+
+// firstNonEmptyLine returns the first non-blank line of s, trimmed of
+// surrounding whitespace. Used to derive the table summary from a plan's
+// markdown body.
+func firstNonEmptyLine(s string) string {
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			return line
+		}
+	}
+	return ""
 }
 
 func truncateSingleLine(s string, max int) string {

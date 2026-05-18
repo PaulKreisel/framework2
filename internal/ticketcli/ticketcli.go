@@ -81,12 +81,18 @@ subcommands:
                                           whose wrapper is still running/waiting
                                           unless --force is passed. Unknown id
                                           errors with the list of valid ids.
-  agent set-status <running|waiting> [--session <id>]
+  agent set-status <running|waiting> [--session <id>] [--source <kind>]
                                           update an agent record's running/waiting
                                           status. Driven by Claude Code Stop /
-                                          UserPromptSubmit hooks; if --session is
+                                          UserPromptSubmit / PreToolUse /
+                                          StopFailure hooks; if --session is
                                           omitted the session id is parsed from
                                           the JSON hook payload on stdin.
+                                          --source selects how the waiting
+                                          reason is extracted from the payload:
+                                          ask-user-question (tool_input JSON),
+                                          exit-plan-mode (tool_input.plan), or
+                                          stop-failure (matcher[: message]).
   agent relaunch [<id>] [extra-args...]   from inside a session: ask the running
                                           wrapper to re-exec claude with --continue
                                           (use after a dir link/worktree)
@@ -561,15 +567,27 @@ func runAgentDelete(db, beadsDir, ticket string, args []string) error {
 	return agent.DeleteAgents(db, beadsDir, id, tail, force)
 }
 
-// runAgentSetStatus handles `ticket agent set-status <state> [--session <id>]`.
+// runAgentSetStatus handles
+// `ticket agent set-status <state> [--session <id>] [--source <kind>]`.
 // The `ticket` argument is the resolved value of the global --ticket flag and
 // scopes the lookup when provided; otherwise the agent record is located by
 // session id across all open beads. When --session is omitted (the hook
 // invocation path) session_id is parsed out of the Claude Code hook JSON
 // payload on stdin.
+//
+// --source selects how the waiting reason is built from the stdin payload:
+//
+//   - "" (default): the Stop hook's `last_assistant_message` — the legacy
+//     ai-vrc.23 form.
+//   - "ask-user-question": the PreToolUse payload's raw `tool_input` JSON
+//     (questions+options) is stored verbatim.
+//   - "exit-plan-mode": the PreToolUse payload's `tool_input.plan` markdown
+//     body is stored.
+//   - "stop-failure": the StopFailure payload's `matcher` (error type),
+//     suffixed with `: <message>` when the payload carries one.
 func runAgentSetStatus(db, beadsDir, ticket string, args []string) error {
-	usage := "usage: ticket agent set-status <running|waiting> [--session <id>]"
-	var session string
+	usage := "usage: ticket agent set-status <running|waiting> [--session <id>] [--source <kind>]"
+	var session, source string
 	var positional []string
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -582,6 +600,14 @@ func runAgentSetStatus(db, beadsDir, ticket string, args []string) error {
 			i++
 		case strings.HasPrefix(a, "--session="):
 			session = strings.TrimPrefix(a, "--session=")
+		case a == "--source":
+			if i+1 >= len(args) {
+				return errors.New(usage)
+			}
+			source = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--source="):
+			source = strings.TrimPrefix(a, "--source=")
 		default:
 			positional = append(positional, a)
 		}
@@ -594,6 +620,17 @@ func runAgentSetStatus(db, beadsDir, ticket string, args []string) error {
 		return fmt.Errorf("status must be %q or %q, got %q",
 			agent.StatusRunning, agent.StatusWaiting, status)
 	}
+	switch source {
+	case "",
+		agent.WaitingReasonSourceAskUserQuestion,
+		agent.WaitingReasonSourceExitPlanMode,
+		agent.WaitingReasonSourceStopFailure:
+	default:
+		return fmt.Errorf("unknown --source %q (want one of: %s, %s, %s)", source,
+			agent.WaitingReasonSourceAskUserQuestion,
+			agent.WaitingReasonSourceExitPlanMode,
+			agent.WaitingReasonSourceStopFailure)
+	}
 	fromHook := false
 	var contextTokens int
 	var reason string
@@ -604,7 +641,7 @@ func runAgentSetStatus(db, beadsDir, ticket string, args []string) error {
 		}
 		if p != nil {
 			session = p.SessionID
-			reason = p.LastAssistantMessage
+			reason = waitingReasonFromPayload(source, p)
 			// Prefer an explicit context_tokens field if the caller set
 			// one (manual or future-wrapper invocation); otherwise derive
 			// it from the transcript Claude Code points us at.
@@ -624,7 +661,7 @@ func runAgentSetStatus(db, beadsDir, ticket string, args []string) error {
 	if session == "" {
 		return errors.New("no --session id supplied and stdin payload did not contain session_id")
 	}
-	err := agent.SetStatus(db, beadsDir, session, status, reason, ticket, contextTokens)
+	err := agent.SetStatus(db, beadsDir, session, status, reason, source, ticket, contextTokens)
 	// Hook-driven invocations fire for every claude session, not just those
 	// launched via `ticket agent` — so a missing record there is expected,
 	// not an error. Explicit --session calls (manual testing backstop) still
@@ -635,19 +672,70 @@ func runAgentSetStatus(db, beadsDir, ticket string, args []string) error {
 	return err
 }
 
+// waitingReasonFromPayload extracts the per-source waiting-reason payload
+// from the parsed hook stdin. The returned string is stored verbatim in
+// [agent.AgentEntry.WaitingReason]; the display layer derives the short
+// table summary from (source, value) via [agent.FormatWaitingReason].
+//
+// Returns "" when the relevant field is missing — set-status will then
+// clear the stored reason on the flip to running, or store an empty
+// reason on the flip to waiting (the source tag still routes the column
+// rendering).
+func waitingReasonFromPayload(source string, p *hookStdinPayload) string {
+	switch source {
+	case agent.WaitingReasonSourceAskUserQuestion:
+		// Forward the tool_input JSON unchanged — it carries the full
+		// questions+options structure. The display layer parses out the
+		// first question for the truncated table column.
+		if len(p.ToolInput) > 0 && string(p.ToolInput) != "null" {
+			return string(p.ToolInput)
+		}
+		return ""
+	case agent.WaitingReasonSourceExitPlanMode:
+		var ti struct {
+			Plan string `json:"plan"`
+		}
+		if len(p.ToolInput) > 0 {
+			_ = json.Unmarshal(p.ToolInput, &ti)
+		}
+		return ti.Plan
+	case agent.WaitingReasonSourceStopFailure:
+		// Matcher is the error type ("rate_limit", "billing_error", …);
+		// message is the human-readable detail. Compose
+		// "<matcher>: <message>" when both are present, otherwise just
+		// whichever one we have.
+		if p.Matcher != "" && p.Message != "" {
+			return p.Matcher + ": " + p.Message
+		}
+		if p.Matcher != "" {
+			return p.Matcher
+		}
+		return p.Message
+	default:
+		// Legacy Stop-hook form: assistant's final reply for the turn.
+		return p.LastAssistantMessage
+	}
+}
+
 // hookStdinPayload is the subset of the Claude Code hook payload we read
 // from stdin. transcript_path is Claude's path to the session JSONL — we
 // tail it to derive the agent's current context-window size.
 // last_assistant_message is set on Stop payloads and holds the assistant's
-// final reply for the turn; we store it as the agent's WaitingReason so
-// callers know what the session is waiting on. context_tokens is not part
-// of the native Claude Code payload; it's a passthrough hatch for tests
-// and any future wrapper that wants to inject a pre-computed value.
+// final reply for the turn. tool_input is set on PreToolUse payloads and
+// carries the in-flight tool call's JSON (we forward it as the waiting
+// reason for AskUserQuestion / ExitPlanMode). matcher + message are set on
+// StopFailure payloads and identify the API error class plus its detail.
+// context_tokens is not part of the native Claude Code payload; it's a
+// passthrough hatch for tests and any future wrapper that wants to inject
+// a pre-computed value.
 type hookStdinPayload struct {
-	SessionID            string `json:"session_id"`
-	TranscriptPath       string `json:"transcript_path"`
-	LastAssistantMessage string `json:"last_assistant_message"`
-	ContextTokens        int    `json:"context_tokens"`
+	SessionID            string          `json:"session_id"`
+	TranscriptPath       string          `json:"transcript_path"`
+	LastAssistantMessage string          `json:"last_assistant_message"`
+	ToolInput            json.RawMessage `json:"tool_input"`
+	Matcher              string          `json:"matcher"`
+	Message              string          `json:"message"`
+	ContextTokens        int             `json:"context_tokens"`
 }
 
 // hookPayloadFromStdin parses Claude Code's hook payload from os.Stdin.

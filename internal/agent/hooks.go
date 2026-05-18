@@ -8,26 +8,39 @@ import (
 	"path/filepath"
 )
 
-// statusHookCommands maps each Claude Code hook event we install to the
-// `this` invocation that should run when it fires. Stop fires when an
-// assistant turn ends without a tool call (claude is waiting on the user);
-// UserPromptSubmit fires when the user submits the next prompt. The hook
-// payload is delivered as JSON on stdin — `this agent set-status` parses
-// session_id from it when no --session flag is supplied.
+// statusHook describes one Claude Code hook block we install. Event is the
+// top-level hook key (e.g. "Stop", "PreToolUse", "StopFailure"). Matcher
+// filters which invocation triggers the hook — empty means "matcher-less",
+// matching every invocation of Event. Command is the `this` invocation that
+// runs when the hook fires.
 //
-// Exported as a var so tests can introspect/override the canonical command
-// strings without re-deriving them from the installed config.
-var statusHookCommands = map[string]string{
-	"Stop":             "ticket agent set-status waiting",
-	"UserPromptSubmit": "ticket agent set-status running",
+// PreToolUse hooks scope to a specific tool name. The `--source` argument
+// distinguishes which pathway invoked set-status so the reason builder picks
+// the right field off the stdin payload.
+//
+// Exported as a var so tests can introspect/override the canonical list
+// without re-deriving it from the installed config.
+type statusHook struct {
+	Event   string
+	Matcher string
+	Command string
 }
 
-// InstallStatusHooks ensures the Stop and UserPromptSubmit entries in
-// ~/.claude/settings.json invoke `this agent set-status` so the agent's
-// running/waiting state stays current. Idempotent: an existing hook block
-// whose inner command matches what we'd install is left in place rather
-// than duplicated, and unrelated keys (permissions, model, other hooks)
-// are preserved by round-tripping through json.RawMessage.
+var statusHooks = []statusHook{
+	{Event: "Stop", Command: "ticket agent set-status waiting"},
+	{Event: "UserPromptSubmit", Command: "ticket agent set-status running"},
+	{Event: "PreToolUse", Matcher: "AskUserQuestion", Command: "ticket agent set-status waiting --source ask-user-question"},
+	{Event: "PreToolUse", Matcher: "ExitPlanMode", Command: "ticket agent set-status waiting --source exit-plan-mode"},
+	{Event: "StopFailure", Command: "ticket agent set-status waiting --source stop-failure"},
+}
+
+// InstallStatusHooks ensures the entries in ~/.claude/settings.json invoke
+// `this agent set-status` for every hook event in [statusHooks] so the
+// agent's running/waiting state stays current. Idempotent: an existing block
+// whose matcher and inner command already match what we'd install is left
+// in place rather than duplicated. Unrelated keys (permissions, model) and
+// unrelated matcher blocks under the same event are preserved by
+// round-tripping through json.RawMessage.
 //
 // A missing settings.json is created on demand. A settings.json that exists
 // but is not valid JSON is left untouched and the error surfaced — we never
@@ -66,13 +79,13 @@ func installStatusHooksAt(path string) error {
 	}
 
 	changed := false
-	for event, command := range statusHookCommands {
-		updated, dirty, err := ensureHookEvent(hooks[event], command)
+	for _, h := range statusHooks {
+		updated, dirty, err := ensureHookEvent(hooks[h.Event], h.Matcher, h.Command)
 		if err != nil {
-			return fmt.Errorf("merge %s hook in %s: %w", event, path, err)
+			return fmt.Errorf("merge %s hook in %s: %w", h.Event, path, err)
 		}
 		if dirty {
-			hooks[event] = updated
+			hooks[h.Event] = updated
 			changed = true
 		}
 	}
@@ -108,14 +121,16 @@ func installStatusHooksAt(path string) error {
 
 // ensureHookEvent inspects the raw JSON array stored under one hook event
 // (e.g. settings.hooks.Stop) and returns an updated array that contains a
-// matcher block invoking command. dirty reports whether the array had to
-// be modified — when an existing block already carries our command we
-// leave the value unchanged so a re-run is a no-op.
+// block whose "matcher" field equals matcher (or is absent, when matcher is
+// empty) and that invokes command. dirty reports whether the array had to
+// be modified — when an existing matching block already carries our command
+// we leave the value unchanged so a re-run is a no-op.
 //
 // rawEvent may be nil/empty for an event we've never seen; in that case a
-// single-entry array is returned. Unrecognised matcher fields inside
-// existing entries are preserved via json.RawMessage.
-func ensureHookEvent(rawEvent json.RawMessage, command string) (json.RawMessage, bool, error) {
+// single-entry array is returned. Blocks whose matcher differs from ours
+// (including user-defined matcher blocks for unrelated tools/errors) are
+// preserved unchanged via json.RawMessage.
+func ensureHookEvent(rawEvent json.RawMessage, matcher, command string) (json.RawMessage, bool, error) {
 	var entries []map[string]json.RawMessage
 	if len(rawEvent) > 0 && string(rawEvent) != "null" {
 		if err := json.Unmarshal(rawEvent, &entries); err != nil {
@@ -123,6 +138,9 @@ func ensureHookEvent(rawEvent json.RawMessage, command string) (json.RawMessage,
 		}
 	}
 	for _, entry := range entries {
+		if entryMatcher(entry) != matcher {
+			continue
+		}
 		if hookEntryContainsCommand(entry["hooks"], command) {
 			return rawEvent, false, nil
 		}
@@ -133,12 +151,29 @@ func ensureHookEvent(rawEvent json.RawMessage, command string) (json.RawMessage,
 			"command": command,
 		}}),
 	}
+	if matcher != "" {
+		newEntry["matcher"] = mustMarshal(matcher)
+	}
 	entries = append(entries, newEntry)
 	out, err := json.Marshal(entries)
 	if err != nil {
 		return nil, false, err
 	}
 	return out, true, nil
+}
+
+// entryMatcher returns the "matcher" field of one event-array entry. Missing
+// or non-string matcher decodes as "" — the matcher-less form.
+func entryMatcher(entry map[string]json.RawMessage) string {
+	raw, ok := entry["matcher"]
+	if !ok || len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return ""
+	}
+	return s
 }
 
 // hookEntryContainsCommand decodes the inner "hooks" array of one matcher

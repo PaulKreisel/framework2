@@ -45,7 +45,7 @@ func TestSetStatusUpdatesStatusAndTimestamp(t *testing.T) {
 
 	if err := agent.SetStatus("", beadsDir,
 		"11111111-1111-4111-8111-111111111111",
-		agent.StatusWaiting, "", ticket, 0); err != nil {
+		agent.StatusWaiting, "", "", ticket, 0); err != nil {
 		t.Fatalf("SetStatus: %v", err)
 	}
 
@@ -89,7 +89,7 @@ func TestSetStatusIsNoOpWhenAlreadyAtTarget(t *testing.T) {
 
 	if err := agent.SetStatus("", beadsDir,
 		"22222222-2222-4222-8222-222222222222",
-		agent.StatusWaiting, "", ticket, 0); err != nil {
+		agent.StatusWaiting, "", "", ticket, 0); err != nil {
 		t.Fatalf("SetStatus: %v", err)
 	}
 
@@ -107,7 +107,7 @@ func TestSetStatusErrorsWhenSessionMissing(t *testing.T) {
 
 	err := agent.SetStatus("", beadsDir,
 		"deadbeef-dead-4dea-8dea-deaddeaddead",
-		agent.StatusRunning, "", ticket, 0)
+		agent.StatusRunning, "", "", ticket, 0)
 	if err == nil {
 		t.Fatalf("SetStatus on missing session: want error, got nil")
 	}
@@ -154,7 +154,7 @@ func TestSetStatusLocatesTicketWhenUnspecified(t *testing.T) {
 
 	if err := agent.SetStatus("", beadsDir,
 		"33333333-3333-4333-8333-333333333333",
-		agent.StatusWaiting, "", "", 0); err != nil {
+		agent.StatusWaiting, "", "", "", 0); err != nil {
 		t.Fatalf("SetStatus (no ticket id): %v", err)
 	}
 
@@ -327,7 +327,7 @@ func TestSetStatusRoundTripsWaitingReason(t *testing.T) {
 	}
 
 	reason := "Waiting for the user to confirm the schema migration."
-	if err := agent.SetStatus("", beadsDir, sid, agent.StatusWaiting, reason, ticket, 0); err != nil {
+	if err := agent.SetStatus("", beadsDir, sid, agent.StatusWaiting, reason, "", ticket, 0); err != nil {
 		t.Fatalf("SetStatus waiting: %v", err)
 	}
 	if got := loadOne(t, beadsDir, ticket); got.WaitingReason != reason {
@@ -336,7 +336,7 @@ func TestSetStatusRoundTripsWaitingReason(t *testing.T) {
 
 	// Back to running: reason must clear so a stale message can't
 	// survive a UserPromptSubmit.
-	if err := agent.SetStatus("", beadsDir, sid, agent.StatusRunning, "", ticket, 0); err != nil {
+	if err := agent.SetStatus("", beadsDir, sid, agent.StatusRunning, "", "", ticket, 0); err != nil {
 		t.Fatalf("SetStatus running: %v", err)
 	}
 	got := loadOne(t, beadsDir, ticket)
@@ -364,7 +364,7 @@ func TestSetStatusClearsReasonEvenWhenCallerPassesOne(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	if err := agent.SetStatus("", beadsDir, sid, agent.StatusRunning, "ignored", ticket, 0); err != nil {
+	if err := agent.SetStatus("", beadsDir, sid, agent.StatusRunning, "ignored", "", ticket, 0); err != nil {
 		t.Fatalf("SetStatus: %v", err)
 	}
 	if got := loadOne(t, beadsDir, ticket); got.WaitingReason != "" {
@@ -447,6 +447,179 @@ func TestSetStatusCLIToleratesMissingLastAssistantMessage(t *testing.T) {
 	}
 	if got := loadOne(t, beadsDir, ticket); got.WaitingReason != "" {
 		t.Errorf("WaitingReason = %q, want empty when payload omits the field", got.WaitingReason)
+	}
+}
+
+// TestSetStatusCLIAskUserQuestionSource: stdin JSON with session_id and a
+// tool_input.questions[...] block round-trips through set-status with
+// --source ask-user-question. WaitingReason holds the raw tool_input JSON
+// for full fidelity; WaitingReasonSource tags how the table view should
+// render it; FormatWaitingReason picks up the first question's text.
+func TestSetStatusCLIAskUserQuestionSource(t *testing.T) {
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBeadFull(t, beadsDir, "setstatus-source-ask", "x", "")
+
+	sid := "abababab-abab-4bab-8bab-ababababab10"
+	if err := agent.RegisterAgent("", beadsDir, ticket, agent.AgentEntry{
+		SessionID: sid, PID: 1, Mode: "agent",
+		StartedAt: "2026-05-15T14:00:00Z", Env: "/env",
+		Status: agent.StatusRunning,
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	toolInput := `{"questions":[{"question":"Which library should we use for date formatting?","header":"Library","options":[{"label":"date-fns"},{"label":"luxon"}]}]}`
+	payload := `{"session_id":"` + sid + `","hook_event_name":"PreToolUse","tool_input":` + toolInput + `}`
+	pipeStdin(t, payload)
+
+	_, stderr, code := testutil.RunTicketIn(t, beadsDir,
+		"agent", "set-status", "waiting", "--source", "ask-user-question")
+	if code != 0 {
+		t.Fatalf("set-status: exit=%d stderr=%q", code, stderr)
+	}
+
+	got := loadOne(t, beadsDir, ticket)
+	if got.WaitingReasonSource != agent.WaitingReasonSourceAskUserQuestion {
+		t.Errorf("WaitingReasonSource = %q, want %q",
+			got.WaitingReasonSource, agent.WaitingReasonSourceAskUserQuestion)
+	}
+	if got.WaitingReason != toolInput {
+		t.Errorf("WaitingReason = %q, want raw tool_input JSON %q", got.WaitingReason, toolInput)
+	}
+	summary := agent.FormatWaitingReason(got)
+	if !strings.HasPrefix(summary, "asking: ") {
+		t.Errorf("FormatWaitingReason = %q, want \"asking: …\" prefix", summary)
+	}
+	if !strings.Contains(summary, "date formatting") {
+		t.Errorf("FormatWaitingReason = %q, want it to mention the question text", summary)
+	}
+}
+
+// TestSetStatusCLIExitPlanModeSource: stdin JSON with tool_input.plan
+// parses through; WaitingReason holds the plan body; the table summary
+// starts with "plan: " and quotes the first non-empty line.
+func TestSetStatusCLIExitPlanModeSource(t *testing.T) {
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBeadFull(t, beadsDir, "setstatus-source-plan", "x", "")
+
+	sid := "abababab-abab-4bab-8bab-ababababab11"
+	if err := agent.RegisterAgent("", beadsDir, ticket, agent.AgentEntry{
+		SessionID: sid, PID: 1, Mode: "agent",
+		StartedAt: "2026-05-15T14:00:00Z", Env: "/env",
+		Status: agent.StatusRunning,
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	plan := "Refactor the auth flow\n\nDetails follow…"
+	planJSON, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatalf("marshal plan: %v", err)
+	}
+	payload := `{"session_id":"` + sid + `","hook_event_name":"PreToolUse","tool_input":{"plan":` + string(planJSON) + `}}`
+	pipeStdin(t, payload)
+
+	_, stderr, code := testutil.RunTicketIn(t, beadsDir,
+		"agent", "set-status", "waiting", "--source", "exit-plan-mode")
+	if code != 0 {
+		t.Fatalf("set-status: exit=%d stderr=%q", code, stderr)
+	}
+
+	got := loadOne(t, beadsDir, ticket)
+	if got.WaitingReasonSource != agent.WaitingReasonSourceExitPlanMode {
+		t.Errorf("WaitingReasonSource = %q, want %q",
+			got.WaitingReasonSource, agent.WaitingReasonSourceExitPlanMode)
+	}
+	if got.WaitingReason != plan {
+		t.Errorf("WaitingReason = %q, want plan body %q", got.WaitingReason, plan)
+	}
+	summary := agent.FormatWaitingReason(got)
+	if summary != "plan: Refactor the auth flow" {
+		t.Errorf("FormatWaitingReason = %q, want \"plan: Refactor the auth flow\"", summary)
+	}
+}
+
+// TestSetStatusCLIStopFailureSource: stdin JSON with matcher (and optional
+// message) renders as the stored reason; the truncated column shows the
+// bare error type when a matcher is set.
+func TestSetStatusCLIStopFailureSource(t *testing.T) {
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBeadFull(t, beadsDir, "setstatus-source-stopfail", "x", "")
+
+	sid := "abababab-abab-4bab-8bab-ababababab12"
+	if err := agent.RegisterAgent("", beadsDir, ticket, agent.AgentEntry{
+		SessionID: sid, PID: 1, Mode: "agent",
+		StartedAt: "2026-05-15T14:00:00Z", Env: "/env",
+		Status: agent.StatusRunning,
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	payload := `{"session_id":"` + sid + `","hook_event_name":"StopFailure","matcher":"rate_limit","message":"API rate limit reached"}`
+	pipeStdin(t, payload)
+
+	_, stderr, code := testutil.RunTicketIn(t, beadsDir,
+		"agent", "set-status", "waiting", "--source", "stop-failure")
+	if code != 0 {
+		t.Fatalf("set-status: exit=%d stderr=%q", code, stderr)
+	}
+
+	got := loadOne(t, beadsDir, ticket)
+	if got.WaitingReasonSource != agent.WaitingReasonSourceStopFailure {
+		t.Errorf("WaitingReasonSource = %q, want %q",
+			got.WaitingReasonSource, agent.WaitingReasonSourceStopFailure)
+	}
+	if got.WaitingReason != "rate_limit: API rate limit reached" {
+		t.Errorf("WaitingReason = %q, want \"rate_limit: API rate limit reached\"", got.WaitingReason)
+	}
+	// Table cell: per description.md, the stop-failure summary leads with
+	// the matcher (no "asking:" / "plan:" prefix).
+	summary := agent.FormatWaitingReason(got)
+	if !strings.HasPrefix(summary, "rate_limit") {
+		t.Errorf("FormatWaitingReason = %q, want it to start with \"rate_limit\"", summary)
+	}
+}
+
+// TestSetStatusRunningClearsReasonAndSource exercises the round-trip
+// described in description.md: a `waiting --source <kind>` populates both
+// fields; a follow-up `running` (from UserPromptSubmit) clears both. This
+// is what guarantees a stale reason from a previous turn doesn't bleed
+// into a "running" row.
+func TestSetStatusRunningClearsReasonAndSource(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBeadFull(t, beadsDir, "setstatus-clear-source", "x", "")
+
+	sid := "abababab-abab-4bab-8bab-ababababab13"
+	if err := agent.RegisterAgent("", beadsDir, ticket, agent.AgentEntry{
+		SessionID: sid, PID: 1, Mode: "agent",
+		StartedAt: "2026-05-15T14:00:00Z", Env: "/env",
+		Status: agent.StatusRunning,
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	if err := agent.SetStatus("", beadsDir, sid,
+		agent.StatusWaiting, "rate_limit", agent.WaitingReasonSourceStopFailure,
+		ticket, 0); err != nil {
+		t.Fatalf("SetStatus waiting: %v", err)
+	}
+	got := loadOne(t, beadsDir, ticket)
+	if got.WaitingReason == "" || got.WaitingReasonSource == "" {
+		t.Fatalf("after waiting: reason=%q source=%q, want both populated",
+			got.WaitingReason, got.WaitingReasonSource)
+	}
+
+	if err := agent.SetStatus("", beadsDir, sid,
+		agent.StatusRunning, "", "", ticket, 0); err != nil {
+		t.Fatalf("SetStatus running: %v", err)
+	}
+	got = loadOne(t, beadsDir, ticket)
+	if got.WaitingReason != "" {
+		t.Errorf("WaitingReason = %q, want empty after running", got.WaitingReason)
+	}
+	if got.WaitingReasonSource != "" {
+		t.Errorf("WaitingReasonSource = %q, want empty after running", got.WaitingReasonSource)
 	}
 }
 
@@ -649,6 +822,11 @@ func TestInstallStatusHooksCreatesFreshFile(t *testing.T) {
 	settings := readHookSettings(t, path)
 	assertHookContains(t, settings, "Stop", "ticket agent set-status waiting")
 	assertHookContains(t, settings, "UserPromptSubmit", "ticket agent set-status running")
+	assertHookContains(t, settings, "StopFailure", "ticket agent set-status waiting --source stop-failure")
+	assertHookContainsMatcher(t, settings, "PreToolUse", "AskUserQuestion",
+		"ticket agent set-status waiting --source ask-user-question")
+	assertHookContainsMatcher(t, settings, "PreToolUse", "ExitPlanMode",
+		"ticket agent set-status waiting --source exit-plan-mode")
 }
 
 func TestInstallStatusHooksIsIdempotent(t *testing.T) {
@@ -663,7 +841,16 @@ func TestInstallStatusHooksIsIdempotent(t *testing.T) {
 	}
 
 	settings := readHookSettings(t, path)
-	for _, event := range []string{"Stop", "UserPromptSubmit"} {
+	// Per-event expected count of ticket-agent-set-status commands across
+	// the event's matcher blocks. PreToolUse has two (AskUserQuestion,
+	// ExitPlanMode); the others have one matcher-less block each.
+	expected := map[string]int{
+		"Stop":             1,
+		"UserPromptSubmit": 1,
+		"PreToolUse":       2,
+		"StopFailure":      1,
+	}
+	for event, want := range expected {
 		blocks := settings["hooks"].(map[string]any)[event].([]any)
 		matches := 0
 		for _, blk := range blocks {
@@ -675,8 +862,8 @@ func TestInstallStatusHooksIsIdempotent(t *testing.T) {
 				}
 			}
 		}
-		if matches != 1 {
-			t.Errorf("event %s: want exactly 1 status hook after 3 installs, got %d", event, matches)
+		if matches != want {
+			t.Errorf("event %s: want exactly %d status hook(s) after 3 installs, got %d", event, want, matches)
 		}
 	}
 }
@@ -691,6 +878,9 @@ func TestInstallStatusHooksPreservesUnrelatedKeys(t *testing.T) {
   "hooks": {
     "PreToolUse": [
       {"matcher": "Bash", "hooks": [{"type": "command", "command": "echo before"}]}
+    ],
+    "StopFailure": [
+      {"matcher": "rate_limit", "hooks": [{"type": "command", "command": "echo ratelimit"}]}
     ]
   }
 }`
@@ -706,12 +896,17 @@ func TestInstallStatusHooksPreservesUnrelatedKeys(t *testing.T) {
 	if settings["permissions"] == nil {
 		t.Errorf("permissions key dropped:\n%s", mustReadFile(t, path))
 	}
-	hooks := settings["hooks"].(map[string]any)
-	if hooks["PreToolUse"] == nil {
-		t.Errorf("PreToolUse hook dropped:\n%s", mustReadFile(t, path))
-	}
+	// User's pre-existing matcher blocks must survive verbatim.
+	assertHookContainsMatcher(t, settings, "PreToolUse", "Bash", "echo before")
+	assertHookContainsMatcher(t, settings, "StopFailure", "rate_limit", "echo ratelimit")
+	// And our matcher-aware blocks must be added alongside them.
 	assertHookContains(t, settings, "Stop", "ticket agent set-status waiting")
 	assertHookContains(t, settings, "UserPromptSubmit", "ticket agent set-status running")
+	assertHookContains(t, settings, "StopFailure", "ticket agent set-status waiting --source stop-failure")
+	assertHookContainsMatcher(t, settings, "PreToolUse", "AskUserQuestion",
+		"ticket agent set-status waiting --source ask-user-question")
+	assertHookContainsMatcher(t, settings, "PreToolUse", "ExitPlanMode",
+		"ticket agent set-status waiting --source exit-plan-mode")
 }
 
 func TestInstallStatusHooksFailsLoudlyOnMalformedConfig(t *testing.T) {
@@ -784,4 +979,45 @@ func assertHookContains(t *testing.T, settings map[string]any, event, command st
 		}
 	}
 	t.Errorf("event %s missing command %q. settings:\n%#v", event, command, settings)
+}
+
+// assertHookContainsMatcher verifies that settings.hooks[event] contains a
+// block whose "matcher" field equals matcher and whose inner hooks include
+// command. Used for PreToolUse / StopFailure entries that scope to a
+// specific tool name or error type.
+func assertHookContainsMatcher(t *testing.T, settings map[string]any, event, matcher, command string) {
+	t.Helper()
+	hooks, ok := settings["hooks"].(map[string]any)
+	if !ok {
+		t.Fatalf("hooks key missing or not an object: %#v", settings["hooks"])
+	}
+	blocks, ok := hooks[event].([]any)
+	if !ok {
+		t.Fatalf("event %s missing or not an array: %#v", event, hooks[event])
+	}
+	for _, blk := range blocks {
+		entry, ok := blk.(map[string]any)
+		if !ok {
+			continue
+		}
+		got, _ := entry["matcher"].(string)
+		if got != matcher {
+			continue
+		}
+		inner, ok := entry["hooks"].([]any)
+		if !ok {
+			continue
+		}
+		for _, h := range inner {
+			m, ok := h.(map[string]any)
+			if !ok {
+				continue
+			}
+			if m["type"] == "command" && m["command"] == command {
+				return
+			}
+		}
+	}
+	t.Errorf("event %s matcher %q missing command %q. settings:\n%#v",
+		event, matcher, command, settings)
 }
