@@ -521,6 +521,225 @@ func TestRunRegistersAgentAsWaiting(t *testing.T) {
 	}
 }
 
+// TestRunWithOptionsCustomPromptAgent asserts that a fresh agent launch with
+// a non-empty RunOptions.InitialPrompt passes it as the trailing positional
+// argument, replacing the built-in InitialAgentPrompt.
+func TestRunWithOptionsCustomPromptAgent(t *testing.T) {
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBeadFull(t, beadsDir, "agent-custom-prompt", "x", "")
+	mustEnv(t, beadsDir, ticket)
+
+	workDir := t.TempDir()
+	argvFile := filepath.Join(workDir, "argv")
+	script := fmt.Sprintf(`printf "%%s\n" "$@" > %q`, argvFile)
+
+	prevCmd, prevArgs := agent.AgentCommand, agent.AgentDefaultArgs
+	t.Cleanup(func() { agent.AgentCommand, agent.AgentDefaultArgs = prevCmd, prevArgs })
+	agent.AgentCommand = "/bin/sh"
+	agent.AgentDefaultArgs = []string{"-c", script, "fake-claude"}
+
+	customPrompt := "Refactor the foo helper"
+	done := make(chan error, 1)
+	go func() {
+		done <- agent.RunWithOptions("", beadsDir, ticket, agent.ModeAgent,
+			agent.RunOptions{InitialPrompt: customPrompt})
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("agent.RunWithOptions: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("agent.RunWithOptions hung")
+	}
+
+	body, err := os.ReadFile(argvFile)
+	if err != nil {
+		t.Fatalf("read argv: %v", err)
+	}
+	args := strings.Split(strings.TrimRight(string(body), "\n"), "\n")
+	if len(args) == 0 || args[len(args)-1] != customPrompt {
+		t.Errorf("trailing argv = %q, want %q\nfull argv:\n%s",
+			args[len(args)-1], customPrompt, strings.Join(args, "\n"))
+	}
+	if strings.Contains(string(body), agent.InitialAgentPrompt) {
+		t.Errorf("custom prompt must replace InitialAgentPrompt; argv:\n%s", string(body))
+	}
+}
+
+// TestRunWithOptionsCustomPromptSpec asserts spec mode passes
+// RunOptions.InitialPrompt as the trailing positional even though spec mode
+// has no default prompt of its own.
+func TestRunWithOptionsCustomPromptSpec(t *testing.T) {
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBeadFull(t, beadsDir, "spec-custom-prompt", "x", "")
+	mustEnv(t, beadsDir, ticket)
+
+	workDir := t.TempDir()
+	argvFile := filepath.Join(workDir, "argv")
+	script := fmt.Sprintf(`printf "%%s\n" "$@" > %q`, argvFile)
+
+	prevCmd, prevArgs := agent.AgentCommand, agent.AgentDefaultArgs
+	t.Cleanup(func() { agent.AgentCommand, agent.AgentDefaultArgs = prevCmd, prevArgs })
+	agent.AgentCommand = "/bin/sh"
+	agent.AgentDefaultArgs = []string{"-c", script, "fake-claude"}
+
+	customPrompt := "Draft the spec for X"
+	done := make(chan error, 1)
+	go func() {
+		done <- agent.RunWithOptions("", beadsDir, ticket, agent.ModeSpec,
+			agent.RunOptions{InitialPrompt: customPrompt})
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("agent.RunWithOptions (spec): %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("agent.RunWithOptions (spec) hung")
+	}
+
+	body, err := os.ReadFile(argvFile)
+	if err != nil {
+		t.Fatalf("read argv: %v", err)
+	}
+	args := strings.Split(strings.TrimRight(string(body), "\n"), "\n")
+	if len(args) == 0 || args[len(args)-1] != customPrompt {
+		t.Errorf("trailing argv = %q, want %q\nfull argv:\n%s",
+			args[len(args)-1], customPrompt, strings.Join(args, "\n"))
+	}
+}
+
+// TestRunWithOptionsEmptyPromptFallsBack asserts that an empty
+// InitialPrompt is treated as absent: agent mode still gets
+// InitialAgentPrompt; spec mode still gets no trailing prompt.
+func TestRunWithOptionsEmptyPromptFallsBack(t *testing.T) {
+	beadsDir := testutil.TestDB(t)
+	ticketAgent := testutil.CreateBeadFull(t, beadsDir, "agent-empty-prompt", "x", "")
+	mustEnv(t, beadsDir, ticketAgent)
+	ticketSpec := testutil.CreateBeadFull(t, beadsDir, "spec-empty-prompt", "x", "")
+	mustEnv(t, beadsDir, ticketSpec)
+
+	workDir := t.TempDir()
+	argvAgent := filepath.Join(workDir, "argv-agent")
+	argvSpec := filepath.Join(workDir, "argv-spec")
+	// The fake claude writes to a different file depending on a marker arg
+	// the caller threads in; we use the ticket id, which the wrapper passes
+	// nowhere — so instead we just route by mode-specific argv file via two
+	// separate runs that swap AgentDefaultArgs between them.
+	prevCmd, prevArgs := agent.AgentCommand, agent.AgentDefaultArgs
+	t.Cleanup(func() { agent.AgentCommand, agent.AgentDefaultArgs = prevCmd, prevArgs })
+	agent.AgentCommand = "/bin/sh"
+
+	// Agent run.
+	agent.AgentDefaultArgs = []string{"-c",
+		fmt.Sprintf(`printf "%%s\n" "$@" > %q`, argvAgent), "fake-claude"}
+	done := make(chan error, 1)
+	go func() {
+		done <- agent.RunWithOptions("", beadsDir, ticketAgent, agent.ModeAgent,
+			agent.RunOptions{InitialPrompt: ""})
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("agent.RunWithOptions (agent): %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("agent.RunWithOptions (agent) hung")
+	}
+	body, _ := os.ReadFile(argvAgent)
+	args := strings.Split(strings.TrimRight(string(body), "\n"), "\n")
+	if len(args) == 0 || args[len(args)-1] != agent.InitialAgentPrompt {
+		t.Errorf("agent mode trailing argv = %q, want %q (empty --prompt should fall back)",
+			args[len(args)-1], agent.InitialAgentPrompt)
+	}
+
+	// Spec run.
+	agent.AgentDefaultArgs = []string{"-c",
+		fmt.Sprintf(`printf "%%s\n" "$@" > %q`, argvSpec), "fake-claude"}
+	done = make(chan error, 1)
+	go func() {
+		done <- agent.RunWithOptions("", beadsDir, ticketSpec, agent.ModeSpec,
+			agent.RunOptions{InitialPrompt: ""})
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("agent.RunWithOptions (spec): %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("agent.RunWithOptions (spec) hung")
+	}
+	body, _ = os.ReadFile(argvSpec)
+	if strings.Contains(string(body), agent.InitialAgentPrompt) {
+		t.Errorf("spec mode must not inject InitialAgentPrompt on empty --prompt; argv:\n%s", string(body))
+	}
+}
+
+// TestRunLoopRelaunchDoesNotInheritInitialPrompt asserts that the iter-2+
+// wrapper-loop relaunch path does NOT re-inject the original launch's
+// InitialPrompt — the signal file's extraArgs are the sole source of the
+// post-relaunch prompt (today's default: "Relaunch successful").
+func TestRunLoopRelaunchDoesNotInheritInitialPrompt(t *testing.T) {
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBeadFull(t, beadsDir, "agent-relaunch-prompt-inherit", "x", "")
+	envPath := mustEnv(t, beadsDir, ticket)
+
+	workDir := t.TempDir()
+	argvFile := filepath.Join(workDir, "argv")
+	// Fake claude: append all args (newline-delimited) into argvFile, with a
+	// "---" separator between invocations. On the first invocation, drop a
+	// signal file so the wrapper relaunches once.
+	script := fmt.Sprintf(`
+printf "%%s\n" "$@" >> %q
+echo "---" >> %q
+if [ ! -f %q.firstrun ]; then
+  : > %q.firstrun
+  : > %q
+fi
+`, argvFile, argvFile,
+		argvFile, argvFile, filepath.Join(envPath, agent.SignalFile))
+
+	prevCmd, prevArgs := agent.AgentCommand, agent.AgentDefaultArgs
+	t.Cleanup(func() { agent.AgentCommand, agent.AgentDefaultArgs = prevCmd, prevArgs })
+	agent.AgentCommand = "/bin/sh"
+	agent.AgentDefaultArgs = []string{"-c", script, "fake-claude"}
+
+	customPrompt := "Iter-1 custom prompt"
+	done := make(chan error, 1)
+	go func() {
+		done <- agent.RunWithOptions("", beadsDir, ticket, agent.ModeAgent,
+			agent.RunOptions{InitialPrompt: customPrompt})
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("agent.RunWithOptions: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("agent.RunWithOptions hung")
+	}
+
+	body, err := os.ReadFile(argvFile)
+	if err != nil {
+		t.Fatalf("read argv: %v", err)
+	}
+	chunks := strings.Split(strings.TrimRight(string(body), "\n"), "---")
+	if len(chunks) < 2 {
+		t.Fatalf("expected at least 2 fake-claude invocations, got %d; body=%q",
+			len(chunks), string(body))
+	}
+	iter1 := strings.TrimSpace(chunks[0])
+	iter2 := strings.TrimSpace(chunks[1])
+	if !strings.Contains(iter1, customPrompt) {
+		t.Errorf("iter 1 missing custom prompt %q; got:\n%s", customPrompt, iter1)
+	}
+	if strings.Contains(iter2, customPrompt) {
+		t.Errorf("iter 2 must not inherit iter-1 custom prompt %q; got:\n%s",
+			customPrompt, iter2)
+	}
+}
+
 func writePID(t *testing.T, envPath string, pid int) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(envPath, agent.PIDFile), []byte(strconv.Itoa(pid)+"\n"), 0o644); err != nil {

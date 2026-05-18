@@ -62,18 +62,26 @@ subcommands:
   env [<id>]                              create on-disk env folder for a ticket
   env syncback [<id>]                     push <env>/description.md back to the
                                           bead description (one-way file → bead)
-  agent [<id>] [--resume <session-id> | --dry-run]
+  agent [<id>] [--prompt "<text>"] [--resume <session-id> | --dry-run]
                                           launch claude from a ticket's env folder
-                                          in coding mode. With --resume, claude
-                                          reattaches to the named transcript
-                                          instead of starting a fresh session;
-                                          the existing agent record is updated
-                                          in place. With --dry-run, print the
-                                          rendered system prompt that would be
-                                          appended on a fresh launch and do
-                                          nothing else (no env folder, no
-                                          claim, no claude). Mutually exclusive
-                                          with --resume.
+                                          in coding mode. With --prompt, the
+                                          supplied text replaces the built-in
+                                          "Implement the ticket" kickoff message
+                                          claude auto-submits as turn 1 (empty
+                                          string behaves like an omitted flag).
+                                          With --resume, claude reattaches to
+                                          the named transcript instead of
+                                          starting a fresh session; the existing
+                                          agent record is updated in place.
+                                          With --dry-run, print the rendered
+                                          system prompt that would be appended
+                                          on a fresh launch and do nothing else
+                                          (no env folder, no claim, no claude).
+                                          --prompt is rejected with both
+                                          --resume and --dry-run (transcripts
+                                          already exist / there's no agent to
+                                          submit to). --resume and --dry-run
+                                          are also mutually exclusive.
   agent list [<id>] [--json]              list agents that have been launched on a
                                           ticket (newest first). See WAITING
                                           REASON below for what the column /
@@ -122,12 +130,19 @@ subcommands:
                                           point for <BEADS_DIR>/agent-prompt.md)
   agent --list-prompt-fragments           list named fragments operator templates
                                           can interpolate via {{name}}
-  spec [<id>] [--dry-run]                 launch claude from a ticket's env folder
+  spec [<id>] [--prompt "<text>"] [--dry-run]
+                                          launch claude from a ticket's env folder
                                           in spec mode (edits description.md and
                                           spawns related beads; does not code).
-                                          With --dry-run, print the rendered
-                                          system prompt that would be appended
-                                          on a fresh launch and do nothing else.
+                                          With --prompt, the supplied text is
+                                          auto-submitted by claude as turn 1
+                                          (spec mode otherwise opens to a blank
+                                          input; empty string behaves like an
+                                          omitted flag). With --dry-run, print
+                                          the rendered system prompt that would
+                                          be appended on a fresh launch and do
+                                          nothing else. --prompt is rejected
+                                          with --dry-run.
   spec --print-default-prompt             print the built-in default spec-mode
                                           prompt template (copy as a starting
                                           point for <BEADS_DIR>/spec-prompt.md)
@@ -551,8 +566,12 @@ func runAgent(db, beadsDir, ticket string, args []string, mode agent.Mode, stdou
 	// ModeAgent (spec sessions don't share a transcript with a coding agent).
 	// --dry-run short-circuits to printing the rendered system prompt and is
 	// mutually exclusive with --resume.
+	// --prompt "<text>" supplies the trailing positional that claude
+	// auto-submits as turn 1; rejected on --resume / --dry-run (transcripts
+	// already exist / there's no agent to submit to).
 	var resume string
 	var dryRun bool
+	var initialPrompt string
 	positional := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -567,16 +586,30 @@ func runAgent(db, beadsDir, ticket string, args []string, mode agent.Mode, stdou
 			i++
 		case strings.HasPrefix(a, "--resume="):
 			resume = strings.TrimPrefix(a, "--resume=")
+		case a == "--prompt":
+			if i+1 >= len(args) {
+				return errors.New("--prompt requires a value")
+			}
+			initialPrompt = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--prompt="):
+			initialPrompt = strings.TrimPrefix(a, "--prompt=")
 		default:
 			positional = append(positional, a)
 		}
 	}
-	usage := "usage: ticket agent [<id>] [--resume <session-id> | --dry-run]"
+	usage := "usage: ticket agent [<id>] [--prompt \"<text>\"] [--resume <session-id> | --dry-run]"
 	if mode == agent.ModeSpec {
-		usage = "usage: ticket spec [<id>] [--resume <session-id> | --dry-run]"
+		usage = "usage: ticket spec [<id>] [--prompt \"<text>\"] [--resume <session-id> | --dry-run]"
 	}
 	if dryRun && resume != "" {
 		return errors.New("--dry-run and --resume are mutually exclusive")
+	}
+	if initialPrompt != "" && resume != "" {
+		return errors.New("--prompt and --resume are mutually exclusive")
+	}
+	if initialPrompt != "" && dryRun {
+		return errors.New("--prompt and --dry-run are mutually exclusive")
 	}
 	id, _, err := resolveID(ticket, positional, 0, usage)
 	if err != nil {
@@ -590,7 +623,10 @@ func runAgent(db, beadsDir, ticket string, args []string, mode agent.Mode, stdou
 		_, err = io.WriteString(stdout, prompt)
 		return err
 	}
-	return agent.RunWithResume(db, beadsDir, id, resume, mode)
+	return agent.RunWithOptions(db, beadsDir, id, mode, agent.RunOptions{
+		ResumeSessionID: resume,
+		InitialPrompt:   initialPrompt,
+	})
 }
 
 // runAgentStatus handles `ticket agent status [<id>] <session-id> [--json]`.

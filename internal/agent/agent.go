@@ -52,37 +52,59 @@ const DescriptionFile = "description.md"
 // they already have a transcript.
 const InitialAgentPrompt = `Implement the ticket`
 
-// Run is the fresh-launch variant of [RunWithResume]: it generates a new
-// session id, claims the bead, and lets claude allocate the session via
-// `--session-id`. See [RunWithResume] for the resume-on-existing-transcript
-// path used by [Attach].
-func Run(db, beadsDir, ticketID string, mode Mode) error {
-	return RunWithResume(db, beadsDir, ticketID, "", mode)
+// RunOptions carries optional knobs for [RunWithOptions]. The zero value
+// matches the historical fresh-launch shape ([Run]).
+type RunOptions struct {
+	// ResumeSessionID, when non-empty, switches Run from "allocate a new
+	// transcript" to "reattach to the named one"; see [RunWithOptions]
+	// for the full contract.
+	ResumeSessionID string
+	// InitialPrompt overrides the iter-1 trailing positional. When empty,
+	// [ModeAgent] fresh launches fall back to [InitialAgentPrompt] and
+	// [ModeSpec] / resumes pass nothing. Operator-supplied via
+	// `--prompt "..."` on `ticket agent` / `ticket spec`.
+	InitialPrompt string
 }
 
-// RunWithResume resolves the env folder for ticketID — creating it via
+// Run is the fresh-launch variant of [RunWithOptions]: it generates a new
+// session id, claims the bead, and lets claude allocate the session via
+// `--session-id`. See [RunWithOptions] for the resume-on-existing-transcript
+// path used by [Attach].
+func Run(db, beadsDir, ticketID string, mode Mode) error {
+	return RunWithOptions(db, beadsDir, ticketID, mode, RunOptions{})
+}
+
+// RunWithResume is a thin wrapper around [RunWithOptions] that supplies
+// only a resume session id. Kept for callers that don't need the broader
+// options surface.
+func RunWithResume(db, beadsDir, ticketID, resumeSessionID string, mode Mode) error {
+	return RunWithOptions(db, beadsDir, ticketID, mode, RunOptions{ResumeSessionID: resumeSessionID})
+}
+
+// RunWithOptions resolves the env folder for ticketID — creating it via
 // [env.Create] if it doesn't exist yet — regenerates the auto-managed context
 // files (description.md, .claude/settings.json), and then execs AgentCommand
 // from inside the env folder in a loop: after each exit, if a [SignalFile] is
 // present, the loop regenerates context and re-execs AgentCommand with
 // `--continue` plus the signal's args appended.
 //
-// When resumeSessionID is empty (the common path used by `ticket agent`), a
-// fresh session id is generated, the bead is claimed (unless mode is
+// When opts.ResumeSessionID is empty (the common path used by `ticket agent`),
+// a fresh session id is generated, the bead is claimed (unless mode is
 // [ModeSpec] — `ticket spec` doesn't own the status transition), and the
 // first claude invocation passes `--session-id <newID>` so the id is stable
 // from the start.
 //
-// When resumeSessionID is non-empty (the path the user takes after a wrapper
-// has been killed), the bead is NOT re-claimed (it's already in_progress from
-// the prior wrapper), the existing agent record for that session id is
-// updated in place, and the first claude invocation passes `--resume
-// <sessionID>` so it reattaches to the same transcript instead of starting
-// a new one.
+// When opts.ResumeSessionID is non-empty (the path the user takes after a
+// wrapper has been killed), the bead is NOT re-claimed (it's already
+// in_progress from the prior wrapper), the existing agent record for that
+// session id is updated in place, and the first claude invocation passes
+// `--resume <sessionID>` so it reattaches to the same transcript instead of
+// starting a new one.
 //
 // While AgentCommand is running, its pid is recorded at <env>/[PIDFile] so
 // [Relaunch] can target it.
-func RunWithResume(db, beadsDir, ticketID, resumeSessionID string, mode Mode) error {
+func RunWithOptions(db, beadsDir, ticketID string, mode Mode, opts RunOptions) error {
+	resumeSessionID := opts.ResumeSessionID
 	if ticketID == "" {
 		return errors.New("ticket id required")
 	}
@@ -173,11 +195,19 @@ func RunWithResume(db, beadsDir, ticketID, resumeSessionID string, mode Mode) er
 			}
 		}
 		argv = append(argv, extraArgs...)
-		// Fresh-launch agent mode gets a kickoff prompt as the trailing
-		// positional, so claude dispatches it on turn 1 instead of opening
-		// to a blank input. Spec mode and resumes/relaunches skip this.
-		if len(extraArgs) == 0 && resumeSessionID == "" && mode == ModeAgent {
-			argv = append(argv, InitialAgentPrompt)
+		// Fresh-launch mode gets a kickoff prompt as the trailing positional,
+		// so claude dispatches it on turn 1 instead of opening to a blank
+		// input. Resumes/relaunches skip this (their transcript already has
+		// a turn 1). Agent mode falls back to InitialAgentPrompt when the
+		// operator didn't supply --prompt; spec mode only injects when an
+		// explicit --prompt was supplied.
+		if len(extraArgs) == 0 && resumeSessionID == "" {
+			switch {
+			case opts.InitialPrompt != "":
+				argv = append(argv, opts.InitialPrompt)
+			case mode == ModeAgent:
+				argv = append(argv, InitialAgentPrompt)
+			}
 		}
 		cmd := exec.Command(AgentCommand, argv...)
 		cmd.Dir = envPath
