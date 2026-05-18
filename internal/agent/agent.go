@@ -258,6 +258,9 @@ func Regenerate(db, beadsDir, envPath, ticketID string, mode Mode) (string, erro
 	if err := writeSettings(envPath, dirs); err != nil {
 		return "", err
 	}
+	if err := writeSkills(envPath, mode); err != nil {
+		return "", err
+	}
 	return BuildSystemPrompt(beadsDir, issue.ID, issue.Title, mode, dirs, ancestorDirs)
 }
 
