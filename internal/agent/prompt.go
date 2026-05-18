@@ -1,6 +1,7 @@
 package agent
 
 import (
+	_ "embed"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -74,37 +75,15 @@ func DefaultPromptTemplate(mode Mode) string {
 
 // defaultAgentTemplate is the implicit operator file used in coding mode when
 // no <beadsDir>/agent-prompt.md is present.
-const defaultAgentTemplate = `# Ticket {{ticket_id}}: {{title}}
-
-Execute the task described in description.md. Read it first.
-
-## Delegating work for later
-{{cmd_create_followup}}
-
-## Adding a directory to this session
-{{cmd_dir_add}}
-
-(Side note: if you intentionally edit description.md, run {{cmd_env_syncback}} to persist it back to the bead.)
-{{repos_current}}{{repos_parents}}`
+//
+//go:embed defaults/agent-prompt.md
+var defaultAgentTemplate string
 
 // defaultSpecTemplate is the implicit operator file used in spec mode when no
 // <beadsDir>/spec-prompt.md is present.
-const defaultSpecTemplate = `# Ticket {{ticket_id}}: {{title}}
-
-You are spec'ing this ticket, not coding. Do not edit source files.
-Read description.md first.
-
-## Update the description of this ticket
-* Modify the description.md file
-* Run {{cmd_env_syncback}}
-
-## Delegating work
-### Within this ticket: create a child
-{{cmd_create_child}}
-
-### For later
-{{cmd_create_followup}}
-{{repos_current}}{{repos_parents}}`
+//
+//go:embed defaults/spec-prompt.md
+var defaultSpecTemplate string
 
 // RenderPrompt expands a template against ctx, resolving `{{fragment_name}}`
 // tokens via the registered fragments. Returns an error for unknown fragment
