@@ -30,6 +30,7 @@ import (
 
 	"framework2/internal/bdcli"
 	"framework2/internal/dir"
+	"framework2/internal/pipeline"
 )
 
 // Run executes the finish flow for ticketID. beadsDir must be set so the env
@@ -62,7 +63,12 @@ func Run(db, beadsDir, ticketID string, continueMode bool, stdout io.Writer) err
 	if err != nil {
 		return err
 	}
-	if err := rebaseWorktrees(db, beadsDir, ticketID, parent, worktrees, continueMode); err != nil {
+	parentTargets, err := rebaseWorktrees(db, beadsDir, ticketID, parent, worktrees, continueMode)
+	if err != nil {
+		return err
+	}
+
+	if err := runPipelines(db, beadsDir, ticketID, parentTargets, stdout); err != nil {
 		return err
 	}
 
@@ -152,14 +158,19 @@ func inProgressRebase(wt string) bool {
 // worktree in the same bare repo is left alone. In continueMode, in-rebase
 // worktrees resume via `git rebase --continue`; non-in-rebase worktrees
 // take the normal path.
-func rebaseWorktrees(db, beadsDir, ticketID, parent string, worktrees []dir.Entry, continueMode bool) error {
+//
+// Returns the parent worktree entries that received an ff-advance (one per
+// child worktree that had a matching parent in the same bare). Callers use
+// the returned list to run per-repo post-merge pipelines.
+func rebaseWorktrees(db, beadsDir, ticketID, parent string, worktrees []dir.Entry, continueMode bool) ([]dir.Entry, error) {
 	if parent == "" {
-		return nil
+		return nil, nil
 	}
 	parentEntries, err := dir.Load(db, beadsDir, parent)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	var advanced []dir.Entry
 	for _, e := range worktrees {
 		pe, ok := findEntryForBare(parentEntries, e.BareRepo)
 		if !ok {
@@ -168,13 +179,14 @@ func rebaseWorktrees(db, beadsDir, ticketID, parent string, worktrees []dir.Entr
 			continue
 		}
 		if err := ffRebase(e.Path, pe.Branch, continueMode); err != nil {
-			return err
+			return nil, err
 		}
 		if err := ffAdvance(pe.Path, pe.Branch, e.Branch); err != nil {
-			return err
+			return nil, err
 		}
+		advanced = append(advanced, pe)
 	}
-	return nil
+	return advanced, nil
 }
 
 // ffAdvance fast-forwards the parent worktree's checked-out branch
@@ -279,6 +291,94 @@ func bdClose(db, beadsDir, ticketID string) error {
 		return fmt.Errorf("bd close %s: %w: %s", ticketID, err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// runPipelines reads pipeline.md from each unique bare repo touched by the
+// just-rebased parent worktrees, picks the entry matching that parent's
+// branch (the branch we just finished into), and executes its command in the
+// parent worktree. Each failed run produces a `bug` bead linked back to
+// ticketID via `blocked-by`. Pipeline failures do NOT abort the finish — by
+// design the next session picks the bug bead up.
+//
+// Errors here are limited to "could not parse pipeline.md" or "could not
+// spawn bd to create the bug bead" — i.e. infrastructural problems that
+// shouldn't be silently swallowed. A non-zero pipeline exit goes through the
+// bug-bead path instead.
+func runPipelines(db, beadsDir, ticketID string, parentTargets []dir.Entry, stdout io.Writer) error {
+	seen := map[string]bool{}
+	for _, pe := range parentTargets {
+		if seen[pe.BareRepo] {
+			// One pipeline.md per bare repo; the parent's branch in each
+			// bare is identical across child entries (a bare can only check
+			// out one branch in a given worktree), so we skip duplicates.
+			continue
+		}
+		seen[pe.BareRepo] = true
+
+		entries, err := pipeline.Load(pe.BareRepo)
+		if err != nil {
+			return err
+		}
+		entry, ok := pipeline.Match(entries, pe.Branch)
+		if !ok {
+			continue
+		}
+		fmt.Fprintf(stdout, "pipeline %s @ %s: running\n", pe.Branch, pe.Path)
+		res := pipeline.Run(entry, pe.Path)
+		if !res.Failed() {
+			fmt.Fprintf(stdout, "pipeline %s @ %s: ok\n", pe.Branch, pe.Path)
+			continue
+		}
+		fmt.Fprintf(stdout, "pipeline %s @ %s: FAILED (exit=%d)\n", pe.Branch, pe.Path, res.ExitCode)
+		bugID, err := createBugBead(db, beadsDir, ticketID, pe, res)
+		if err != nil {
+			return fmt.Errorf("record pipeline failure for %s: %w", ticketID, err)
+		}
+		fmt.Fprintf(stdout, "pipeline failure recorded as %s\n", bugID)
+	}
+	return nil
+}
+
+// createBugBead spawns a `bd create -t bug` whose description carries the
+// failed command, exit code, captured output, worktree path, and the bead it
+// came from, then links the new bug `blocked-by` ticketID. Returns the new
+// bug bead id.
+func createBugBead(db, beadsDir, ticketID string, pe dir.Entry, res pipeline.Result) (string, error) {
+	title := fmt.Sprintf("pipeline %s failed for %s", res.Branch, ticketID)
+	desc := buildBugDescription(ticketID, pe, res)
+	out, err := bdcli.Cmd(beadsDir, db, "create", title, "--silent", "-t", "bug", "--description", desc).Output()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
+			return "", fmt.Errorf("bd create bug: %v: %s", err, ee.Stderr)
+		}
+		return "", fmt.Errorf("bd create bug: %w", err)
+	}
+	bugID := strings.TrimSpace(string(out))
+	if bugID == "" {
+		return "", errors.New("bd create returned empty id")
+	}
+	// `bd dep add <bug> <ticket>` records: bug is blocked-by ticketID. We
+	// don't have a `caused-by` edge in bd; blocked-by is the closest we get
+	// and keeps the link queryable from either side.
+	if dout, err := bdcli.Cmd(beadsDir, db, "dep", "add", bugID, ticketID).CombinedOutput(); err != nil {
+		return bugID, fmt.Errorf("bd dep add %s %s: %w: %s", bugID, ticketID, err, strings.TrimSpace(string(dout)))
+	}
+	return bugID, nil
+}
+
+func buildBugDescription(ticketID string, pe dir.Entry, res pipeline.Result) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Pipeline command failed during `this finish` of %s.\n\n", ticketID)
+	fmt.Fprintf(&b, "- bare repo: %s\n", pe.BareRepo)
+	fmt.Fprintf(&b, "- worktree: %s\n", res.Worktree)
+	fmt.Fprintf(&b, "- branch: %s\n", res.Branch)
+	fmt.Fprintf(&b, "- exit code: %d\n", res.ExitCode)
+	if res.Err != nil {
+		fmt.Fprintf(&b, "- runner error: %s\n", res.Err)
+	}
+	fmt.Fprintf(&b, "\n## Command\n\n```\n%s\n```\n", res.Command)
+	fmt.Fprintf(&b, "\n## Output\n\n```\n%s\n```\n", strings.TrimRight(res.Output, "\n"))
+	return b.String()
 }
 
 func gitWorktreeRemove(bare, wt string) error {
