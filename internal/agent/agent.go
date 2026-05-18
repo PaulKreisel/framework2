@@ -47,11 +47,10 @@ const (
 const DescriptionFile = "description.md"
 
 // InitialAgentPrompt is the auto-submitted first user prompt for [ModeAgent]
-// fresh launches. The leading `/goal` is a slash command claude dispatches on
-// the first turn. [ModeSpec] does not auto-submit a prompt — it opens to a
+// fresh launches. [ModeSpec] does not auto-submit a prompt — it opens to a
 // blank input and waits for the operator. Resumes/relaunches also skip this:
 // they already have a transcript.
-const InitialAgentPrompt = `/goal implement what is described in "./description.md". Only stop if there are unclarities. Create a commit when done and state what was done. As soon as we need to deviate from the description.md, stop to check with the user.`
+const InitialAgentPrompt = `Implement the ticket`
 
 // Run is the fresh-launch variant of [RunWithResume]: it generates a new
 // session id, claims the bead, and lets claude allocate the session via
