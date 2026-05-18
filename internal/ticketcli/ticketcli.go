@@ -42,7 +42,12 @@ subcommands:
   dir list [<id>]                    list paths linked to a ticket
   dir worktree [<id>] <bare-repo>    create a worktree off <bare-repo> for the
                                      ticket and link it (cascades through
-                                     parents so ancestors gain the worktree too)
+                                     parents so ancestors gain the worktree too).
+                                     Branch name and worktree path follow the
+                                     templates in <beadsDir>/project.yaml when
+                                     present; otherwise the defaults match the
+                                     pre-config behavior. See
+                                     internal/projectconfig for the schema.
   dir status [<id>] [<selector>] [--json]
                                      show working-tree status of one linked dir
                                      and (when the parent links the same bare

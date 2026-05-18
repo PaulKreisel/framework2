@@ -4,10 +4,18 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
+	"framework2/internal/projectconfig"
 	"framework2/internal/slug"
 )
+
+func absBare(bareRepo string) (string, error) {
+	bare, err := filepath.Abs(bareRepo)
+	if err != nil {
+		return "", fmt.Errorf("resolve bare repo path: %w", err)
+	}
+	return bare, nil
+}
 
 // Worktree creates a git worktree in bareRepo for ticketID and registers it
 // via Link. The new branch is named "<prefix>/<id>-<slug>" where prefix is
@@ -25,19 +33,23 @@ import (
 // Idempotent: if the ticket already has this bare repo linked, Worktree
 // returns without error.
 func Worktree(db, beadsDir, ticketID, bareRepo string) error {
-	bare, err := filepath.Abs(bareRepo)
+	bare, err := absBare(bareRepo)
 	if err != nil {
-		return fmt.Errorf("resolve bare repo path: %w", err)
+		return err
 	}
 	if !gitIsRepo(bare) {
 		return fmt.Errorf("not a git repository: %s", bare)
 	}
-	_, err = ensureWorktree(db, beadsDir, ticketID, bare)
+	cfg, err := projectconfig.Load(beadsDir)
+	if err != nil {
+		return err
+	}
+	_, err = ensureWorktree(db, beadsDir, ticketID, bare, cfg)
 	return err
 }
 
 // ensureWorktree returns the branch name to use as the base for descendants.
-func ensureWorktree(db, beadsDir, ticketID, bare string) (string, error) {
+func ensureWorktree(db, beadsDir, ticketID, bare string, cfg projectconfig.Config) (string, error) {
 	entries, err := load(db, beadsDir, ticketID)
 	if err != nil {
 		return "", err
@@ -58,7 +70,7 @@ func ensureWorktree(db, beadsDir, ticketID, bare string) (string, error) {
 			return "", err
 		}
 	} else {
-		base, err = ensureWorktree(db, beadsDir, parent, bare)
+		base, err = ensureWorktree(db, beadsDir, parent, bare, cfg)
 		if err != nil {
 			return "", err
 		}
@@ -68,9 +80,21 @@ func ensureWorktree(db, beadsDir, ticketID, bare string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	prefix := slug.BranchPrefix(row.IssueType)
-	branch := slug.Branch(prefix, ticketID, info.Slug)
-	wtPath := worktreePath(bare, ticketID, info.Slug)
+	vars := projectconfig.Vars{
+		BeadID:       ticketID,
+		JiraID:       projectconfig.JiraIDFromExternalRef(row.ExternalRef),
+		Slug:         info.Slug,
+		Type:         row.IssueType,
+		BareRepoPath: bare,
+	}
+	branch, err := cfg.RenderBranch(vars)
+	if err != nil {
+		return "", fmt.Errorf("render branch template: %w", err)
+	}
+	wtPath, err := cfg.RenderPath(vars)
+	if err != nil {
+		return "", fmt.Errorf("render worktree path template: %w", err)
+	}
 	if _, err := os.Stat(wtPath); err == nil {
 		return "", fmt.Errorf("worktree path already exists: %s", wtPath)
 	} else if !os.IsNotExist(err) {
@@ -95,18 +119,4 @@ func findEntryForBare(entries []Entry, bare string) (Entry, bool) {
 		}
 	}
 	return Entry{}, false
-}
-
-// worktreePath derives a stable worktree location: a sibling of the bare repo
-// named "<bare-basename-without-.git>-<bead-id>" with the slug appended when
-// present ("…-<id>-<slug>"). Legacy beads without a slug get the historical
-// id-only form.
-func worktreePath(bare, ticketID, slugStr string) string {
-	base := filepath.Base(bare)
-	base = strings.TrimSuffix(base, ".git")
-	name := base + "-" + ticketID
-	if slugStr != "" {
-		name = name + "-" + slugStr
-	}
-	return filepath.Join(filepath.Dir(bare), name)
 }

@@ -270,3 +270,94 @@ func advanceBranch(t *testing.T, wt string) {
 
 // silence unused-import warnings if a test is commented out.
 var _ = dir.Entry{}.Path
+
+// withProjectConfig writes a project.yaml into beadsDir for the duration of
+// the test. The file is removed in cleanup so it does not leak into other
+// tests sharing the same pool entry.
+func withProjectConfig(t *testing.T, beadsDir, yaml string) {
+	t.Helper()
+	p := filepath.Join(beadsDir, "project.yaml")
+	if err := os.WriteFile(p, []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write project.yaml: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(p) })
+}
+
+func TestDirWorktreeUsesProjectConfig(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	withProjectConfig(t, beadsDir, `
+worktree:
+  branch: "custom/{bead-id}"
+  path: "{bare-repo-dir}/{bare-repo-name}/branches/{bead-id}"
+`)
+	ticket := testutil.CreateBead(t, beadsDir, "wt-custom")
+	bare := bareRepo(t, "main")
+
+	_, stderr, code := testutil.RunTicketIn(t, beadsDir, "dir", "worktree", ticket, bare)
+	if code != 0 {
+		t.Fatalf("worktree exit=%d stderr=%q", code, stderr)
+	}
+	entries := listEntries(t, beadsDir, ticket)
+	if len(entries) != 1 {
+		t.Fatalf("entries=%+v want 1", entries)
+	}
+	wantBranch := "custom/" + ticket
+	wantPath := filepath.Join(filepath.Dir(bare),
+		strings.TrimSuffix(filepath.Base(bare), ".git"), "branches", ticket)
+	if entries[0].Branch != wantBranch {
+		t.Errorf("branch=%q want %q", entries[0].Branch, wantBranch)
+	}
+	if entries[0].Path != wantPath {
+		t.Errorf("path=%q want %q", entries[0].Path, wantPath)
+	}
+	if !worktreeOnBranch(t, entries[0].Path, wantBranch) {
+		t.Errorf("worktree at %s is not on branch %s", entries[0].Path, wantBranch)
+	}
+}
+
+func TestDirWorktreeTypePrefixOverride(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	withProjectConfig(t, beadsDir, `
+type-prefix:
+  task: enh
+`)
+	ticket := testutil.CreateBead(t, beadsDir, "wt-typeprefix")
+	bare := bareRepo(t, "main")
+
+	if _, stderr, code := testutil.RunTicketIn(t, beadsDir, "dir", "worktree", ticket, bare); code != 0 {
+		t.Fatalf("worktree exit=%d stderr=%q", code, stderr)
+	}
+	entries := listEntries(t, beadsDir, ticket)
+	if len(entries) != 1 {
+		t.Fatalf("entries=%+v want 1", entries)
+	}
+	// default type is "task", configured to map to "enh".
+	wantBranch := "enh/" + ticket
+	if entries[0].Branch != wantBranch {
+		t.Errorf("branch=%q want %q", entries[0].Branch, wantBranch)
+	}
+}
+
+func TestDirWorktreeBadTemplateFailsLoudly(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	withProjectConfig(t, beadsDir, `
+worktree:
+  branch: "{nope}/{bead-id}"
+`)
+	ticket := testutil.CreateBead(t, beadsDir, "wt-bad-tmpl")
+	bare := bareRepo(t, "main")
+
+	_, stderr, code := testutil.RunTicketIn(t, beadsDir, "dir", "worktree", ticket, bare)
+	if code == 0 {
+		t.Fatal("worktree succeeded with bad template, want error")
+	}
+	if !strings.Contains(stderr, "unknown placeholder") {
+		t.Errorf("stderr=%q want to mention 'unknown placeholder'", stderr)
+	}
+	if entries := listEntries(t, beadsDir, ticket); len(entries) != 0 {
+		t.Errorf("entries=%+v want none", entries)
+	}
+}

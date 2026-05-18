@@ -70,9 +70,10 @@ func parentID(db, beadsDir, ticketID string) (string, error) {
 }
 
 type ticketRow struct {
-	Metadata  map[string]json.RawMessage `json:"metadata"`
-	Parent    string                     `json:"parent"`
-	IssueType string                     `json:"issue_type"`
+	Metadata    map[string]json.RawMessage `json:"metadata"`
+	Parent      string                     `json:"parent"`
+	IssueType   string                     `json:"issue_type"`
+	ExternalRef string                     `json:"external_ref"`
 }
 
 // IssueType returns the bead's type ("bug", "feature", "task", …) or "" if
