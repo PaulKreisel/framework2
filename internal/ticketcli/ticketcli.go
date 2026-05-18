@@ -64,7 +64,9 @@ subcommands:
                                           the existing agent record is updated
                                           in place.
   agent list [<id>] [--json]              list agents that have been launched on a
-                                          ticket (newest first)
+                                          ticket (newest first). See WAITING
+                                          REASON below for what the column /
+                                          --json field carry.
   agent attach [<id>] <session-id>        focus the terminal hosting a running or
                                           waiting agent, or spawn a fresh wrapper
                                           (with --resume) for an exited one. macOS
@@ -72,9 +74,10 @@ subcommands:
                                           with the list of valid ids.
   agent status [<id>] <session-id> [--json]
                                           print one agent record's metadata plus
-                                          the untruncated waiting reason captured
-                                          from the Stop hook. Unknown session id
-                                          errors with the list of valid ids.
+                                          the untruncated waiting reason. Unknown
+                                          session id errors with the list of
+                                          valid ids. See WAITING REASON below
+                                          for how the reason is sourced.
   agent delete [<id>] <session-id>...     remove agent record(s) from the ticket's
                                           agent list. Operates on the record, not
                                           the process — refuses to delete a record
@@ -125,7 +128,9 @@ subcommands:
                                           --recursion-depth 0 to list only the
                                           root's waiting agents. With --all,
                                           running agents are listed too (exited
-                                          records stay hidden).
+                                          records stay hidden). See WAITING
+                                          REASON below for the column /
+                                          --json field semantics.
   finish [<id>]                           wrap up: rebase the ticket's worktrees
                                           onto their parent branch (FF when no
                                           divergence, real rebase otherwise),
@@ -135,7 +140,36 @@ subcommands:
   finish [<id>] --continue                resume a finish whose rebase paused on
                                           conflicts: runs ` + "`git rebase --continue`" + ` in
                                           each paused worktree, then completes
-                                          the rest of the flow.`
+                                          the rest of the flow.
+
+WAITING REASON column / waitingReason field:
+  Surfaced by ` + "`agent list`" + `, ` + "`agent status`" + ` and ` + "`next agent`" + ` for agents
+  in the waiting state. Populated by Claude Code hooks (Stop /
+  PreToolUse / StopFailure) via ` + "`agent set-status`" + `; ` + "`UserPromptSubmit`" + `
+  clears it on the next user turn. The kind of wait is recorded in
+  ` + "`waitingReasonSource`" + ` (omitted in --json when empty, i.e. the legacy
+  Stop form):
+
+    ""                  Stop hook — the assistant's final text message
+                        for the turn. Table cell shows the message,
+                        whitespace-collapsed and truncated.
+    ask-user-question   PreToolUse:AskUserQuestion — assistant invoked
+                        the multiple-choice prompt tool. waitingReason
+                        holds the raw tool_input JSON (questions +
+                        options); table cell renders "asking: <first
+                        question text>".
+    exit-plan-mode      PreToolUse:ExitPlanMode — assistant proposed a
+                        plan in plan mode. waitingReason holds the plan
+                        markdown body; table cell renders "plan: <first
+                        non-empty line>".
+    stop-failure        StopFailure — turn ended due to an API error
+                        (rate_limit, billing_error, server_error, …).
+                        waitingReason holds "<matcher>: <message>" (or
+                        just one of them when the other is absent);
+                        table cell shows the bare matcher first.
+
+  ` + "`agent list`" + ` and ` + "`next agent`" + ` truncate the cell to one line; use
+  ` + "`agent status`" + ` (or --json) for the full payload.`
 
 // Options configures a Run invocation. The zero value uses
 // os.Getenv("BEADS_DIR") for BeadsDir, matching the production behaviour of
