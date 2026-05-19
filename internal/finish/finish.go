@@ -81,6 +81,9 @@ func Run(db, beadsDir, ticketID string, continueMode bool, stdout io.Writer) err
 		}
 	}
 	envPath := filepath.Join(beadsDir, "envs", ticketID)
+	// Look up wrapper pid / tty from the env's PIDFile BEFORE removing the
+	// env folder. The detached helper that closes the terminal needs both.
+	spawnTerminateOnFinish(envPath, stdout)
 	if err := os.RemoveAll(envPath); err != nil {
 		return fmt.Errorf("remove env folder %s: %w", envPath, err)
 	}

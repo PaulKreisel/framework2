@@ -299,6 +299,54 @@ func TestRunLoopClearsStaleSignalFile(t *testing.T) {
 	}
 }
 
+// TestRunLoopStopsWhenEnvFolderRemoved guards the belt-and-suspenders check
+// in the wrapper loop: if `this finish` has removed the env folder before
+// claude exited, the loop must return cleanly even when a (stale) signal
+// file is still on disk. Mirrors the on-success state where finish has
+// rm -rf'd the env but a Relaunch racing in could otherwise plant a new
+// signal.
+func TestRunLoopStopsWhenEnvFolderRemoved(t *testing.T) {
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBeadFull(t, beadsDir, "agent-run-loop-env-gone", "x", "")
+	envPath := mustEnv(t, beadsDir, ticket)
+
+	workDir := t.TempDir()
+	counter := filepath.Join(workDir, "counter")
+	// Fake claude: append one line per invocation, then on first run plant
+	// a signal AND remove the env folder. The second iteration would
+	// relaunch if the wrapper didn't notice the missing env.
+	script := fmt.Sprintf(`
+echo X >> %q
+if [ ! -f %q.firstrun ]; then
+  : > %q.firstrun
+  : > %q
+  rm -rf %q
+fi
+`, counter, counter, counter, filepath.Join(envPath, agent.SignalFile), envPath)
+
+	prevCmd, prevArgs := agent.AgentCommand, agent.AgentDefaultArgs
+	t.Cleanup(func() { agent.AgentCommand, agent.AgentDefaultArgs = prevCmd, prevArgs })
+	agent.AgentCommand = "/bin/sh"
+	agent.AgentDefaultArgs = []string{"-c", script, "fake-claude"}
+
+	done := make(chan error, 1)
+	go func() { done <- agent.Run("", beadsDir, ticket, agent.ModeAgent) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("agent.Run: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("agent.Run hung; loop relaunched into a deleted env")
+	}
+
+	body, _ := os.ReadFile(counter)
+	lines := strings.Split(strings.TrimRight(string(body), "\n"), "\n")
+	if len(lines) != 1 {
+		t.Errorf("loop ran %d times after env removed, want 1; body=%q", len(lines), string(body))
+	}
+}
+
 // TestRunSpecModeDoesNotClaim guards that `ticket spec` doesn't flip the bead
 // to in_progress: only `ticket agent` owns that status transition.
 func TestRunSpecModeDoesNotClaim(t *testing.T) {

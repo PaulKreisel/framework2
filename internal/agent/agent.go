@@ -231,6 +231,13 @@ func RunWithOptions(db, beadsDir, ticketID string, mode Mode, opts RunOptions) e
 		if !hasSignal {
 			return waitErr
 		}
+		// Belt-and-suspenders: if the env folder has been removed (e.g.
+		// `this finish` succeeded mid-loop), treat as terminal — don't
+		// relaunch into a deleted env, even if a stale signal file
+		// somehow survived.
+		if _, err := os.Stat(envPath); os.IsNotExist(err) {
+			return waitErr
+		}
 		extraArgs = append([]string{"--continue"}, sigArgs...)
 	}
 }

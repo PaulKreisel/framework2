@@ -270,6 +270,11 @@ func dispatch(beadsDir string, args []string, stdout, stderr io.Writer) error {
 		// pipeline.md commands after the parent process has exited. Not
 		// listed in `usage` on purpose — users never invoke it directly.
 		return runPipelineAsync(db, beadsDir, rest[1:], stdout)
+	case "terminate-async":
+		// Hidden subcommand: detached runner spawned by `finish` to close
+		// the hosting Terminal.app tab (and SIGHUP the wrapper) after the
+		// parent finish has returned. Not listed in `usage` on purpose.
+		return runTerminateAsync(rest[1:], stdout)
 	case "-h", "--help", "help":
 		fmt.Fprintln(stdout, usage)
 		return nil
@@ -971,6 +976,43 @@ func runPipelineAsync(db, beadsDir string, args []string, stdout io.Writer) erro
 		}
 	}
 	return finish.RunAsync(db, beadsDir, payload, stdout)
+}
+
+func runTerminateAsync(args []string, stdout io.Writer) error {
+	var tty string
+	var wrapperPID int
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--tty":
+			if i+1 >= len(args) {
+				return errors.New("terminate-async: --tty needs a value")
+			}
+			tty = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--tty="):
+			tty = strings.TrimPrefix(a, "--tty=")
+		case a == "--wrapper-pid":
+			if i+1 >= len(args) {
+				return errors.New("terminate-async: --wrapper-pid needs a value")
+			}
+			pid, err := strconv.Atoi(args[i+1])
+			if err != nil {
+				return fmt.Errorf("terminate-async: --wrapper-pid not a number: %w", err)
+			}
+			wrapperPID = pid
+			i++
+		case strings.HasPrefix(a, "--wrapper-pid="):
+			pid, err := strconv.Atoi(strings.TrimPrefix(a, "--wrapper-pid="))
+			if err != nil {
+				return fmt.Errorf("terminate-async: --wrapper-pid not a number: %w", err)
+			}
+			wrapperPID = pid
+		default:
+			return fmt.Errorf("terminate-async: unknown argument %q", a)
+		}
+	}
+	return finish.RunTerminateAsync(wrapperPID, tty, stdout)
 }
 
 func runNext(db, beadsDir, ticket string, args []string, stdout, stderr io.Writer) error {
