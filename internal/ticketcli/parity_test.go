@@ -72,6 +72,26 @@ func TestSubcommandFormParity(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "ready",
+			sub:  []string{"ready"},
+			wantOut: func(t *testing.T, out string) {
+				// `bd label add` echoes "✓ Added label ..." to stderr only;
+				// stdout stays empty.
+				if strings.TrimSpace(out) != "" {
+					t.Errorf("expected empty stdout, got %q", out)
+				}
+			},
+		},
+		{
+			name: "notready",
+			sub:  []string{"notready"},
+			wantOut: func(t *testing.T, out string) {
+				if strings.TrimSpace(out) != "" {
+					t.Errorf("expected empty stdout, got %q", out)
+				}
+			},
+		},
 	}
 
 	for _, tc := range cases {

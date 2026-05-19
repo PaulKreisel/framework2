@@ -26,6 +26,7 @@ import (
 	"framework2/internal/env"
 	"framework2/internal/finish"
 	"framework2/internal/next"
+	"framework2/internal/ready"
 	"framework2/internal/slug"
 )
 
@@ -171,6 +172,10 @@ subcommands:
                                           running agents are listed too. See
                                           WAITING REASON below for the column
                                           / --json field semantics.
+  ready [<id>]                            add the ` + "`ready`" + ` label to a ticket so it
+                                          is auto-launched when its last blocker
+                                          finishes. See ai-vrc.56.
+  notready [<id>]                         remove the ` + "`ready`" + ` label from a ticket.
   finish [<id>]                           wrap up: rebase the ticket's worktrees
                                           onto their parent branch (FF when no
                                           divergence, real rebase otherwise),
@@ -261,6 +266,10 @@ func dispatch(beadsDir string, args []string, stdout, stderr io.Writer) error {
 		return runCreate(db, beadsDir, ticket, rest[1:], stdout)
 	case "next":
 		return runNext(db, beadsDir, ticket, rest[1:], stdout, stderr)
+	case "ready":
+		return runReady(db, beadsDir, ticket, rest[1:])
+	case "notready":
+		return runNotReady(db, beadsDir, ticket, rest[1:])
 	case "finish":
 		return runFinish(db, beadsDir, ticket, rest[1:], stdout)
 	case "pipeline-async":
@@ -631,6 +640,19 @@ func runAgent(db, beadsDir, ticket string, args []string, mode agent.Mode, stdou
 		_, err = io.WriteString(stdout, prompt)
 		return err
 	}
+	// `ticket agent <blocked-id>` (fresh launch, agent mode) cascades into
+	// ready-stamping + launching unblocked roots instead of failing the
+	// claim. Resumes and spec sessions skip this — they don't claim either.
+	// See internal/ready for the rules.
+	if mode == agent.ModeAgent && resume == "" {
+		handled, err := ready.HandleBlocked(db, beadsDir, id, stdout)
+		if err != nil {
+			return err
+		}
+		if handled {
+			return nil
+		}
+	}
 	return agent.RunWithOptions(db, beadsDir, id, mode, agent.RunOptions{
 		ResumeSessionID: resume,
 		InitialPrompt:   initialPrompt,
@@ -980,6 +1002,22 @@ func runCreate(db, beadsDir, ticket string, args []string, stdout io.Writer) err
 		return err
 	}
 	return create.Run(db, beadsDir, id, tail[0], description, rel, !notBlocked, stdout)
+}
+
+func runReady(db, beadsDir, ticket string, args []string) error {
+	id, _, err := resolveID(ticket, args, 0, "usage: ticket ready [<id>]")
+	if err != nil {
+		return err
+	}
+	return ready.Set(db, beadsDir, id)
+}
+
+func runNotReady(db, beadsDir, ticket string, args []string) error {
+	id, _, err := resolveID(ticket, args, 0, "usage: ticket notready [<id>]")
+	if err != nil {
+		return err
+	}
+	return ready.Remove(db, beadsDir, id)
 }
 
 func runFinish(db, beadsDir, ticket string, args []string, stdout io.Writer) error {

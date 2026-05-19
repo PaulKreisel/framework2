@@ -31,6 +31,7 @@ import (
 	"framework2/internal/bdcli"
 	"framework2/internal/dir"
 	"framework2/internal/pipeline"
+	"framework2/internal/ready"
 )
 
 // Run executes the finish flow for ticketID. beadsDir must be set so the env
@@ -74,6 +75,14 @@ func Run(db, beadsDir, ticketID string, continueMode bool, stdout io.Writer) err
 
 	if err := bdClose(db, beadsDir, ticketID); err != nil {
 		return err
+	}
+	// Auto-launch follow-ups that were waiting on this ticket. See
+	// internal/ready: any dependent that now has no remaining open blockers
+	// AND still carries `ready` gets a fresh `ticket agent` in a new
+	// Terminal.app window. Best-effort — spawn errors are surfaced on
+	// stdout but never abort the finish.
+	if err := ready.LaunchReadyFollowups(db, beadsDir, ticketID, stdout); err != nil {
+		fmt.Fprintf(stdout, "warn: launch ready follow-ups for %s: %v\n", ticketID, err)
 	}
 	for _, e := range worktrees {
 		if err := gitWorktreeRemove(e.BareRepo, e.Path); err != nil {
