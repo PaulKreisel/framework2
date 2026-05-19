@@ -69,13 +69,14 @@ func renderStatusBlock(e AgentEntry, stdout io.Writer) error {
 			return err
 		}
 	}
-	if e.WaitingReason == "" {
+	reason := WaitingReasonFull(e)
+	if reason == "" {
 		return nil
 	}
 	if _, err := fmt.Fprintln(stdout, "Waiting Reason:"); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintln(stdout, e.WaitingReason); err != nil {
+	if _, err := fmt.Fprintln(stdout, reason); err != nil {
 		return err
 	}
 	return nil

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -66,7 +67,7 @@ func TestRegisterAgentAppendsAndLoadsBack(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("LoadAgents returned %d entries, want 2: %+v", len(got), got)
 	}
-	if got[0] != e1 || got[1] != e2 {
+	if !reflect.DeepEqual(got[0], e1) || !reflect.DeepEqual(got[1], e2) {
 		t.Errorf("entries = %+v, want [%+v %+v]", got, e1, e2)
 	}
 }

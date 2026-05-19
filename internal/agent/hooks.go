@@ -32,6 +32,16 @@ var statusHooks = []statusHook{
 	{Event: "PreToolUse", Matcher: "AskUserQuestion", Command: "ticket agent set-status waiting --source ask-user-question"},
 	{Event: "PreToolUse", Matcher: "ExitPlanMode", Command: "ticket agent set-status waiting --source exit-plan-mode"},
 	{Event: "StopFailure", Command: "ticket agent set-status waiting --source stop-failure"},
+	// Generic PostToolUse hook: tool calls don't add a conversation entry
+	// (per ai-vrc.47 they're out of scope), but they're the most frequent
+	// event in a coding session, so we use them to refresh the agent
+	// record's global contextTokens snapshot and to reconcile any new
+	// assistant_comment text segments emitted before the tool call. The
+	// status flip running→running is a no-op (or, for the
+	// AskUserQuestion/ExitPlanMode case where status was just flipped to
+	// waiting and the user has now answered, it correctly re-enters
+	// running). No explicit --source: there's no header entry to add.
+	{Event: "PostToolUse", Command: "ticket agent set-status running"},
 }
 
 // InstallStatusHooks ensures the entries in ~/.claude/settings.json invoke

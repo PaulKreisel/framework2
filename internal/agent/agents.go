@@ -25,19 +25,57 @@ import (
 // the field is intentionally not an enum so finer waiting states can be
 // added later without a schema migration. Empty Status on a legacy entry is
 // treated as "running" by [StateOf].
+//
+// Conversation is the append-only history of user prompts, assistant text
+// segments, AskUserQuestion / ExitPlanMode invocations, and StopFailure
+// events. Only [Mode] == "agent" sessions accumulate entries; spec-mode
+// sessions leave it empty and continue to use [WaitingReason] /
+// [WaitingReasonSource] for the waiting-reason render path.
+//
+// WaitingReason / WaitingReasonSource are the legacy single-value fields the
+// Stop / PreToolUse / StopFailure hooks used to overwrite each turn. They are
+// retained for spec-mode sessions. Agent-mode sessions leave these empty and
+// the display layer derives the waiting-reason summary from the tail of
+// [Conversation] instead.
 type AgentEntry struct {
-	SessionID              string `json:"sessionId"`
-	PID                    int    `json:"pid"`
-	Mode                   string `json:"mode"`
-	StartedAt              string `json:"startedAt"`
-	Env                    string `json:"env"`
-	Status                 string `json:"status,omitempty"`
-	StatusUpdatedAt        string `json:"statusUpdatedAt,omitempty"`
-	WaitingReason          string `json:"waitingReason,omitempty"`
-	WaitingReasonSource    string `json:"waitingReasonSource,omitempty"`
-	ContextTokens          int    `json:"contextTokens,omitempty"`
-	ContextTokensUpdatedAt string `json:"contextTokensUpdatedAt,omitempty"`
+	SessionID              string      `json:"sessionId"`
+	PID                    int         `json:"pid"`
+	Mode                   string      `json:"mode"`
+	StartedAt              string      `json:"startedAt"`
+	Env                    string      `json:"env"`
+	Status                 string      `json:"status,omitempty"`
+	StatusUpdatedAt        string      `json:"statusUpdatedAt,omitempty"`
+	WaitingReason          string      `json:"waitingReason,omitempty"`
+	WaitingReasonSource    string      `json:"waitingReasonSource,omitempty"`
+	ContextTokens          int         `json:"contextTokens,omitempty"`
+	ContextTokensUpdatedAt string      `json:"contextTokensUpdatedAt,omitempty"`
+	Conversation           []ConvEntry `json:"conversation,omitempty"`
 }
+
+// ConvEntry is one item in [AgentEntry.Conversation]. The shape is a union:
+// the populated payload fields depend on Type. ContextTokens is the
+// context-window size at the time the entry was produced — see the package
+// docs on [AgentEntry] for the per-event-vs-global semantics.
+type ConvEntry struct {
+	Type          string          `json:"type"`
+	Prompt        string          `json:"prompt,omitempty"`
+	Text          string          `json:"text,omitempty"`
+	Input         json.RawMessage `json:"input,omitempty"`
+	Plan          string          `json:"plan,omitempty"`
+	Matcher       string          `json:"matcher,omitempty"`
+	Message       string          `json:"message,omitempty"`
+	ContextTokens int             `json:"contextTokens,omitempty"`
+}
+
+// Conversation entry types.
+const (
+	ConvTypeUser             = "user"
+	ConvTypeAssistantComment = "assistant_comment"
+	ConvTypeAssistantReply   = "assistant_reply"
+	ConvTypeAskUserQuestion  = "ask_user_question"
+	ConvTypeExitPlanMode     = "exit_plan_mode"
+	ConvTypeStopFailure      = "stop_failure"
+)
 
 // WaitingReason source tags. Empty means the legacy form — the Stop hook's
 // captured assistant message — and is rendered as-is. The named sources
@@ -269,9 +307,17 @@ func SetStatus(db, beadsDir, sessionID, status, reason, source, ticketID string,
 			if e.SessionID != sessionID {
 				continue
 			}
+			// Agent-mode records have moved to the Conversation array;
+			// WaitingReason / WaitingReasonSource are not written for them
+			// (and any pre-existing value from a legacy entry is cleared on
+			// the next status transition so a stale string can't render).
+			effReason, effSource := reason, source
+			if e.Mode == "agent" {
+				effReason, effSource = "", ""
+			}
 			statusChanged := e.Status != status
-			reasonChanged := e.WaitingReason != reason
-			sourceChanged := e.WaitingReasonSource != source
+			reasonChanged := e.WaitingReason != effReason
+			sourceChanged := e.WaitingReasonSource != effSource
 			tokensChanged := contextTokens > 0 && contextTokens != e.ContextTokens
 			if !statusChanged && !reasonChanged && !sourceChanged && !tokensChanged {
 				return nil
@@ -281,10 +327,10 @@ func SetStatus(db, beadsDir, sessionID, status, reason, source, ticketID string,
 				entries[i].StatusUpdatedAt = now
 			}
 			if reasonChanged {
-				entries[i].WaitingReason = reason
+				entries[i].WaitingReason = effReason
 			}
 			if sourceChanged {
-				entries[i].WaitingReasonSource = source
+				entries[i].WaitingReasonSource = effSource
 			}
 			if tokensChanged {
 				entries[i].ContextTokens = contextTokens
@@ -294,6 +340,117 @@ func SetStatus(db, beadsDir, sessionID, status, reason, source, ticketID string,
 		}
 	}
 	return fmt.Errorf("%w %s", ErrSessionNotFound, sessionID)
+}
+
+// AppendConversation appends entries to the matching agent record's
+// [AgentEntry.Conversation] array and refreshes [AgentEntry.ContextTokens]
+// when contextTokens > 0. Only agent-mode records are touched: spec-mode
+// records keep the legacy waiting-reason mechanism, so the call is a silent
+// no-op there. Returns [ErrSessionNotFound] when no record matches.
+//
+// Lookup is by sessionID; ticketID, if non-empty, scopes the search to one
+// ticket. With ticketID empty all non-closed tickets are scanned (same shape
+// as [SetStatus]).
+//
+// transcriptAssistantText, if non-nil, lists assistant text segments observed
+// in the transcript. The function compares it against the existing run of
+// `assistant_comment` / `assistant_reply` entries at the tail of
+// Conversation, and appends entries for any segments not yet captured —
+// each as `assistant_comment` except the final one when finalAsReply is true
+// (the Stop hook calls this with finalAsReply=true so the last text segment
+// of the turn is recorded as `assistant_reply`). Pass nil or an empty slice
+// to skip the transcript reconciliation step.
+//
+// Empty entries (nil and len(entries) == 0) are tolerated so callers can use
+// the function purely to update ContextTokens or to reconcile transcript
+// segments without an explicit per-source append.
+func AppendConversation(db, beadsDir, sessionID, ticketID string, transcriptAssistantText []TranscriptText, finalAsReply bool, entries []ConvEntry, contextTokens int) error {
+	if sessionID == "" {
+		return errors.New("session id required")
+	}
+	tickets := []string{ticketID}
+	if ticketID == "" {
+		all, err := ticketsWithAgents(db, beadsDir)
+		if err != nil {
+			return err
+		}
+		tickets = all
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	for _, tid := range tickets {
+		records, err := LoadAgents(db, beadsDir, tid)
+		if err != nil {
+			return err
+		}
+		for i, e := range records {
+			if e.SessionID != sessionID {
+				continue
+			}
+			if e.Mode != "" && e.Mode != "agent" {
+				// Spec mode keeps the legacy WaitingReason path. Nothing to
+				// append; ContextTokens still flows through SetStatus.
+				return nil
+			}
+			updated := records[i]
+			changed := false
+			// Reconcile assistant text segments observed in the transcript
+			// against the entries already stored at the tail of Conversation.
+			newSegs := newAssistantSegments(updated.Conversation, transcriptAssistantText)
+			for idx, seg := range newSegs {
+				entryType := ConvTypeAssistantComment
+				if finalAsReply && idx == len(newSegs)-1 {
+					entryType = ConvTypeAssistantReply
+				}
+				updated.Conversation = append(updated.Conversation, ConvEntry{
+					Type:          entryType,
+					Text:          seg.Text,
+					ContextTokens: seg.ContextTokens,
+				})
+				changed = true
+			}
+			for _, ent := range entries {
+				updated.Conversation = append(updated.Conversation, ent)
+				changed = true
+			}
+			if contextTokens > 0 && contextTokens != updated.ContextTokens {
+				updated.ContextTokens = contextTokens
+				updated.ContextTokensUpdatedAt = now
+				changed = true
+			}
+			if !changed {
+				return nil
+			}
+			records[i] = updated
+			return saveAgents(db, beadsDir, tid, records)
+		}
+	}
+	return fmt.Errorf("%w %s", ErrSessionNotFound, sessionID)
+}
+
+// newAssistantSegments returns the slice of transcript-observed assistant
+// text segments that are not yet represented in conv. Captured count is the
+// total number of `assistant_comment` / `assistant_reply` entries already in
+// conv — since segments are always appended in chronological transcript
+// order, the new tail is segs[captured:].
+//
+// We use a count-and-skip heuristic rather than text equality so minor
+// whitespace differences between the live transcript and the stored snapshot
+// don't cause duplicates. The transcript is the authoritative order; once
+// stored, entries are immutable.
+func newAssistantSegments(conv []ConvEntry, segs []TranscriptText) []TranscriptText {
+	if len(segs) == 0 {
+		return nil
+	}
+	captured := 0
+	for _, e := range conv {
+		if e.Type == ConvTypeAssistantComment || e.Type == ConvTypeAssistantReply {
+			captured++
+		}
+	}
+	if captured >= len(segs) {
+		return nil
+	}
+	return segs[captured:]
 }
 
 // ticketsWithAgents lists every bead id whose metadata carries a non-empty
@@ -339,16 +496,98 @@ const waitingReasonTableMax = 80
 // [StatusWaiting]: only waiting agents own a meaningful reason, and a stale
 // reason from a previous turn must not bleed into a "running"/"exited" row.
 //
-// When [AgentEntry.WaitingReasonSource] is one of the structured tags, the
-// row shows a short summary derived from the payload (e.g. "asking: which
-// library?", "plan: refactor X…", "rate_limit"). Otherwise the raw
-// [AgentEntry.WaitingReason] is collapsed to one line and truncated.
+// Agent-mode entries derive the summary from the tail of
+// [AgentEntry.Conversation] — the most recent wait-representing entry
+// (`assistant_reply`, `ask_user_question`, `exit_plan_mode`, `stop_failure`)
+// supplies the value. Spec-mode entries (and pre-Conversation legacy
+// records with an empty array) fall back to the
+// [AgentEntry.WaitingReasonSource] / [AgentEntry.WaitingReason] pair.
 func FormatWaitingReason(e AgentEntry) string {
 	if StateOf(e) != StatusWaiting {
 		return ""
 	}
-	summary := summarizeWaitingReason(e.WaitingReasonSource, e.WaitingReason)
+	summary := WaitingReasonSummary(e)
 	return truncateSingleLine(summary, waitingReasonTableMax)
+}
+
+// WaitingReasonSummary returns the untruncated, single-source-of-truth
+// waiting-reason summary for e. It is the value that
+// [FormatWaitingReason] truncates for the table cell, and that
+// [Status] (agent status --json / human form) emits verbatim. Empty when
+// no wait-representing entry exists.
+//
+// Agent-mode lookup: walk Conversation from the tail, pick the first entry
+// of a wait-representing type, summarise according to that type. Spec mode
+// (and legacy records that predate the array): use WaitingReasonSource /
+// WaitingReason as before.
+func WaitingReasonSummary(e AgentEntry) string {
+	if e.Mode == "agent" {
+		return waitingReasonFromConversation(e.Conversation)
+	}
+	return summarizeWaitingReason(e.WaitingReasonSource, e.WaitingReason)
+}
+
+// WaitingReasonFull returns the untruncated raw payload for the most recent
+// wait-representing conversation entry (agent mode) or the stored
+// [AgentEntry.WaitingReason] (spec mode). Used by `agent status` to print a
+// full-fidelity block under the metadata.
+func WaitingReasonFull(e AgentEntry) string {
+	if e.Mode != "agent" {
+		return e.WaitingReason
+	}
+	for i := len(e.Conversation) - 1; i >= 0; i-- {
+		c := e.Conversation[i]
+		switch c.Type {
+		case ConvTypeAssistantReply:
+			return c.Text
+		case ConvTypeAskUserQuestion:
+			return string(c.Input)
+		case ConvTypeExitPlanMode:
+			return c.Plan
+		case ConvTypeStopFailure:
+			if c.Matcher != "" && c.Message != "" {
+				return c.Matcher + ": " + c.Message
+			}
+			if c.Matcher != "" {
+				return c.Matcher
+			}
+			return c.Message
+		}
+	}
+	return ""
+}
+
+// waitingReasonFromConversation walks conv from the tail and renders the
+// short table summary for the most recent wait-representing entry. Returns
+// "" when no such entry exists (e.g. a brand-new session that has only
+// captured a `user` entry so far).
+func waitingReasonFromConversation(conv []ConvEntry) string {
+	for i := len(conv) - 1; i >= 0; i-- {
+		c := conv[i]
+		switch c.Type {
+		case ConvTypeAssistantReply:
+			return c.Text
+		case ConvTypeAskUserQuestion:
+			if q := firstAskQuestion(string(c.Input)); q != "" {
+				return "asking: " + q
+			}
+			return "asking"
+		case ConvTypeExitPlanMode:
+			if line := firstNonEmptyLine(c.Plan); line != "" {
+				return "plan: " + line
+			}
+			return "plan"
+		case ConvTypeStopFailure:
+			if c.Matcher != "" && c.Message != "" {
+				return c.Matcher + ": " + c.Message
+			}
+			if c.Matcher != "" {
+				return c.Matcher
+			}
+			return c.Message
+		}
+	}
+	return ""
 }
 
 // summarizeWaitingReason maps a (source, raw payload) pair to the short

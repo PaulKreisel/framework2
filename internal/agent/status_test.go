@@ -314,9 +314,11 @@ func TestSetStatusCLIRejectsUnknownState(t *testing.T) {
 	}
 }
 
-// TestSetStatusRoundTripsWaitingReason covers the round-trip described in
-// description.md: register, flip to waiting with a reason, reload, assert
-// persisted; flip back to running (empty reason), assert cleared.
+// TestSetStatusRoundTripsWaitingReason covers the legacy WaitingReason
+// round-trip for spec-mode entries: register, flip to waiting with a
+// reason, reload, assert persisted; flip back to running (empty reason),
+// assert cleared. Agent-mode entries have moved to the Conversation array
+// and are covered separately.
 func TestSetStatusRoundTripsWaitingReason(t *testing.T) {
 	t.Parallel()
 	beadsDir := testutil.TestDB(t)
@@ -324,7 +326,7 @@ func TestSetStatusRoundTripsWaitingReason(t *testing.T) {
 
 	sid := "abababab-abab-4bab-8bab-ababababab01"
 	if err := agent.RegisterAgent("", beadsDir, ticket, agent.AgentEntry{
-		SessionID: sid, PID: 1, Mode: "agent",
+		SessionID: sid, PID: 1, Mode: "spec",
 		StartedAt: "2026-05-15T14:00:00Z", Env: "/env-r",
 		Status: agent.StatusRunning,
 	}); err != nil {
@@ -380,13 +382,14 @@ func TestSetStatusClearsReasonEvenWhenCallerPassesOne(t *testing.T) {
 func TestSetStatusCLIParsesLastAssistantMessageFromStdin(t *testing.T) {
 	// The hook signature: session_id and last_assistant_message arrive
 	// together on stdin. The CLI must forward the message through to the
-	// stored WaitingReason.
+	// stored WaitingReason. Spec-mode round-trip — agent-mode sessions
+	// store the assistant reply in Conversation instead, covered separately.
 	beadsDir := testutil.TestDB(t)
 	ticket := testutil.CreateBeadFull(t, beadsDir, "setstatus-stdin-reason", "x", "")
 
 	sid := "abababab-abab-4bab-8bab-ababababab03"
 	if err := agent.RegisterAgent("", beadsDir, ticket, agent.AgentEntry{
-		SessionID: sid, PID: 1, Mode: "agent",
+		SessionID: sid, PID: 1, Mode: "spec",
 		StartedAt: "2026-05-15T14:00:00Z", Env: "/env",
 		Status: agent.StatusRunning,
 	}); err != nil {
@@ -466,7 +469,7 @@ func TestSetStatusCLIAskUserQuestionSource(t *testing.T) {
 
 	sid := "abababab-abab-4bab-8bab-ababababab10"
 	if err := agent.RegisterAgent("", beadsDir, ticket, agent.AgentEntry{
-		SessionID: sid, PID: 1, Mode: "agent",
+		SessionID: sid, PID: 1, Mode: "spec",
 		StartedAt: "2026-05-15T14:00:00Z", Env: "/env",
 		Status: agent.StatusRunning,
 	}); err != nil {
@@ -509,7 +512,7 @@ func TestSetStatusCLIExitPlanModeSource(t *testing.T) {
 
 	sid := "abababab-abab-4bab-8bab-ababababab11"
 	if err := agent.RegisterAgent("", beadsDir, ticket, agent.AgentEntry{
-		SessionID: sid, PID: 1, Mode: "agent",
+		SessionID: sid, PID: 1, Mode: "spec",
 		StartedAt: "2026-05-15T14:00:00Z", Env: "/env",
 		Status: agent.StatusRunning,
 	}); err != nil {
@@ -553,7 +556,7 @@ func TestSetStatusCLIStopFailureSource(t *testing.T) {
 
 	sid := "abababab-abab-4bab-8bab-ababababab12"
 	if err := agent.RegisterAgent("", beadsDir, ticket, agent.AgentEntry{
-		SessionID: sid, PID: 1, Mode: "agent",
+		SessionID: sid, PID: 1, Mode: "spec",
 		StartedAt: "2026-05-15T14:00:00Z", Env: "/env",
 		Status: agent.StatusRunning,
 	}); err != nil {
@@ -597,7 +600,7 @@ func TestSetStatusRunningClearsReasonAndSource(t *testing.T) {
 
 	sid := "abababab-abab-4bab-8bab-ababababab13"
 	if err := agent.RegisterAgent("", beadsDir, ticket, agent.AgentEntry{
-		SessionID: sid, PID: 1, Mode: "agent",
+		SessionID: sid, PID: 1, Mode: "spec",
 		StartedAt: "2026-05-15T14:00:00Z", Env: "/env",
 		Status: agent.StatusRunning,
 	}); err != nil {
@@ -638,7 +641,7 @@ func TestListAgentsTruncatesWaitingReason(t *testing.T) {
 	reason := "line one is short\nline two adds enough text that the rendered cell goes past the eighty-character cap that the table view enforces"
 	if err := agent.RegisterAgent("", beadsDir, ticket, agent.AgentEntry{
 		SessionID: "ccccccc1-cccc-4ccc-8ccc-cccccccccccc",
-		PID:       1, Mode: "agent",
+		PID:       1, Mode: "spec",
 		StartedAt: "2026-05-15T14:00:00Z", Env: "/env",
 		Status:        agent.StatusWaiting,
 		WaitingReason: reason,
@@ -699,7 +702,7 @@ func TestAgentStatusCLIPrintsFullReason(t *testing.T) {
 	full := "I just finished applying the rename across all callers.\nNext I'll re-run the suite, but I want you to confirm the surrounding files look right first."
 	if err := agent.RegisterAgent("", beadsDir, ticket, agent.AgentEntry{
 		SessionID: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
-		PID:       1, Mode: "agent",
+		PID:       1, Mode: "spec",
 		StartedAt:     "2026-05-15T14:00:00Z",
 		Env:           "/env",
 		Status:        agent.StatusWaiting,
@@ -717,7 +720,7 @@ func TestAgentStatusCLIPrintsFullReason(t *testing.T) {
 	if !strings.Contains(stdout, full) {
 		t.Errorf("untruncated reason missing from output:\n%s", stdout)
 	}
-	for _, want := range []string{"dddddddd-dddd-4ddd-8ddd-dddddddddddd", "agent", "waiting"} {
+	for _, want := range []string{"dddddddd-dddd-4ddd-8ddd-dddddddddddd", "spec", "waiting"} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("expected %q in output:\n%s", want, stdout)
 		}
@@ -828,6 +831,7 @@ func TestInstallStatusHooksCreatesFreshFile(t *testing.T) {
 	assertHookContains(t, settings, "Stop", "ticket agent set-status waiting")
 	assertHookContains(t, settings, "UserPromptSubmit", "ticket agent set-status running")
 	assertHookContains(t, settings, "StopFailure", "ticket agent set-status waiting --source stop-failure")
+	assertHookContains(t, settings, "PostToolUse", "ticket agent set-status running")
 	assertHookContainsMatcher(t, settings, "PreToolUse", "AskUserQuestion",
 		"ticket agent set-status waiting --source ask-user-question")
 	assertHookContainsMatcher(t, settings, "PreToolUse", "ExitPlanMode",
@@ -854,6 +858,7 @@ func TestInstallStatusHooksIsIdempotent(t *testing.T) {
 		"UserPromptSubmit": 1,
 		"PreToolUse":       2,
 		"StopFailure":      1,
+		"PostToolUse":      1,
 	}
 	for event, want := range expected {
 		blocks := settings["hooks"].(map[string]any)[event].([]any)
@@ -908,6 +913,7 @@ func TestInstallStatusHooksPreservesUnrelatedKeys(t *testing.T) {
 	assertHookContains(t, settings, "Stop", "ticket agent set-status waiting")
 	assertHookContains(t, settings, "UserPromptSubmit", "ticket agent set-status running")
 	assertHookContains(t, settings, "StopFailure", "ticket agent set-status waiting --source stop-failure")
+	assertHookContains(t, settings, "PostToolUse", "ticket agent set-status running")
 	assertHookContainsMatcher(t, settings, "PreToolUse", "AskUserQuestion",
 		"ticket agent set-status waiting --source ask-user-question")
 	assertHookContainsMatcher(t, settings, "PreToolUse", "ExitPlanMode",

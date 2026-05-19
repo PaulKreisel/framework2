@@ -182,34 +182,32 @@ subcommands:
                                           each paused worktree, then completes
                                           the rest of the flow.
 
-WAITING REASON column / waitingReason field:
+WAITING REASON column:
   Surfaced by ` + "`agent list`" + `, ` + "`agent status`" + ` and ` + "`next agent`" + ` for agents
-  in the waiting state. Populated by Claude Code hooks (Stop /
-  PreToolUse / StopFailure) via ` + "`agent set-status`" + `; ` + "`UserPromptSubmit`" + `
-  clears it on the next user turn. The kind of wait is recorded in
-  ` + "`waitingReasonSource`" + ` (omitted in --json when empty, i.e. the legacy
-  Stop form):
+  in the waiting state.
 
-    ""                  Stop hook — the assistant's final text message
-                        for the turn. Table cell shows the message,
-                        whitespace-collapsed and truncated.
-    ask-user-question   PreToolUse:AskUserQuestion — assistant invoked
-                        the multiple-choice prompt tool. waitingReason
-                        holds the raw tool_input JSON (questions +
-                        options); table cell renders "asking: <first
-                        question text>".
-    exit-plan-mode      PreToolUse:ExitPlanMode — assistant proposed a
-                        plan in plan mode. waitingReason holds the plan
-                        markdown body; table cell renders "plan: <first
-                        non-empty line>".
-    stop-failure        StopFailure — turn ended due to an API error
-                        (rate_limit, billing_error, server_error, …).
-                        waitingReason holds "<matcher>: <message>" (or
-                        just one of them when the other is absent);
-                        table cell shows the bare matcher first.
+  Agent-mode sessions derive the cell from the tail of the per-record
+  ` + "`conversation`" + ` array (see "conversation field" below). Spec-mode
+  sessions keep the legacy ` + "`waitingReason`" + ` / ` + "`waitingReasonSource`" + `
+  pair: the latest waiting state overwrites both fields. In both modes the
+  short summary follows the same shape — Stop renders the assistant's
+  final text segment, AskUserQuestion renders "asking: <first question>",
+  ExitPlanMode renders "plan: <first non-empty line>", StopFailure renders
+  the bare matcher (and ": message" in the untruncated form).
 
   ` + "`agent list`" + ` and ` + "`next agent`" + ` truncate the cell to one line; use
-  ` + "`agent status`" + ` (or --json) for the full payload.`
+  ` + "`agent status`" + ` (or --json) for the full payload.
+
+conversation field (agent mode):
+  An append-only array on the agent record that captures the per-session
+  conversation history: each user prompt, each assistant text segment,
+  each AskUserQuestion / ExitPlanMode / StopFailure event becomes its own
+  entry with a ` + "`type`" + ` tag and a ` + "`contextTokens`" + ` snapshot. Tool calls
+  and tool results are not captured. Main-session only; subagent payloads
+  (` + "`agent_id`" + ` present) are skipped. See ` + "`agent list --json`" + ` for the full
+  shape. The global ` + "`contextTokens`" + ` field continues to mirror the most
+  recent reading from any hook (including PostToolUse, which carries no
+  entry but refreshes the snapshot).`
 
 // Options configures a Run invocation. The zero value uses
 // os.Getenv("BEADS_DIR") for BeadsDir, matching the production behaviour of
@@ -752,12 +750,14 @@ func runAgentSetStatus(db, beadsDir, ticket string, args []string) error {
 	fromHook := false
 	var contextTokens int
 	var reason string
+	var payload *hookStdinPayload
 	if session == "" {
 		p, err := hookPayloadFromStdin()
 		if err != nil {
 			return fmt.Errorf("read hook payload: %w", err)
 		}
 		if p != nil {
+			payload = p
 			session = p.SessionID
 			reason = waitingReasonFromPayload(source, p)
 			// Prefer an explicit context_tokens field if the caller set
@@ -784,10 +784,97 @@ func runAgentSetStatus(db, beadsDir, ticket string, args []string) error {
 	// launched via `ticket agent` — so a missing record there is expected,
 	// not an error. Explicit --session calls (manual testing backstop) still
 	// surface the error so typos don't silently succeed.
-	if fromHook && errors.Is(err, agent.ErrSessionNotFound) {
+	if err != nil {
+		if fromHook && errors.Is(err, agent.ErrSessionNotFound) {
+			return nil
+		}
+		return err
+	}
+	// Subagent invocations (Claude Code's task-spawned helpers) carry an
+	// agent_id field. Conversation accumulation is main-session-only per
+	// ai-vrc.47 scope, so skip the append in that case. The status flip
+	// above is still legitimate — the wrapper's status is whatever the
+	// last set-status said, regardless of which session typed the prompt.
+	if payload == nil || payload.AgentID != "" {
 		return nil
 	}
-	return err
+	// Build per-source conversation entries and reconcile any new assistant
+	// text segments from the transcript. AppendConversation no-ops on
+	// spec-mode records and on records not found.
+	entries := buildConversationEntries(status, source, payload, contextTokens)
+	var segs []agent.TranscriptText
+	finalAsReply := false
+	if payload.TranscriptPath != "" {
+		if s, err := agent.AssistantTextSegments(payload.TranscriptPath); err == nil {
+			segs = s
+		}
+		// Stop hook (waiting + empty source) ends the turn: the final
+		// transcript text segment is the assistant_reply.
+		if status == agent.StatusWaiting && source == "" {
+			finalAsReply = true
+		}
+	}
+	aerr := agent.AppendConversation(db, beadsDir, session, ticket, segs, finalAsReply, entries, contextTokens)
+	if aerr != nil && !errors.Is(aerr, agent.ErrSessionNotFound) {
+		return aerr
+	}
+	return nil
+}
+
+// buildConversationEntries returns the per-source conversation entries to
+// append for one hook firing. Transcript-derived assistant_comment entries
+// are produced separately by AppendConversation; this function returns only
+// the "header" entry that the hook event introduces (user, ask_user_question,
+// exit_plan_mode, stop_failure). The Stop hook contributes no header entry —
+// its content is exactly the run of assistant text segments AppendConversation
+// reconciles from the transcript.
+func buildConversationEntries(status, source string, p *hookStdinPayload, contextTokens int) []agent.ConvEntry {
+	if status == agent.StatusRunning {
+		if p.Prompt == "" {
+			return nil
+		}
+		return []agent.ConvEntry{{
+			Type:          agent.ConvTypeUser,
+			Prompt:        p.Prompt,
+			ContextTokens: contextTokens,
+		}}
+	}
+	switch source {
+	case agent.WaitingReasonSourceAskUserQuestion:
+		input := json.RawMessage(p.ToolInput)
+		if len(input) == 0 || string(input) == "null" {
+			input = nil
+		}
+		return []agent.ConvEntry{{
+			Type:          agent.ConvTypeAskUserQuestion,
+			Input:         input,
+			ContextTokens: contextTokens,
+		}}
+	case agent.WaitingReasonSourceExitPlanMode:
+		var ti struct {
+			Plan string `json:"plan"`
+		}
+		if len(p.ToolInput) > 0 {
+			_ = json.Unmarshal(p.ToolInput, &ti)
+		}
+		return []agent.ConvEntry{{
+			Type:          agent.ConvTypeExitPlanMode,
+			Plan:          ti.Plan,
+			ContextTokens: contextTokens,
+		}}
+	case agent.WaitingReasonSourceStopFailure:
+		return []agent.ConvEntry{{
+			Type:          agent.ConvTypeStopFailure,
+			Matcher:       p.Matcher,
+			Message:       p.Message,
+			ContextTokens: contextTokens,
+		}}
+	default:
+		// Stop hook: no header entry — AppendConversation reconciles the
+		// transcript and produces the trailing assistant_comment* +
+		// assistant_reply run.
+		return nil
+	}
 }
 
 // waitingReasonFromPayload extracts the per-source waiting-reason payload
@@ -854,6 +941,8 @@ type hookStdinPayload struct {
 	Matcher              string          `json:"matcher"`
 	Message              string          `json:"message"`
 	ContextTokens        int             `json:"context_tokens"`
+	Prompt               string          `json:"prompt"`
+	AgentID              string          `json:"agent_id"`
 }
 
 // hookPayloadFromStdin parses Claude Code's hook payload from os.Stdin.

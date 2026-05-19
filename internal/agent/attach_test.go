@@ -2,6 +2,7 @@ package agent_test
 
 import (
 	"os"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -321,7 +322,7 @@ func TestUpsertAgentReplacesExisting(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("expected 1 entry after upsert, got %d: %+v", len(got), got)
 	}
-	if got[0] != second {
+	if !reflect.DeepEqual(got[0], second) {
 		t.Errorf("entry = %+v, want %+v", got[0], second)
 	}
 }
@@ -343,7 +344,7 @@ func TestUpsertAgentAppendsWhenAbsent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadAgents: %v", err)
 	}
-	if len(got) != 1 || got[0] != e {
+	if len(got) != 1 || !reflect.DeepEqual(got[0], e) {
 		t.Errorf("entries = %+v, want [%+v]", got, e)
 	}
 }
