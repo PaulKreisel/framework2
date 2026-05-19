@@ -186,28 +186,28 @@ WAITING REASON column:
   Surfaced by ` + "`agent list`" + `, ` + "`agent status`" + ` and ` + "`next agent`" + ` for agents
   in the waiting state.
 
-  Agent-mode sessions derive the cell from the tail of the per-record
-  ` + "`conversation`" + ` array (see "conversation field" below). Spec-mode
-  sessions keep the legacy ` + "`waitingReason`" + ` / ` + "`waitingReasonSource`" + `
-  pair: the latest waiting state overwrites both fields. In both modes the
-  short summary follows the same shape — Stop renders the assistant's
-  final text segment, AskUserQuestion renders "asking: <first question>",
-  ExitPlanMode renders "plan: <first non-empty line>", StopFailure renders
-  the bare matcher (and ": message" in the untruncated form).
+  The cell is derived from the tail of the per-record ` + "`conversation`" + `
+  array (see "conversation field" below) for both agent-mode and
+  spec-mode sessions. The short summary shape: Stop renders the
+  assistant's final text segment, AskUserQuestion renders
+  "asking: <first question>", ExitPlanMode renders
+  "plan: <first non-empty line>", StopFailure renders the bare matcher
+  (and ": message" in the untruncated form).
 
   ` + "`agent list`" + ` and ` + "`next agent`" + ` truncate the cell to one line; use
   ` + "`agent status`" + ` (or --json) for the full payload.
 
-conversation field (agent mode):
+conversation field:
   An append-only array on the agent record that captures the per-session
   conversation history: each user prompt, each assistant text segment,
   each AskUserQuestion / ExitPlanMode / StopFailure event becomes its own
   entry with a ` + "`type`" + ` tag and a ` + "`contextTokens`" + ` snapshot. Tool calls
-  and tool results are not captured. Main-session only; subagent payloads
-  (` + "`agent_id`" + ` present) are skipped. See ` + "`agent list --json`" + ` for the full
-  shape. The global ` + "`contextTokens`" + ` field continues to mirror the most
-  recent reading from any hook (including PostToolUse, which carries no
-  entry but refreshes the snapshot).`
+  and tool results are not captured. Populated for both agent-mode and
+  spec-mode sessions. Main-session only; subagent payloads (` + "`agent_id`" + `
+  present) are skipped. See ` + "`agent list --json`" + ` for the full shape. The
+  global ` + "`contextTokens`" + ` field continues to mirror the most recent
+  reading from any hook (including PostToolUse, which carries no entry
+  but refreshes the snapshot).`
 
 // Options configures a Run invocation. The zero value uses
 // os.Getenv("BEADS_DIR") for BeadsDir, matching the production behaviour of
@@ -691,16 +691,17 @@ func runAgentDelete(db, beadsDir, ticket string, args []string) error {
 // invocation path) session_id is parsed out of the Claude Code hook JSON
 // payload on stdin.
 //
-// --source selects how the waiting reason is built from the stdin payload:
+// --source selects how the matching conversation entry is built from the
+// stdin payload:
 //
-//   - "" (default): the Stop hook's `last_assistant_message` — the legacy
-//     ai-vrc.23 form.
-//   - "ask-user-question": the PreToolUse payload's raw `tool_input` JSON
-//     (questions+options) is stored verbatim.
-//   - "exit-plan-mode": the PreToolUse payload's `tool_input.plan` markdown
-//     body is stored.
-//   - "stop-failure": the StopFailure payload's `matcher` (error type),
-//     suffixed with `: <message>` when the payload carries one.
+//   - "" (default): Stop hook — the run of assistant text segments is
+//     reconciled from the transcript (no header entry).
+//   - "ask-user-question": PreToolUse payload's raw `tool_input` JSON
+//     (questions+options) is stored verbatim in an `ask_user_question` entry.
+//   - "exit-plan-mode": PreToolUse payload's `tool_input.plan` markdown
+//     becomes an `exit_plan_mode` entry.
+//   - "stop-failure": StopFailure payload's `matcher` (error type) and
+//     `message` become a `stop_failure` entry.
 func runAgentSetStatus(db, beadsDir, ticket string, args []string) error {
 	usage := "usage: ticket agent set-status <running|waiting> [--session <id>] [--source <kind>]"
 	var session, source string
@@ -749,7 +750,6 @@ func runAgentSetStatus(db, beadsDir, ticket string, args []string) error {
 	}
 	fromHook := false
 	var contextTokens int
-	var reason string
 	var payload *hookStdinPayload
 	if session == "" {
 		p, err := hookPayloadFromStdin()
@@ -759,7 +759,6 @@ func runAgentSetStatus(db, beadsDir, ticket string, args []string) error {
 		if p != nil {
 			payload = p
 			session = p.SessionID
-			reason = waitingReasonFromPayload(source, p)
 			// Prefer an explicit context_tokens field if the caller set
 			// one (manual or future-wrapper invocation); otherwise derive
 			// it from the transcript Claude Code points us at.
@@ -779,7 +778,7 @@ func runAgentSetStatus(db, beadsDir, ticket string, args []string) error {
 	if session == "" {
 		return errors.New("no --session id supplied and stdin payload did not contain session_id")
 	}
-	err := agent.SetStatus(db, beadsDir, session, status, reason, source, ticket, contextTokens)
+	err := agent.SetStatus(db, beadsDir, session, status, ticket, contextTokens)
 	// Hook-driven invocations fire for every claude session, not just those
 	// launched via `ticket agent` — so a missing record there is expected,
 	// not an error. Explicit --session calls (manual testing backstop) still
@@ -799,8 +798,8 @@ func runAgentSetStatus(db, beadsDir, ticket string, args []string) error {
 		return nil
 	}
 	// Build per-source conversation entries and reconcile any new assistant
-	// text segments from the transcript. AppendConversation no-ops on
-	// spec-mode records and on records not found.
+	// text segments from the transcript. AppendConversation is a silent
+	// no-op when no record matches.
 	entries := buildConversationEntries(status, source, payload, contextTokens)
 	var segs []agent.TranscriptText
 	finalAsReply := false
@@ -877,72 +876,25 @@ func buildConversationEntries(status, source string, p *hookStdinPayload, contex
 	}
 }
 
-// waitingReasonFromPayload extracts the per-source waiting-reason payload
-// from the parsed hook stdin. The returned string is stored verbatim in
-// [agent.AgentEntry.WaitingReason]; the display layer derives the short
-// table summary from (source, value) via [agent.FormatWaitingReason].
-//
-// Returns "" when the relevant field is missing — set-status will then
-// clear the stored reason on the flip to running, or store an empty
-// reason on the flip to waiting (the source tag still routes the column
-// rendering).
-func waitingReasonFromPayload(source string, p *hookStdinPayload) string {
-	switch source {
-	case agent.WaitingReasonSourceAskUserQuestion:
-		// Forward the tool_input JSON unchanged — it carries the full
-		// questions+options structure. The display layer parses out the
-		// first question for the truncated table column.
-		if len(p.ToolInput) > 0 && string(p.ToolInput) != "null" {
-			return string(p.ToolInput)
-		}
-		return ""
-	case agent.WaitingReasonSourceExitPlanMode:
-		var ti struct {
-			Plan string `json:"plan"`
-		}
-		if len(p.ToolInput) > 0 {
-			_ = json.Unmarshal(p.ToolInput, &ti)
-		}
-		return ti.Plan
-	case agent.WaitingReasonSourceStopFailure:
-		// Matcher is the error type ("rate_limit", "billing_error", …);
-		// message is the human-readable detail. Compose
-		// "<matcher>: <message>" when both are present, otherwise just
-		// whichever one we have.
-		if p.Matcher != "" && p.Message != "" {
-			return p.Matcher + ": " + p.Message
-		}
-		if p.Matcher != "" {
-			return p.Matcher
-		}
-		return p.Message
-	default:
-		// Legacy Stop-hook form: assistant's final reply for the turn.
-		return p.LastAssistantMessage
-	}
-}
-
 // hookStdinPayload is the subset of the Claude Code hook payload we read
 // from stdin. transcript_path is Claude's path to the session JSONL — we
-// tail it to derive the agent's current context-window size.
-// last_assistant_message is set on Stop payloads and holds the assistant's
-// final reply for the turn. tool_input is set on PreToolUse payloads and
-// carries the in-flight tool call's JSON (we forward it as the waiting
-// reason for AskUserQuestion / ExitPlanMode). matcher + message are set on
+// tail it to derive the agent's current context-window size and reconcile
+// assistant text segments. tool_input is set on PreToolUse payloads and
+// carries the in-flight tool call's JSON (we forward it as the entry payload
+// for AskUserQuestion / ExitPlanMode). matcher + message are set on
 // StopFailure payloads and identify the API error class plus its detail.
 // context_tokens is not part of the native Claude Code payload; it's a
 // passthrough hatch for tests and any future wrapper that wants to inject
 // a pre-computed value.
 type hookStdinPayload struct {
-	SessionID            string          `json:"session_id"`
-	TranscriptPath       string          `json:"transcript_path"`
-	LastAssistantMessage string          `json:"last_assistant_message"`
-	ToolInput            json.RawMessage `json:"tool_input"`
-	Matcher              string          `json:"matcher"`
-	Message              string          `json:"message"`
-	ContextTokens        int             `json:"context_tokens"`
-	Prompt               string          `json:"prompt"`
-	AgentID              string          `json:"agent_id"`
+	SessionID      string          `json:"session_id"`
+	TranscriptPath string          `json:"transcript_path"`
+	ToolInput      json.RawMessage `json:"tool_input"`
+	Matcher        string          `json:"matcher"`
+	Message        string          `json:"message"`
+	ContextTokens  int             `json:"context_tokens"`
+	Prompt         string          `json:"prompt"`
+	AgentID        string          `json:"agent_id"`
 }
 
 // hookPayloadFromStdin parses Claude Code's hook payload from os.Stdin.

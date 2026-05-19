@@ -45,7 +45,7 @@ func TestSetStatusUpdatesStatusAndTimestamp(t *testing.T) {
 
 	if err := agent.SetStatus("", beadsDir,
 		"11111111-1111-4111-8111-111111111111",
-		agent.StatusWaiting, "", "", ticket, 0); err != nil {
+		agent.StatusWaiting, ticket, 0); err != nil {
 		t.Fatalf("SetStatus: %v", err)
 	}
 
@@ -89,7 +89,7 @@ func TestSetStatusIsNoOpWhenAlreadyAtTarget(t *testing.T) {
 
 	if err := agent.SetStatus("", beadsDir,
 		"22222222-2222-4222-8222-222222222222",
-		agent.StatusWaiting, "", "", ticket, 0); err != nil {
+		agent.StatusWaiting, ticket, 0); err != nil {
 		t.Fatalf("SetStatus: %v", err)
 	}
 
@@ -107,7 +107,7 @@ func TestSetStatusErrorsWhenSessionMissing(t *testing.T) {
 
 	err := agent.SetStatus("", beadsDir,
 		"deadbeef-dead-4dea-8dea-deaddeaddead",
-		agent.StatusRunning, "", "", ticket, 0)
+		agent.StatusRunning, ticket, 0)
 	if err == nil {
 		t.Fatalf("SetStatus on missing session: want error, got nil")
 	}
@@ -154,7 +154,7 @@ func TestSetStatusLocatesTicketWhenUnspecified(t *testing.T) {
 
 	if err := agent.SetStatus("", beadsDir,
 		"33333333-3333-4333-8333-333333333333",
-		agent.StatusWaiting, "", "", "", 0); err != nil {
+		agent.StatusWaiting, "", 0); err != nil {
 		t.Fatalf("SetStatus (no ticket id): %v", err)
 	}
 
@@ -314,119 +314,13 @@ func TestSetStatusCLIRejectsUnknownState(t *testing.T) {
 	}
 }
 
-// TestSetStatusRoundTripsWaitingReason covers the legacy WaitingReason
-// round-trip for spec-mode entries: register, flip to waiting with a
-// reason, reload, assert persisted; flip back to running (empty reason),
-// assert cleared. Agent-mode entries have moved to the Conversation array
-// and are covered separately.
-func TestSetStatusRoundTripsWaitingReason(t *testing.T) {
-	t.Parallel()
+// TestSetStatusCLIStopHookToleratesEmptyPayload covers the minimal Stop
+// hook payload (session_id only, no transcript_path): set-status must flip
+// the record to waiting and leave Conversation untouched. Older or partial
+// payloads must not error.
+func TestSetStatusCLIStopHookToleratesEmptyPayload(t *testing.T) {
 	beadsDir := testutil.TestDB(t)
-	ticket := testutil.CreateBeadFull(t, beadsDir, "setstatus-reason", "x", "")
-
-	sid := "abababab-abab-4bab-8bab-ababababab01"
-	if err := agent.RegisterAgent("", beadsDir, ticket, agent.AgentEntry{
-		SessionID: sid, PID: 1, Mode: "spec",
-		StartedAt: "2026-05-15T14:00:00Z", Env: "/env-r",
-		Status: agent.StatusRunning,
-	}); err != nil {
-		t.Fatalf("Register: %v", err)
-	}
-
-	reason := "Waiting for the user to confirm the schema migration."
-	if err := agent.SetStatus("", beadsDir, sid, agent.StatusWaiting, reason, "", ticket, 0); err != nil {
-		t.Fatalf("SetStatus waiting: %v", err)
-	}
-	if got := loadOne(t, beadsDir, ticket); got.WaitingReason != reason {
-		t.Errorf("WaitingReason = %q, want %q", got.WaitingReason, reason)
-	}
-
-	// Back to running: reason must clear so a stale message can't
-	// survive a UserPromptSubmit.
-	if err := agent.SetStatus("", beadsDir, sid, agent.StatusRunning, "", "", ticket, 0); err != nil {
-		t.Fatalf("SetStatus running: %v", err)
-	}
-	got := loadOne(t, beadsDir, ticket)
-	if got.WaitingReason != "" {
-		t.Errorf("WaitingReason after running transition = %q, want empty", got.WaitingReason)
-	}
-	if got.Status != agent.StatusRunning {
-		t.Errorf("Status = %q, want %q", got.Status, agent.StatusRunning)
-	}
-}
-
-// TestSetStatusClearsReasonEvenWhenCallerPassesOne pins the "running implies
-// no reason" rule end-to-end: even a misuse where a reason is passed
-// alongside StatusRunning must clear the stored value.
-func TestSetStatusClearsReasonEvenWhenCallerPassesOne(t *testing.T) {
-	t.Parallel()
-	beadsDir := testutil.TestDB(t)
-	ticket := testutil.CreateBeadFull(t, beadsDir, "setstatus-reason-clear", "x", "")
-
-	sid := "abababab-abab-4bab-8bab-ababababab02"
-	if err := agent.RegisterAgent("", beadsDir, ticket, agent.AgentEntry{
-		SessionID: sid, PID: 1, Mode: "agent",
-		StartedAt: "2026-05-15T14:00:00Z", Env: "/env",
-		Status: agent.StatusWaiting, WaitingReason: "previous turn",
-	}); err != nil {
-		t.Fatalf("Register: %v", err)
-	}
-	if err := agent.SetStatus("", beadsDir, sid, agent.StatusRunning, "ignored", "", ticket, 0); err != nil {
-		t.Fatalf("SetStatus: %v", err)
-	}
-	if got := loadOne(t, beadsDir, ticket); got.WaitingReason != "" {
-		t.Errorf("WaitingReason = %q, want empty", got.WaitingReason)
-	}
-}
-
-func TestSetStatusCLIParsesLastAssistantMessageFromStdin(t *testing.T) {
-	// The hook signature: session_id and last_assistant_message arrive
-	// together on stdin. The CLI must forward the message through to the
-	// stored WaitingReason. Spec-mode round-trip — agent-mode sessions
-	// store the assistant reply in Conversation instead, covered separately.
-	beadsDir := testutil.TestDB(t)
-	ticket := testutil.CreateBeadFull(t, beadsDir, "setstatus-stdin-reason", "x", "")
-
-	sid := "abababab-abab-4bab-8bab-ababababab03"
-	if err := agent.RegisterAgent("", beadsDir, ticket, agent.AgentEntry{
-		SessionID: sid, PID: 1, Mode: "spec",
-		StartedAt: "2026-05-15T14:00:00Z", Env: "/env",
-		Status: agent.StatusRunning,
-	}); err != nil {
-		t.Fatalf("Register: %v", err)
-	}
-
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("pipe: %v", err)
-	}
-	payload := `{"session_id":"abababab-abab-4bab-8bab-ababababab03",` +
-		`"hook_event_name":"Stop",` +
-		`"last_assistant_message":"I have applied the rename and am ready for the next step."}`
-	if _, err := w.Write([]byte(payload)); err != nil {
-		t.Fatalf("write payload: %v", err)
-	}
-	w.Close()
-	origStdin := os.Stdin
-	os.Stdin = r
-	t.Cleanup(func() { os.Stdin = origStdin })
-
-	_, stderr, code := testutil.RunTicketIn(t, beadsDir, "agent", "set-status", "waiting")
-	if code != 0 {
-		t.Fatalf("set-status: exit=%d stderr=%q", code, stderr)
-	}
-	got := loadOne(t, beadsDir, ticket)
-	if got.WaitingReason != "I have applied the rename and am ready for the next step." {
-		t.Errorf("WaitingReason = %q, want the message from stdin", got.WaitingReason)
-	}
-}
-
-func TestSetStatusCLIToleratesMissingLastAssistantMessage(t *testing.T) {
-	// A stdin payload without last_assistant_message must not error — older
-	// hook payloads or non-Stop events (UserPromptSubmit) lack the field
-	// and should still succeed.
-	beadsDir := testutil.TestDB(t)
-	ticket := testutil.CreateBeadFull(t, beadsDir, "setstatus-stdin-noreason", "x", "")
+	ticket := testutil.CreateBeadFull(t, beadsDir, "setstatus-stdin-empty", "x", "")
 
 	sid := "abababab-abab-4bab-8bab-ababababab04"
 	if err := agent.RegisterAgent("", beadsDir, ticket, agent.AgentEntry{
@@ -437,35 +331,28 @@ func TestSetStatusCLIToleratesMissingLastAssistantMessage(t *testing.T) {
 		t.Fatalf("Register: %v", err)
 	}
 
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("pipe: %v", err)
-	}
-	if _, err := w.Write([]byte(`{"session_id":"abababab-abab-4bab-8bab-ababababab04","hook_event_name":"Stop"}`)); err != nil {
-		t.Fatalf("write payload: %v", err)
-	}
-	w.Close()
-	origStdin := os.Stdin
-	os.Stdin = r
-	t.Cleanup(func() { os.Stdin = origStdin })
+	pipeStdin(t, `{"session_id":"`+sid+`","hook_event_name":"Stop"}`)
 
 	_, stderr, code := testutil.RunTicketIn(t, beadsDir, "agent", "set-status", "waiting")
 	if code != 0 {
 		t.Fatalf("set-status: exit=%d stderr=%q", code, stderr)
 	}
-	if got := loadOne(t, beadsDir, ticket); got.WaitingReason != "" {
-		t.Errorf("WaitingReason = %q, want empty when payload omits the field", got.WaitingReason)
+	got := loadOne(t, beadsDir, ticket)
+	if got.Status != agent.StatusWaiting {
+		t.Errorf("Status = %q, want %q", got.Status, agent.StatusWaiting)
+	}
+	if len(got.Conversation) != 0 {
+		t.Errorf("empty-payload Stop should leave Conversation empty, got: %+v", got.Conversation)
 	}
 }
 
-// TestSetStatusCLIAskUserQuestionSource: stdin JSON with session_id and a
-// tool_input.questions[...] block round-trips through set-status with
-// --source ask-user-question. WaitingReason holds the raw tool_input JSON
-// for full fidelity; WaitingReasonSource tags how the table view should
-// render it; FormatWaitingReason picks up the first question's text.
-func TestSetStatusCLIAskUserQuestionSource(t *testing.T) {
+// TestSetStatusCLIAskUserQuestionSpecMode: spec-mode session, PreToolUse
+// :AskUserQuestion hook appends an `ask_user_question` entry exactly like
+// agent mode. The display layer then derives the table summary uniformly
+// from Conversation.
+func TestSetStatusCLIAskUserQuestionSpecMode(t *testing.T) {
 	beadsDir := testutil.TestDB(t)
-	ticket := testutil.CreateBeadFull(t, beadsDir, "setstatus-source-ask", "x", "")
+	ticket := testutil.CreateBeadFull(t, beadsDir, "setstatus-spec-ask", "x", "")
 
 	sid := "abababab-abab-4bab-8bab-ababababab10"
 	if err := agent.RegisterAgent("", beadsDir, ticket, agent.AgentEntry{
@@ -477,8 +364,7 @@ func TestSetStatusCLIAskUserQuestionSource(t *testing.T) {
 	}
 
 	toolInput := `{"questions":[{"question":"Which library should we use for date formatting?","header":"Library","options":[{"label":"date-fns"},{"label":"luxon"}]}]}`
-	payload := `{"session_id":"` + sid + `","hook_event_name":"PreToolUse","tool_input":` + toolInput + `}`
-	pipeStdin(t, payload)
+	pipeStdin(t, `{"session_id":"`+sid+`","hook_event_name":"PreToolUse","tool_input":`+toolInput+`}`)
 
 	_, stderr, code := testutil.RunTicketIn(t, beadsDir,
 		"agent", "set-status", "waiting", "--source", "ask-user-question")
@@ -487,28 +373,19 @@ func TestSetStatusCLIAskUserQuestionSource(t *testing.T) {
 	}
 
 	got := loadOne(t, beadsDir, ticket)
-	if got.WaitingReasonSource != agent.WaitingReasonSourceAskUserQuestion {
-		t.Errorf("WaitingReasonSource = %q, want %q",
-			got.WaitingReasonSource, agent.WaitingReasonSourceAskUserQuestion)
-	}
-	if got.WaitingReason != toolInput {
-		t.Errorf("WaitingReason = %q, want raw tool_input JSON %q", got.WaitingReason, toolInput)
+	if len(got.Conversation) != 1 || got.Conversation[0].Type != agent.ConvTypeAskUserQuestion {
+		t.Fatalf("Conversation = %+v, want a single ask_user_question entry", got.Conversation)
 	}
 	summary := agent.FormatWaitingReason(got)
-	if !strings.HasPrefix(summary, "asking: ") {
-		t.Errorf("FormatWaitingReason = %q, want \"asking: …\" prefix", summary)
-	}
-	if !strings.Contains(summary, "date formatting") {
-		t.Errorf("FormatWaitingReason = %q, want it to mention the question text", summary)
+	if !strings.HasPrefix(summary, "asking: ") || !strings.Contains(summary, "date formatting") {
+		t.Errorf("FormatWaitingReason = %q, want \"asking: …\" with the question text", summary)
 	}
 }
 
-// TestSetStatusCLIExitPlanModeSource: stdin JSON with tool_input.plan
-// parses through; WaitingReason holds the plan body; the table summary
-// starts with "plan: " and quotes the first non-empty line.
-func TestSetStatusCLIExitPlanModeSource(t *testing.T) {
+// TestSetStatusCLIExitPlanModeSpecMode: spec-mode plan-mode entry round-trip.
+func TestSetStatusCLIExitPlanModeSpecMode(t *testing.T) {
 	beadsDir := testutil.TestDB(t)
-	ticket := testutil.CreateBeadFull(t, beadsDir, "setstatus-source-plan", "x", "")
+	ticket := testutil.CreateBeadFull(t, beadsDir, "setstatus-spec-plan", "x", "")
 
 	sid := "abababab-abab-4bab-8bab-ababababab11"
 	if err := agent.RegisterAgent("", beadsDir, ticket, agent.AgentEntry{
@@ -524,8 +401,7 @@ func TestSetStatusCLIExitPlanModeSource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal plan: %v", err)
 	}
-	payload := `{"session_id":"` + sid + `","hook_event_name":"PreToolUse","tool_input":{"plan":` + string(planJSON) + `}}`
-	pipeStdin(t, payload)
+	pipeStdin(t, `{"session_id":"`+sid+`","hook_event_name":"PreToolUse","tool_input":{"plan":`+string(planJSON)+`}}`)
 
 	_, stderr, code := testutil.RunTicketIn(t, beadsDir,
 		"agent", "set-status", "waiting", "--source", "exit-plan-mode")
@@ -534,25 +410,21 @@ func TestSetStatusCLIExitPlanModeSource(t *testing.T) {
 	}
 
 	got := loadOne(t, beadsDir, ticket)
-	if got.WaitingReasonSource != agent.WaitingReasonSourceExitPlanMode {
-		t.Errorf("WaitingReasonSource = %q, want %q",
-			got.WaitingReasonSource, agent.WaitingReasonSourceExitPlanMode)
+	if len(got.Conversation) != 1 || got.Conversation[0].Type != agent.ConvTypeExitPlanMode {
+		t.Fatalf("Conversation = %+v, want a single exit_plan_mode entry", got.Conversation)
 	}
-	if got.WaitingReason != plan {
-		t.Errorf("WaitingReason = %q, want plan body %q", got.WaitingReason, plan)
+	if got.Conversation[0].Plan != plan {
+		t.Errorf("entry.Plan = %q, want %q", got.Conversation[0].Plan, plan)
 	}
-	summary := agent.FormatWaitingReason(got)
-	if summary != "plan: Refactor the auth flow" {
+	if summary := agent.FormatWaitingReason(got); summary != "plan: Refactor the auth flow" {
 		t.Errorf("FormatWaitingReason = %q, want \"plan: Refactor the auth flow\"", summary)
 	}
 }
 
-// TestSetStatusCLIStopFailureSource: stdin JSON with matcher (and optional
-// message) renders as the stored reason; the truncated column shows the
-// bare error type when a matcher is set.
-func TestSetStatusCLIStopFailureSource(t *testing.T) {
+// TestSetStatusCLIStopFailureSpecMode: spec-mode StopFailure entry round-trip.
+func TestSetStatusCLIStopFailureSpecMode(t *testing.T) {
 	beadsDir := testutil.TestDB(t)
-	ticket := testutil.CreateBeadFull(t, beadsDir, "setstatus-source-stopfail", "x", "")
+	ticket := testutil.CreateBeadFull(t, beadsDir, "setstatus-spec-stopfail", "x", "")
 
 	sid := "abababab-abab-4bab-8bab-ababababab12"
 	if err := agent.RegisterAgent("", beadsDir, ticket, agent.AgentEntry{
@@ -563,8 +435,7 @@ func TestSetStatusCLIStopFailureSource(t *testing.T) {
 		t.Fatalf("Register: %v", err)
 	}
 
-	payload := `{"session_id":"` + sid + `","hook_event_name":"StopFailure","matcher":"rate_limit","message":"API rate limit reached"}`
-	pipeStdin(t, payload)
+	pipeStdin(t, `{"session_id":"`+sid+`","hook_event_name":"StopFailure","matcher":"rate_limit","message":"API rate limit reached"}`)
 
 	_, stderr, code := testutil.RunTicketIn(t, beadsDir,
 		"agent", "set-status", "waiting", "--source", "stop-failure")
@@ -573,61 +444,15 @@ func TestSetStatusCLIStopFailureSource(t *testing.T) {
 	}
 
 	got := loadOne(t, beadsDir, ticket)
-	if got.WaitingReasonSource != agent.WaitingReasonSourceStopFailure {
-		t.Errorf("WaitingReasonSource = %q, want %q",
-			got.WaitingReasonSource, agent.WaitingReasonSourceStopFailure)
+	if len(got.Conversation) != 1 || got.Conversation[0].Type != agent.ConvTypeStopFailure {
+		t.Fatalf("Conversation = %+v, want a single stop_failure entry", got.Conversation)
 	}
-	if got.WaitingReason != "rate_limit: API rate limit reached" {
-		t.Errorf("WaitingReason = %q, want \"rate_limit: API rate limit reached\"", got.WaitingReason)
+	if got.Conversation[0].Matcher != "rate_limit" || got.Conversation[0].Message != "API rate limit reached" {
+		t.Errorf("entry = %+v, want matcher=rate_limit message=\"API rate limit reached\"",
+			got.Conversation[0])
 	}
-	// Table cell: per description.md, the stop-failure summary leads with
-	// the matcher (no "asking:" / "plan:" prefix).
-	summary := agent.FormatWaitingReason(got)
-	if !strings.HasPrefix(summary, "rate_limit") {
+	if summary := agent.FormatWaitingReason(got); !strings.HasPrefix(summary, "rate_limit") {
 		t.Errorf("FormatWaitingReason = %q, want it to start with \"rate_limit\"", summary)
-	}
-}
-
-// TestSetStatusRunningClearsReasonAndSource exercises the round-trip
-// described in description.md: a `waiting --source <kind>` populates both
-// fields; a follow-up `running` (from UserPromptSubmit) clears both. This
-// is what guarantees a stale reason from a previous turn doesn't bleed
-// into a "running" row.
-func TestSetStatusRunningClearsReasonAndSource(t *testing.T) {
-	t.Parallel()
-	beadsDir := testutil.TestDB(t)
-	ticket := testutil.CreateBeadFull(t, beadsDir, "setstatus-clear-source", "x", "")
-
-	sid := "abababab-abab-4bab-8bab-ababababab13"
-	if err := agent.RegisterAgent("", beadsDir, ticket, agent.AgentEntry{
-		SessionID: sid, PID: 1, Mode: "spec",
-		StartedAt: "2026-05-15T14:00:00Z", Env: "/env",
-		Status: agent.StatusRunning,
-	}); err != nil {
-		t.Fatalf("Register: %v", err)
-	}
-
-	if err := agent.SetStatus("", beadsDir, sid,
-		agent.StatusWaiting, "rate_limit", agent.WaitingReasonSourceStopFailure,
-		ticket, 0); err != nil {
-		t.Fatalf("SetStatus waiting: %v", err)
-	}
-	got := loadOne(t, beadsDir, ticket)
-	if got.WaitingReason == "" || got.WaitingReasonSource == "" {
-		t.Fatalf("after waiting: reason=%q source=%q, want both populated",
-			got.WaitingReason, got.WaitingReasonSource)
-	}
-
-	if err := agent.SetStatus("", beadsDir, sid,
-		agent.StatusRunning, "", "", ticket, 0); err != nil {
-		t.Fatalf("SetStatus running: %v", err)
-	}
-	got = loadOne(t, beadsDir, ticket)
-	if got.WaitingReason != "" {
-		t.Errorf("WaitingReason = %q, want empty after running", got.WaitingReason)
-	}
-	if got.WaitingReasonSource != "" {
-		t.Errorf("WaitingReasonSource = %q, want empty after running", got.WaitingReasonSource)
 	}
 }
 
@@ -636,15 +461,17 @@ func TestListAgentsTruncatesWaitingReason(t *testing.T) {
 	beadsDir := testutil.TestDB(t)
 	ticket := testutil.CreateBeadFull(t, beadsDir, "list-truncates-reason", "x", "")
 
-	// Reason longer than the column max, with a newline that must be
+	// Reply longer than the column max, with a newline that must be
 	// collapsed to a single space in the table view.
-	reason := "line one is short\nline two adds enough text that the rendered cell goes past the eighty-character cap that the table view enforces"
+	reply := "line one is short\nline two adds enough text that the rendered cell goes past the eighty-character cap that the table view enforces"
 	if err := agent.RegisterAgent("", beadsDir, ticket, agent.AgentEntry{
 		SessionID: "ccccccc1-cccc-4ccc-8ccc-cccccccccccc",
 		PID:       1, Mode: "spec",
 		StartedAt: "2026-05-15T14:00:00Z", Env: "/env",
-		Status:        agent.StatusWaiting,
-		WaitingReason: reason,
+		Status: agent.StatusWaiting,
+		Conversation: []agent.ConvEntry{
+			{Type: agent.ConvTypeAssistantReply, Text: reply},
+		},
 	}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -657,19 +484,19 @@ func TestListAgentsTruncatesWaitingReason(t *testing.T) {
 		t.Errorf("WAITING REASON header missing:\n%s", stdout)
 	}
 	if !strings.Contains(stdout, "line one is short line two") {
-		t.Errorf("collapsed reason missing:\n%s", stdout)
+		t.Errorf("collapsed reply missing:\n%s", stdout)
 	}
 	if strings.Contains(stdout, "\nline two") {
-		t.Errorf("multi-line reason leaked into table view:\n%s", stdout)
+		t.Errorf("multi-line reply leaked into table view:\n%s", stdout)
 	}
 	if !strings.Contains(stdout, "…") {
-		t.Errorf("ellipsis missing for over-long reason:\n%s", stdout)
+		t.Errorf("ellipsis missing for over-long reply:\n%s", stdout)
 	}
 }
 
 func TestListAgentsOmitsReasonForRunningAgent(t *testing.T) {
-	// Only waiting agents own a meaningful reason. A row that's running (or
-	// exited) must have a blank cell even if a stale reason somehow survived.
+	// Only waiting agents render a reason. A row that's running (or exited)
+	// must have a blank cell even if Conversation carries a previous reply.
 	t.Parallel()
 	beadsDir := testutil.TestDB(t)
 	ticket := testutil.CreateBeadFull(t, beadsDir, "list-running-blank-reason", "x", "")
@@ -677,10 +504,12 @@ func TestListAgentsOmitsReasonForRunningAgent(t *testing.T) {
 	if err := agent.RegisterAgent("", beadsDir, ticket, agent.AgentEntry{
 		SessionID: "ccccccc2-cccc-4ccc-8ccc-cccccccccccc",
 		PID:       1, Mode: "agent",
-		StartedAt:     "2026-05-15T14:00:00Z",
-		Env:           "/env",
-		Status:        agent.StatusRunning,
-		WaitingReason: "stale-reason-should-not-render",
+		StartedAt: "2026-05-15T14:00:00Z",
+		Env:       "/env",
+		Status:    agent.StatusRunning,
+		Conversation: []agent.ConvEntry{
+			{Type: agent.ConvTypeAssistantReply, Text: "stale-reply-should-not-render"},
+		},
 	}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -689,8 +518,8 @@ func TestListAgentsOmitsReasonForRunningAgent(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("agent list: exit=%d stderr=%q", code, stderr)
 	}
-	if strings.Contains(stdout, "stale-reason-should-not-render") {
-		t.Errorf("running row leaked a stale reason:\n%s", stdout)
+	if strings.Contains(stdout, "stale-reply-should-not-render") {
+		t.Errorf("running row leaked a previous reply:\n%s", stdout)
 	}
 }
 
@@ -703,10 +532,12 @@ func TestAgentStatusCLIPrintsFullReason(t *testing.T) {
 	if err := agent.RegisterAgent("", beadsDir, ticket, agent.AgentEntry{
 		SessionID: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
 		PID:       1, Mode: "spec",
-		StartedAt:     "2026-05-15T14:00:00Z",
-		Env:           "/env",
-		Status:        agent.StatusWaiting,
-		WaitingReason: full,
+		StartedAt: "2026-05-15T14:00:00Z",
+		Env:       "/env",
+		Status:    agent.StatusWaiting,
+		Conversation: []agent.ConvEntry{
+			{Type: agent.ConvTypeAssistantReply, Text: full},
+		},
 	}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -716,9 +547,9 @@ func TestAgentStatusCLIPrintsFullReason(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("agent status: exit=%d stderr=%q", code, stderr)
 	}
-	// Full reason, including its embedded newline, must appear verbatim.
+	// Full reply, including its embedded newline, must appear verbatim.
 	if !strings.Contains(stdout, full) {
-		t.Errorf("untruncated reason missing from output:\n%s", stdout)
+		t.Errorf("untruncated reply missing from output:\n%s", stdout)
 	}
 	for _, want := range []string{"dddddddd-dddd-4ddd-8ddd-dddddddddddd", "spec", "waiting"} {
 		if !strings.Contains(stdout, want) {
@@ -759,13 +590,15 @@ func TestAgentStatusCLIJSONShape(t *testing.T) {
 	ticket := testutil.CreateBeadFull(t, beadsDir, "agent-status-json", "x", "")
 
 	sid := "f1f1f1f1-f1f1-4f1f-8f1f-f1f1f1f1f1f1"
-	reason := "Waiting on user input for X."
+	reply := "Waiting on user input for X."
 	if err := agent.RegisterAgent("", beadsDir, ticket, agent.AgentEntry{
 		SessionID: sid, PID: 1, Mode: "agent",
-		StartedAt:     "2026-05-15T14:00:00Z",
-		Env:           "/env",
-		Status:        agent.StatusWaiting,
-		WaitingReason: reason,
+		StartedAt: "2026-05-15T14:00:00Z",
+		Env:       "/env",
+		Status:    agent.StatusWaiting,
+		Conversation: []agent.ConvEntry{
+			{Type: agent.ConvTypeAssistantReply, Text: reply},
+		},
 	}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -782,37 +615,9 @@ func TestAgentStatusCLIJSONShape(t *testing.T) {
 	if got.SessionID != sid {
 		t.Errorf("SessionID = %q, want %q", got.SessionID, sid)
 	}
-	if got.WaitingReason != reason {
-		t.Errorf("WaitingReason = %q, want %q", got.WaitingReason, reason)
-	}
-}
-
-func TestAgentListJSONExposesWaitingReason(t *testing.T) {
-	t.Parallel()
-	beadsDir := testutil.TestDB(t)
-	ticket := testutil.CreateBeadFull(t, beadsDir, "agent-list-json-reason", "x", "")
-
-	reason := "Need confirmation before I drop the old column."
-	if err := agent.RegisterAgent("", beadsDir, ticket, agent.AgentEntry{
-		SessionID: "aaaa1111-aaaa-4aaa-8aaa-aaaa11111111", PID: 1, Mode: "agent",
-		StartedAt:     "2026-05-15T14:00:00Z",
-		Env:           "/env",
-		Status:        agent.StatusWaiting,
-		WaitingReason: reason,
-	}); err != nil {
-		t.Fatalf("Register: %v", err)
-	}
-
-	stdout, stderr, code := testutil.RunTicketIn(t, beadsDir, "agent", "list", ticket, "--json")
-	if code != 0 {
-		t.Fatalf("agent list --json: exit=%d stderr=%q", code, stderr)
-	}
-	var entries []agent.AgentEntry
-	if err := json.Unmarshal([]byte(stdout), &entries); err != nil {
-		t.Fatalf("parse json: %v\n%s", err, stdout)
-	}
-	if len(entries) != 1 || entries[0].WaitingReason != reason {
-		t.Errorf("entries = %+v, want one with WaitingReason=%q", entries, reason)
+	if len(got.Conversation) != 1 || got.Conversation[0].Text != reply {
+		t.Errorf("Conversation = %+v, want a single assistant_reply with %q",
+			got.Conversation, reply)
 	}
 }
 

@@ -29,7 +29,7 @@ func TestSetStatusPersistsContextTokens(t *testing.T) {
 		t.Fatalf("Register: %v", err)
 	}
 
-	if err := agent.SetStatus("", beadsDir, sid, agent.StatusWaiting, "", "", ticket, 53000); err != nil {
+	if err := agent.SetStatus("", beadsDir, sid, agent.StatusWaiting, ticket, 53000); err != nil {
 		t.Fatalf("SetStatus #1: %v", err)
 	}
 	got := loadOne(t, beadsDir, ticket)
@@ -43,7 +43,7 @@ func TestSetStatusPersistsContextTokens(t *testing.T) {
 
 	// Same value: idempotent. Re-run set-status with the same count;
 	// timestamp must not advance.
-	if err := agent.SetStatus("", beadsDir, sid, agent.StatusWaiting, "", "", ticket, 53000); err != nil {
+	if err := agent.SetStatus("", beadsDir, sid, agent.StatusWaiting, ticket, 53000); err != nil {
 		t.Fatalf("SetStatus #2 (idempotent): %v", err)
 	}
 	if got2 := loadOne(t, beadsDir, ticket); got2.ContextTokensUpdatedAt != firstTimestamp {
@@ -52,7 +52,7 @@ func TestSetStatusPersistsContextTokens(t *testing.T) {
 	}
 
 	// New value: overwrites.
-	if err := agent.SetStatus("", beadsDir, sid, agent.StatusWaiting, "", "", ticket, 180_000); err != nil {
+	if err := agent.SetStatus("", beadsDir, sid, agent.StatusWaiting, ticket, 180_000); err != nil {
 		t.Fatalf("SetStatus #3 (overwrite): %v", err)
 	}
 	if got3 := loadOne(t, beadsDir, ticket); got3.ContextTokens != 180_000 {
@@ -78,10 +78,10 @@ func TestSetStatusContextTokensSurviveRunningTransition(t *testing.T) {
 		t.Fatalf("Register: %v", err)
 	}
 
-	if err := agent.SetStatus("", beadsDir, sid, agent.StatusWaiting, "", "", ticket, 42_000); err != nil {
+	if err := agent.SetStatus("", beadsDir, sid, agent.StatusWaiting, ticket, 42_000); err != nil {
 		t.Fatalf("SetStatus waiting: %v", err)
 	}
-	if err := agent.SetStatus("", beadsDir, sid, agent.StatusRunning, "", "", ticket, 0); err != nil {
+	if err := agent.SetStatus("", beadsDir, sid, agent.StatusRunning, ticket, 0); err != nil {
 		t.Fatalf("SetStatus running: %v", err)
 	}
 	got := loadOne(t, beadsDir, ticket)

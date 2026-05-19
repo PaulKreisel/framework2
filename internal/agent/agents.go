@@ -28,15 +28,9 @@ import (
 //
 // Conversation is the append-only history of user prompts, assistant text
 // segments, AskUserQuestion / ExitPlanMode invocations, and StopFailure
-// events. Only [Mode] == "agent" sessions accumulate entries; spec-mode
-// sessions leave it empty and continue to use [WaitingReason] /
-// [WaitingReasonSource] for the waiting-reason render path.
-//
-// WaitingReason / WaitingReasonSource are the legacy single-value fields the
-// Stop / PreToolUse / StopFailure hooks used to overwrite each turn. They are
-// retained for spec-mode sessions. Agent-mode sessions leave these empty and
+// events. Both agent-mode and spec-mode sessions accumulate entries here;
 // the display layer derives the waiting-reason summary from the tail of
-// [Conversation] instead.
+// this array for every session record.
 type AgentEntry struct {
 	SessionID              string      `json:"sessionId"`
 	PID                    int         `json:"pid"`
@@ -45,8 +39,6 @@ type AgentEntry struct {
 	Env                    string      `json:"env"`
 	Status                 string      `json:"status,omitempty"`
 	StatusUpdatedAt        string      `json:"statusUpdatedAt,omitempty"`
-	WaitingReason          string      `json:"waitingReason,omitempty"`
-	WaitingReasonSource    string      `json:"waitingReasonSource,omitempty"`
 	ContextTokens          int         `json:"contextTokens,omitempty"`
 	ContextTokensUpdatedAt string      `json:"contextTokensUpdatedAt,omitempty"`
 	Conversation           []ConvEntry `json:"conversation,omitempty"`
@@ -77,10 +69,12 @@ const (
 	ConvTypeStopFailure      = "stop_failure"
 )
 
-// WaitingReason source tags. Empty means the legacy form — the Stop hook's
-// captured assistant message — and is rendered as-is. The named sources
-// flag richer payloads (raw tool_input JSON, plan markdown, or a
-// matcher[:message] string) and route through source-aware formatting.
+// Source tags passed as the `--source` flag to `ticket agent set-status
+// waiting`. Empty means the Stop hook (the trailing assistant text segments
+// are reconciled from the transcript into `assistant_comment` /
+// `assistant_reply` entries). The named sources flag richer payloads (raw
+// tool_input JSON, plan markdown, or a matcher / message pair) and select
+// the corresponding [ConvEntry] type.
 const (
 	WaitingReasonSourceAskUserQuestion = "ask-user-question"
 	WaitingReasonSourceExitPlanMode    = "exit-plan-mode"
@@ -261,33 +255,21 @@ var ErrSessionNotFound = errors.New("no agent record found for session")
 // and optionally its ContextTokens / ContextTokensUpdatedAt when
 // contextTokens > 0. Lookup is by sessionID; ticketID, if non-empty, scopes
 // the search to a single ticket. With ticketID empty all open tickets are
-// scanned. A no-op (Status already equal to status, reason already equal to
-// the stored value, contextTokens either 0 or already equal to the stored
-// value) is fast-pathed without touching the bead. Returns
-// [ErrSessionNotFound] when no record matches.
-//
-// reason and source describe what claude is waiting on. reason is either
-// the assistant's last message (Stop hook, source == "") or a richer
-// payload chosen by the caller — raw tool_input JSON, plan markdown, or
-// a stop-failure matcher line. Both are only meaningful when
-// status == [StatusWaiting]; on a transition back to [StatusRunning] they
-// are cleared so a stale value can't survive a UserPromptSubmit.
+// scanned. A no-op (Status already equal to status, contextTokens either 0
+// or already equal to the stored value) is fast-pathed without touching the
+// bead. Returns [ErrSessionNotFound] when no record matches.
 //
 // contextTokens is treated as an absolute snapshot, not a delta — a hook
 // retry passing the same value is idempotent. 0 means "no token information
 // available, leave ContextTokens unchanged"; callers that have a real zero
 // reading shouldn't happen in practice (every Claude turn has at least
 // output_tokens > 0).
-func SetStatus(db, beadsDir, sessionID, status, reason, source, ticketID string, contextTokens int) error {
+func SetStatus(db, beadsDir, sessionID, status, ticketID string, contextTokens int) error {
 	if sessionID == "" {
 		return errors.New("session id required")
 	}
 	if status == "" {
 		return errors.New("status required")
-	}
-	if status != StatusWaiting {
-		reason = ""
-		source = ""
 	}
 	tickets := []string{ticketID}
 	if ticketID == "" {
@@ -307,30 +289,14 @@ func SetStatus(db, beadsDir, sessionID, status, reason, source, ticketID string,
 			if e.SessionID != sessionID {
 				continue
 			}
-			// Agent-mode records have moved to the Conversation array;
-			// WaitingReason / WaitingReasonSource are not written for them
-			// (and any pre-existing value from a legacy entry is cleared on
-			// the next status transition so a stale string can't render).
-			effReason, effSource := reason, source
-			if e.Mode == "agent" {
-				effReason, effSource = "", ""
-			}
 			statusChanged := e.Status != status
-			reasonChanged := e.WaitingReason != effReason
-			sourceChanged := e.WaitingReasonSource != effSource
 			tokensChanged := contextTokens > 0 && contextTokens != e.ContextTokens
-			if !statusChanged && !reasonChanged && !sourceChanged && !tokensChanged {
+			if !statusChanged && !tokensChanged {
 				return nil
 			}
-			if statusChanged || reasonChanged || sourceChanged {
+			if statusChanged {
 				entries[i].Status = status
 				entries[i].StatusUpdatedAt = now
-			}
-			if reasonChanged {
-				entries[i].WaitingReason = effReason
-			}
-			if sourceChanged {
-				entries[i].WaitingReasonSource = effSource
 			}
 			if tokensChanged {
 				entries[i].ContextTokens = contextTokens
@@ -344,9 +310,8 @@ func SetStatus(db, beadsDir, sessionID, status, reason, source, ticketID string,
 
 // AppendConversation appends entries to the matching agent record's
 // [AgentEntry.Conversation] array and refreshes [AgentEntry.ContextTokens]
-// when contextTokens > 0. Only agent-mode records are touched: spec-mode
-// records keep the legacy waiting-reason mechanism, so the call is a silent
-// no-op there. Returns [ErrSessionNotFound] when no record matches.
+// when contextTokens > 0. Both agent-mode and spec-mode records accumulate
+// entries the same way. Returns [ErrSessionNotFound] when no record matches.
 //
 // Lookup is by sessionID; ticketID, if non-empty, scopes the search to one
 // ticket. With ticketID empty all non-closed tickets are scanned (same shape
@@ -385,11 +350,6 @@ func AppendConversation(db, beadsDir, sessionID, ticketID string, transcriptAssi
 		for i, e := range records {
 			if e.SessionID != sessionID {
 				continue
-			}
-			if e.Mode != "" && e.Mode != "agent" {
-				// Spec mode keeps the legacy WaitingReason path. Nothing to
-				// append; ContextTokens still flows through SetStatus.
-				return nil
 			}
 			updated := records[i]
 			changed := false
@@ -496,12 +456,9 @@ const waitingReasonTableMax = 80
 // [StatusWaiting]: only waiting agents own a meaningful reason, and a stale
 // reason from a previous turn must not bleed into a "running"/"exited" row.
 //
-// Agent-mode entries derive the summary from the tail of
-// [AgentEntry.Conversation] — the most recent wait-representing entry
-// (`assistant_reply`, `ask_user_question`, `exit_plan_mode`, `stop_failure`)
-// supplies the value. Spec-mode entries (and pre-Conversation legacy
-// records with an empty array) fall back to the
-// [AgentEntry.WaitingReasonSource] / [AgentEntry.WaitingReason] pair.
+// The summary is derived from the tail of [AgentEntry.Conversation] — the
+// most recent wait-representing entry (`assistant_reply`, `ask_user_question`,
+// `exit_plan_mode`, `stop_failure`) supplies the value.
 func FormatWaitingReason(e AgentEntry) string {
 	if StateOf(e) != StatusWaiting {
 		return ""
@@ -512,58 +469,14 @@ func FormatWaitingReason(e AgentEntry) string {
 
 // WaitingReasonSummary returns the untruncated, single-source-of-truth
 // waiting-reason summary for e. It is the value that
-// [FormatWaitingReason] truncates for the table cell, and that
-// [Status] (agent status --json / human form) emits verbatim. Empty when
-// no wait-representing entry exists.
+// [FormatWaitingReason] truncates for the table cell. Empty when no
+// wait-representing entry exists.
 //
-// Agent-mode lookup: walk Conversation from the tail, pick the first entry
-// of a wait-representing type, summarise according to that type. Spec mode
-// (and legacy records that predate the array): use WaitingReasonSource /
-// WaitingReason as before.
+// Walks Conversation from the tail, picks the first entry of a
+// wait-representing type, and summarises according to that type.
 func WaitingReasonSummary(e AgentEntry) string {
-	if e.Mode == "agent" {
-		return waitingReasonFromConversation(e.Conversation)
-	}
-	return summarizeWaitingReason(e.WaitingReasonSource, e.WaitingReason)
-}
-
-// WaitingReasonFull returns the untruncated raw payload for the most recent
-// wait-representing conversation entry (agent mode) or the stored
-// [AgentEntry.WaitingReason] (spec mode). Used by `agent status` to print a
-// full-fidelity block under the metadata.
-func WaitingReasonFull(e AgentEntry) string {
-	if e.Mode != "agent" {
-		return e.WaitingReason
-	}
 	for i := len(e.Conversation) - 1; i >= 0; i-- {
 		c := e.Conversation[i]
-		switch c.Type {
-		case ConvTypeAssistantReply:
-			return c.Text
-		case ConvTypeAskUserQuestion:
-			return string(c.Input)
-		case ConvTypeExitPlanMode:
-			return c.Plan
-		case ConvTypeStopFailure:
-			if c.Matcher != "" && c.Message != "" {
-				return c.Matcher + ": " + c.Message
-			}
-			if c.Matcher != "" {
-				return c.Matcher
-			}
-			return c.Message
-		}
-	}
-	return ""
-}
-
-// waitingReasonFromConversation walks conv from the tail and renders the
-// short table summary for the most recent wait-representing entry. Returns
-// "" when no such entry exists (e.g. a brand-new session that has only
-// captured a `user` entry so far).
-func waitingReasonFromConversation(conv []ConvEntry) string {
-	for i := len(conv) - 1; i >= 0; i-- {
-		c := conv[i]
 		switch c.Type {
 		case ConvTypeAssistantReply:
 			return c.Text
@@ -590,26 +503,30 @@ func waitingReasonFromConversation(conv []ConvEntry) string {
 	return ""
 }
 
-// summarizeWaitingReason maps a (source, raw payload) pair to the short
-// human-readable form shown in the table. The raw payload stays in
-// [AgentEntry.WaitingReason] so `agent status` keeps full fidelity.
-func summarizeWaitingReason(source, raw string) string {
-	switch source {
-	case WaitingReasonSourceAskUserQuestion:
-		if q := firstAskQuestion(raw); q != "" {
-			return "asking: " + q
+// WaitingReasonFull returns the untruncated raw payload for the most recent
+// wait-representing conversation entry. Used by `agent status` to print a
+// full-fidelity block under the metadata.
+func WaitingReasonFull(e AgentEntry) string {
+	for i := len(e.Conversation) - 1; i >= 0; i-- {
+		c := e.Conversation[i]
+		switch c.Type {
+		case ConvTypeAssistantReply:
+			return c.Text
+		case ConvTypeAskUserQuestion:
+			return string(c.Input)
+		case ConvTypeExitPlanMode:
+			return c.Plan
+		case ConvTypeStopFailure:
+			if c.Matcher != "" && c.Message != "" {
+				return c.Matcher + ": " + c.Message
+			}
+			if c.Matcher != "" {
+				return c.Matcher
+			}
+			return c.Message
 		}
-		return "asking"
-	case WaitingReasonSourceExitPlanMode:
-		if line := firstNonEmptyLine(raw); line != "" {
-			return "plan: " + line
-		}
-		return "plan"
-	case WaitingReasonSourceStopFailure:
-		return raw
-	default:
-		return raw
 	}
+	return ""
 }
 
 // firstAskQuestion parses the AskUserQuestion tool_input JSON and returns

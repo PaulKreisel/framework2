@@ -13,8 +13,7 @@ import (
 
 // TestAppendConversationUserEntryFromUserPromptSubmit covers the
 // UserPromptSubmit hook signature: stdin carries session_id and prompt; the
-// agent record (mode=agent) gains a `user` entry whose Prompt field round-
-// trips. Spec-mode records continue to ignore the new array.
+// agent record gains a `user` entry whose Prompt field round-trips.
 func TestAppendConversationUserEntryFromUserPromptSubmit(t *testing.T) {
 	beadsDir := testutil.TestDB(t)
 	ticket := testutil.CreateBeadFull(t, beadsDir, "conv-user-prompt", "x", "")
@@ -52,12 +51,13 @@ func TestAppendConversationUserEntryFromUserPromptSubmit(t *testing.T) {
 	}
 }
 
-// TestAppendConversationSpecModeIgnored: spec-mode records still use
-// WaitingReason / WaitingReasonSource, not Conversation. A UserPromptSubmit
-// hook firing for a spec-mode session must leave the array empty.
-func TestAppendConversationSpecModeIgnored(t *testing.T) {
+// TestAppendConversationSpecModeAlsoAccumulates: spec-mode records use the
+// same Conversation array as agent-mode records. A UserPromptSubmit hook
+// firing for a spec-mode session must append a `user` entry just like in
+// agent mode.
+func TestAppendConversationSpecModeAlsoAccumulates(t *testing.T) {
 	beadsDir := testutil.TestDB(t)
-	ticket := testutil.CreateBeadFull(t, beadsDir, "conv-spec-noop", "x", "")
+	ticket := testutil.CreateBeadFull(t, beadsDir, "conv-spec-accumulates", "x", "")
 
 	sid := "22222222-2222-4aaa-8aaa-conv22222222"
 	if err := agent.RegisterAgent("", beadsDir, ticket, agent.AgentEntry{
@@ -76,8 +76,14 @@ func TestAppendConversationSpecModeIgnored(t *testing.T) {
 		t.Fatalf("set-status: exit=%d stderr=%q", code, stderr)
 	}
 	got := loadOne(t, beadsDir, ticket)
-	if len(got.Conversation) != 0 {
-		t.Errorf("spec-mode Conversation populated: %+v", got.Conversation)
+	if len(got.Conversation) != 1 {
+		t.Fatalf("Conversation length = %d, want 1: %+v", len(got.Conversation), got.Conversation)
+	}
+	if got.Conversation[0].Type != agent.ConvTypeUser {
+		t.Errorf("entry type = %q, want %q", got.Conversation[0].Type, agent.ConvTypeUser)
+	}
+	if got.Conversation[0].Prompt != "please refactor" {
+		t.Errorf("entry prompt = %q, want %q", got.Conversation[0].Prompt, "please refactor")
 	}
 }
 
@@ -148,11 +154,6 @@ func TestAppendConversationStopAppendsAssistantSegments(t *testing.T) {
 	// assistant message's usage).
 	if got.ContextTokens != 220 {
 		t.Errorf("global ContextTokens = %d, want 220", got.ContextTokens)
-	}
-	// Agent-mode entry: WaitingReason must stay empty (replaced by the
-	// Conversation array).
-	if got.WaitingReason != "" {
-		t.Errorf("WaitingReason = %q, want empty for agent mode", got.WaitingReason)
 	}
 }
 

@@ -51,9 +51,9 @@ func Status(db, beadsDir, ticketID, sessionID string, jsonOutput bool, stdout io
 }
 
 // renderStatusBlock prints the human-readable form: a `KEY: value` block for
-// the metadata followed by the full WaitingReason verbatim (empty when the
-// agent isn't waiting). The reason is emitted last and unindented so a
-// multi-line assistant message reads naturally.
+// the metadata followed by the full waiting-reason payload verbatim (empty
+// when the agent isn't waiting). The reason is emitted last and unindented
+// so a multi-line assistant message reads naturally.
 func renderStatusBlock(e AgentEntry, stdout io.Writer) error {
 	fields := [][2]string{
 		{"Session ID", e.SessionID},
