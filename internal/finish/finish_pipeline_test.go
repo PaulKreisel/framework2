@@ -123,6 +123,63 @@ func TestFinishWithoutPipelineMDIsNoop(t *testing.T) {
 	}
 }
 
+// TestPipelineAsyncSubcommandExecutesPayload verifies the hidden
+// `ticket pipeline-async --payload <file>` entrypoint: the runner that the
+// async-mode `this finish` spawns. We bypass the subprocess detach (which is
+// guarded off under `go test`) and call the subcommand in-process with a
+// hand-crafted payload, then assert it ran the command and filed a bug bead
+// on failure.
+func TestPipelineAsyncSubcommandExecutesPayload(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	parent := testutil.CreateBead(t, beadsDir, "pipeline-async-parent")
+	bare := bareRepo(t, "main")
+	mustRunTicket(t, beadsDir, "dir", "worktree", parent, bare)
+	parentWT := worktreePath(bare, parent)
+	parentBranch := "todo/" + parent
+
+	payload := map[string]any{
+		"ticket_id": parent,
+		"tasks": []map[string]any{{
+			"entry": map[string]any{
+				"Branch":  parentBranch,
+				"Command": "echo boom-async-marker\nexit 9\n",
+			},
+			"parent": map[string]any{
+				"path":     parentWT,
+				"branch":   parentBranch,
+				"bareRepo": bare,
+			},
+		}},
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	payloadPath := filepath.Join(t.TempDir(), "payload.json")
+	if err := os.WriteFile(payloadPath, body, 0o644); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+
+	if _, stderr, code := testutil.RunTicketIn(t, beadsDir, "pipeline-async", "--payload", payloadPath); code != 0 {
+		t.Fatalf("pipeline-async exit=%d stderr=%q", code, stderr)
+	}
+	if _, err := os.Stat(payloadPath); !os.IsNotExist(err) {
+		t.Errorf("payload file %s should have been removed by the runner (err=%v)", payloadPath, err)
+	}
+
+	bugs := findBugsLinkedTo(t, beadsDir, parent)
+	if len(bugs) != 1 {
+		t.Fatalf("expected one bug bead linked to %s, got %v", parent, bugs)
+	}
+	desc := beadDescription(t, beadsDir, bugs[0])
+	for _, want := range []string{"exit code: 9", "boom-async-marker", parent, parentWT} {
+		if !strings.Contains(desc, want) {
+			t.Errorf("bug description missing %q in:\n%s", want, desc)
+		}
+	}
+}
+
 // --- helpers ---
 
 func writePipelineMD(t *testing.T, bare, body string) {

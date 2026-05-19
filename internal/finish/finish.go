@@ -300,43 +300,18 @@ func bdClose(db, beadsDir, ticketID string) error {
 // ticketID via `blocked-by`. Pipeline failures do NOT abort the finish — by
 // design the next session picks the bug bead up.
 //
-// Errors here are limited to "could not parse pipeline.md" or "could not
-// spawn bd to create the bug bead" — i.e. infrastructural problems that
-// shouldn't be silently swallowed. A non-zero pipeline exit goes through the
-// bug-bead path instead.
+// In production the execution is dispatched to a detached subprocess so
+// `this finish` returns immediately rather than blocking on potentially
+// long-running commands (e.g. `make install`). Under `go test` the work
+// runs inline so existing outcome-based tests remain synchronous; see
+// [runPipelinesDispatch] for the split.
+//
+// Errors here are limited to "could not parse pipeline.md", "could not
+// launch the async runner" or "could not spawn bd to create the bug bead"
+// — i.e. infrastructural problems that shouldn't be silently swallowed. A
+// non-zero pipeline exit goes through the bug-bead path inside the runner.
 func runPipelines(db, beadsDir, ticketID string, parentTargets []dir.Entry, stdout io.Writer) error {
-	seen := map[string]bool{}
-	for _, pe := range parentTargets {
-		if seen[pe.BareRepo] {
-			// One pipeline.md per bare repo; the parent's branch in each
-			// bare is identical across child entries (a bare can only check
-			// out one branch in a given worktree), so we skip duplicates.
-			continue
-		}
-		seen[pe.BareRepo] = true
-
-		entries, err := pipeline.Load(pe.BareRepo)
-		if err != nil {
-			return err
-		}
-		entry, ok := pipeline.Match(entries, pe.Branch)
-		if !ok {
-			continue
-		}
-		fmt.Fprintf(stdout, "pipeline %s @ %s: running\n", pe.Branch, pe.Path)
-		res := pipeline.Run(entry, pe.Path)
-		if !res.Failed() {
-			fmt.Fprintf(stdout, "pipeline %s @ %s: ok\n", pe.Branch, pe.Path)
-			continue
-		}
-		fmt.Fprintf(stdout, "pipeline %s @ %s: FAILED (exit=%d)\n", pe.Branch, pe.Path, res.ExitCode)
-		bugID, err := createBugBead(db, beadsDir, ticketID, pe, res)
-		if err != nil {
-			return fmt.Errorf("record pipeline failure for %s: %w", ticketID, err)
-		}
-		fmt.Fprintf(stdout, "pipeline failure recorded as %s\n", bugID)
-	}
-	return nil
+	return runPipelinesDispatch(db, beadsDir, ticketID, parentTargets, stdout)
 }
 
 // createBugBead spawns a `bd create -t bug` whose description carries the

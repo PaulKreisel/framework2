@@ -265,6 +265,11 @@ func dispatch(beadsDir string, args []string, stdout, stderr io.Writer) error {
 		return runNext(db, beadsDir, ticket, rest[1:], stdout, stderr)
 	case "finish":
 		return runFinish(db, beadsDir, ticket, rest[1:], stdout)
+	case "pipeline-async":
+		// Hidden subcommand: detached runner spawned by `finish` to execute
+		// pipeline.md commands after the parent process has exited. Not
+		// listed in `usage` on purpose — users never invoke it directly.
+		return runPipelineAsync(db, beadsDir, rest[1:], stdout)
 	case "-h", "--help", "help":
 		fmt.Fprintln(stdout, usage)
 		return nil
@@ -946,6 +951,26 @@ func runFinish(db, beadsDir, ticket string, args []string, stdout io.Writer) err
 		return err
 	}
 	return finish.Run(db, beadsDir, id, continueMode, stdout)
+}
+
+func runPipelineAsync(db, beadsDir string, args []string, stdout io.Writer) error {
+	var payload string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--payload":
+			if i+1 >= len(args) {
+				return errors.New("pipeline-async: --payload needs a value")
+			}
+			payload = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--payload="):
+			payload = strings.TrimPrefix(a, "--payload=")
+		default:
+			return fmt.Errorf("pipeline-async: unknown argument %q", a)
+		}
+	}
+	return finish.RunAsync(db, beadsDir, payload, stdout)
 }
 
 func runNext(db, beadsDir, ticket string, args []string, stdout, stderr io.Writer) error {
