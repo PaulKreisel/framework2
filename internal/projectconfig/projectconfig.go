@@ -18,9 +18,12 @@
 //
 // Placeholders supported in templates:
 //
-//	{id}            jira-id if present on the bead, else bead-id
+//	{id}            "<jira-id>-<bead-id>" when a jira-id is available
+//	                (inherited from the nearest ancestor, including the bead
+//	                itself), else just the bead-id
 //	{bead-id}       bead id
-//	{jira-id}       jira issue key parsed from external_ref, or empty
+//	{jira-id}       jira issue key inherited from the nearest ancestor with
+//	                an external_ref pointing at /browse/<KEY>, or empty
 //	{slug}          slug from bead metadata, possibly empty
 //	{type}          raw bead issue_type ("feature", "task", "bug", ...)
 //	{type-prefix}   bead type mapped through type-prefix (default: enh/fix/todo)
@@ -59,13 +62,14 @@ type WorktreeConfig struct {
 	Path   string `yaml:"path"`
 }
 
-// DefaultBranchTemplate matches the pre-config behavior of slug.Branch.
-const DefaultBranchTemplate = "{type-prefix}/{bead-id}-{slug}"
+// DefaultBranchTemplate uses {id} so the Jira issue key (inherited from any
+// ancestor) is included whenever one is available — the prepare-commit-msg
+// hook in repos like knime-core-ui needs that key in the branch name.
+const DefaultBranchTemplate = "{type-prefix}/{id}-{slug}"
 
-// DefaultPathTemplate matches the pre-config behavior of the old internal
-// worktreePath helper: sibling of the bare repo, named
-// `<bare-basename-without-.git>-<bead-id>[-<slug>]`.
-const DefaultPathTemplate = "{bare-repo-dir}/{bare-repo-name}-{bead-id}-{slug}"
+// DefaultPathTemplate mirrors DefaultBranchTemplate's use of {id}: sibling of
+// the bare repo, named `<bare-basename-without-.git>-<id>[-<slug>]`.
+const DefaultPathTemplate = "{bare-repo-dir}/{bare-repo-name}-{id}-{slug}"
 
 // Defaults returns a Config populated with the built-in templates and an
 // empty TypePrefix map (which means: fall through to slug.BranchPrefix).
@@ -145,7 +149,7 @@ func (c Config) RenderPath(v Vars) (string, error) {
 func (c Config) render(tmpl string, v Vars) (string, error) {
 	bareDir, bareName := splitBare(v.BareRepoPath)
 	values := map[string]string{
-		"id":             firstNonEmpty(v.JiraID, v.BeadID),
+		"id":             combinedID(v.JiraID, v.BeadID),
 		"bead-id":        v.BeadID,
 		"jira-id":        v.JiraID,
 		"slug":           v.Slug,
@@ -155,6 +159,20 @@ func (c Config) render(tmpl string, v Vars) (string, error) {
 		"bare-repo-name": bareName,
 	}
 	return substitute(tmpl, values)
+}
+
+// combinedID returns "<jiraID>-<beadID>" when jiraID is non-empty, else just
+// beadID. The Jira id is always included alongside the bead id so prepare-
+// commit-msg hooks that scan branch names for an issue key keep working even
+// when a bead inherits its Jira id from an ancestor.
+func combinedID(jiraID, beadID string) string {
+	if jiraID == "" {
+		return beadID
+	}
+	if beadID == "" {
+		return jiraID
+	}
+	return jiraID + "-" + beadID
 }
 
 // substitute walks tmpl and replaces every `{name}` with values[name]. If a
@@ -204,13 +222,6 @@ func splitBare(bare string) (string, string) {
 	dir := filepath.Dir(bare)
 	base := strings.TrimSuffix(filepath.Base(bare), ".git")
 	return dir, base
-}
-
-func firstNonEmpty(a, b string) string {
-	if a != "" {
-		return a
-	}
-	return b
 }
 
 // JiraIDFromExternalRef extracts the issue key from a Jira browse URL such as

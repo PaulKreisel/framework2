@@ -6,6 +6,7 @@ import (
 	"os/exec"
 
 	"framework2/internal/bdcli"
+	"framework2/internal/projectconfig"
 )
 
 // Load returns the linked-dir entries stored under the ticket's metadata.dirs
@@ -67,6 +68,24 @@ func parentID(db, beadsDir, ticketID string) (string, error) {
 		return "", err
 	}
 	return row.Parent, nil
+}
+
+// AncestorJiraID walks the chain starting at ticketID (inclusive) toward the
+// root and returns the first non-empty Jira issue key extracted from the
+// bead's external_ref. Returns "" when no ancestor carries a Jira id.
+func AncestorJiraID(db, beadsDir, ticketID string) (string, error) {
+	cur := ticketID
+	for cur != "" {
+		row, err := showTicket(db, beadsDir, cur)
+		if err != nil {
+			return "", err
+		}
+		if jid := projectconfig.JiraIDFromExternalRef(row.ExternalRef); jid != "" {
+			return jid, nil
+		}
+		cur = row.Parent
+	}
+	return "", nil
 }
 
 type ticketRow struct {

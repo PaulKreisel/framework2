@@ -82,9 +82,13 @@ func ensureWorktree(db, beadsDir, ticketID, bare string, cfg projectconfig.Confi
 	if err != nil {
 		return "", err
 	}
+	jiraID, err := AncestorJiraID(db, beadsDir, ticketID)
+	if err != nil {
+		return "", err
+	}
 	vars := projectconfig.Vars{
 		BeadID:       ticketID,
-		JiraID:       projectconfig.JiraIDFromExternalRef(row.ExternalRef),
+		JiraID:       jiraID,
 		Slug:         info.Slug,
 		Type:         row.IssueType,
 		BareRepoPath: bare,

@@ -126,7 +126,7 @@ func TestRenderEmptySlugDropsPrecedingDash(t *testing.T) {
 	}
 }
 
-func TestRenderIDPrefersJira(t *testing.T) {
+func TestRenderIDCombinesJiraAndBead(t *testing.T) {
 	t.Parallel()
 	cfg := projectconfig.Config{
 		Worktree: projectconfig.WorktreeConfig{
@@ -139,8 +139,15 @@ func TestRenderIDPrefersJira(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if branch != "enh/UIEXT-1234-foo" {
+	if branch != "enh/UIEXT-1234-ai-42-foo" {
 		t.Errorf("branch=%q", branch)
+	}
+	path, err := cfg.RenderPath(withJira)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != "/UIEXT-1234-ai-42" {
+		t.Errorf("path=%q", path)
 	}
 	noJira := projectconfig.Vars{BeadID: "ai-42", Slug: "foo", Type: "feature"}
 	branch, err = cfg.RenderBranch(noJira)

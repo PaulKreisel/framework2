@@ -107,6 +107,42 @@ func TestDirWorktreeCascadesToParent(t *testing.T) {
 	}
 }
 
+func TestDirWorktreeInheritsAncestorJiraID(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	parent := testutil.CreateBead(t, beadsDir, "wt-jira-parent")
+	if out, err := testutil.BdCmd(beadsDir, "update", parent,
+		"--external-ref", "https://jira.example.com/browse/UIEXT-9000").CombinedOutput(); err != nil {
+		t.Fatalf("bd update --external-ref: %v: %s", err, out)
+	}
+	child := testutil.CreateChildBead(t, beadsDir, "wt-jira-child", parent)
+	bare := bareRepo(t, "main")
+
+	_, stderr, code := testutil.RunTicketIn(t, beadsDir, "dir", "worktree", child, bare)
+	if code != 0 {
+		t.Fatalf("worktree exit=%d stderr=%q", code, stderr)
+	}
+
+	parentEntries := listEntries(t, beadsDir, parent)
+	if len(parentEntries) != 1 {
+		t.Fatalf("parent entries=%+v, want 1", parentEntries)
+	}
+	wantParentBranch := "todo/UIEXT-9000-" + parent
+	if parentEntries[0].Branch != wantParentBranch {
+		t.Errorf("parent branch=%q want %q", parentEntries[0].Branch, wantParentBranch)
+	}
+
+	childEntries := listEntries(t, beadsDir, child)
+	if len(childEntries) != 1 {
+		t.Fatalf("child entries=%+v, want 1", childEntries)
+	}
+	wantChildBranch := "todo/UIEXT-9000-" + child
+	if childEntries[0].Branch != wantChildBranch {
+		t.Errorf("child branch=%q want %q (jira id should be inherited from parent)",
+			childEntries[0].Branch, wantChildBranch)
+	}
+}
+
 func TestDirWorktreeStopsCascadeAtLinkedAncestor(t *testing.T) {
 	t.Parallel()
 	beadsDir := testutil.TestDB(t)
