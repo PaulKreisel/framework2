@@ -80,6 +80,14 @@ func Status(db, beadsDir, ticketID, selector string, jsonOut bool, out io.Writer
 	return writeStatusText(out, result)
 }
 
+// PickEntry resolves selector against entries. When selector is empty, the
+// list must contain exactly one entry. Non-empty selectors match an entry's
+// Path, LocalRepo, or BareRepo (with absolute-path resolution applied to
+// path-like selectors). Errors mention ticketID for context.
+func PickEntry(ticketID string, entries []Entry, selector string) (*Entry, error) {
+	return pickEntry(ticketID, entries, selector)
+}
+
 func pickEntry(ticketID string, entries []Entry, selector string) (*Entry, error) {
 	if selector == "" {
 		if len(entries) == 1 {

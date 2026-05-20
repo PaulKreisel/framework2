@@ -26,6 +26,7 @@ import (
 	"framework2/internal/env"
 	"framework2/internal/finish"
 	"framework2/internal/next"
+	"framework2/internal/pr"
 	"framework2/internal/ready"
 	"framework2/internal/slug"
 )
@@ -186,6 +187,32 @@ subcommands:
                                           conflicts: runs ` + "`git rebase --continue`" + ` in
                                           each paused worktree, then completes
                                           the rest of the flow.
+  pr list [<id>]                          print attached GitHub PRs as a table.
+                                          State is fetched live from GitHub via
+                                          ` + "`gh`" + `.
+  pr create [<id>] [<path>] [--ready]     create a GitHub PR for the dir at
+                                          <path> (omit when the ticket has
+                                          exactly one linked dir), base branch
+                                          resolved via the parent chain.
+                                          Pushes the current branch upstream
+                                          (force-with-lease) before calling
+                                          ` + "`gh pr create`" + `. The PR is opened as a
+                                          draft unless --ready is passed.
+  pr link [<id>] [<path>] <pr-url>        attach an existing PR (identified by
+                                          URL) to the bead, associating it
+                                          with the dir at <path>. No push.
+  pr create-bead [<id>] <pr-url>          create a new bead as a child of the
+                                          currently-active ticket whose
+                                          description is the PR URL and whose
+                                          title is ` + "`PR <pr-title>`" + `. No dir is
+                                          linked.
+  pr refresh [<id>]                       reconcile bead state with GitHub:
+                                          validate that every linked dir has
+                                          a PR, surface closed-unmerged or
+                                          deleted PRs (and exit non-zero),
+                                          and when every attached PR is
+                                          merged and no open children block,
+                                          run the full ` + "`finish`" + ` flow.
 
 WAITING REASON column:
   Surfaced by ` + "`agent list`" + `, ` + "`agent status`" + ` and ` + "`next agent`" + ` for agents
@@ -272,6 +299,8 @@ func dispatch(beadsDir string, args []string, stdout, stderr io.Writer) error {
 		return runNotReady(db, beadsDir, ticket, rest[1:])
 	case "finish":
 		return runFinish(db, beadsDir, ticket, rest[1:], stdout)
+	case "pr":
+		return runPR(db, beadsDir, ticket, rest[1:], stdout)
 	case "pipeline-async":
 		// Hidden subcommand: detached runner spawned by `finish` to execute
 		// pipeline.md commands after the parent process has exited. Not
@@ -1232,6 +1261,110 @@ func resolveOptionalID(ticket string, args []string, extra int, usage string) (s
 		return args[0], args[1:], nil
 	default:
 		return "", nil, errors.New(usage)
+	}
+}
+
+// runPR dispatches `ticket pr <sub> ...`.
+func runPR(db, beadsDir, ticket string, args []string, stdout io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("usage: ticket pr <list|create|link|create-bead|refresh> ...")
+	}
+	sub, rest := args[0], args[1:]
+	switch sub {
+	case "list":
+		id, _, err := resolveID(ticket, rest, 0, "usage: ticket pr list [<id>]")
+		if err != nil {
+			return err
+		}
+		return pr.List(db, beadsDir, id, stdout)
+	case "create":
+		var ready bool
+		var positional []string
+		for _, a := range rest {
+			if a == "--ready" {
+				ready = true
+				continue
+			}
+			positional = append(positional, a)
+		}
+		usage := "usage: ticket pr create [<id>] [<path>] [--ready]"
+		id, selector, err := resolveIDOptionalSelector(ticket, positional, usage)
+		if err != nil {
+			return err
+		}
+		return pr.Create(db, beadsDir, id, selector, ready, stdout)
+	case "link":
+		// link needs <pr-url> as the last positional. Optional <path> sits
+		// between id and url when present.
+		usage := "usage: ticket pr link [<id>] [<path>] <pr-url>"
+		id, selector, last, err := resolveIDOptionalSelectorWithTail(ticket, rest, usage)
+		if err != nil {
+			return err
+		}
+		return pr.Link(db, beadsDir, id, selector, last)
+	case "create-bead":
+		id, tail, err := resolveID(ticket, rest, 1, "usage: ticket pr create-bead [<id>] <pr-url>")
+		if err != nil {
+			return err
+		}
+		return pr.CreateBead(db, beadsDir, id, tail[0], stdout)
+	case "refresh":
+		id, _, err := resolveID(ticket, rest, 0, "usage: ticket pr refresh [<id>]")
+		if err != nil {
+			return err
+		}
+		return pr.Refresh(db, beadsDir, id, stdout)
+	default:
+		return fmt.Errorf("unknown pr subcommand %q", sub)
+	}
+}
+
+// resolveIDOptionalSelector handles `ticket <cmd> [<id>] [<selector>]` shapes
+// where the selector is optional. When ticket (global flag) is set, args
+// holds zero or one positional (the selector). Otherwise the first
+// positional is the id and the second (if present) is the selector.
+func resolveIDOptionalSelector(ticket string, args []string, usage string) (id, selector string, err error) {
+	if ticket != "" {
+		switch len(args) {
+		case 0:
+		case 1:
+			selector = args[0]
+		default:
+			return "", "", errors.New(usage)
+		}
+		return ticket, selector, nil
+	}
+	switch len(args) {
+	case 1:
+		return args[0], "", nil
+	case 2:
+		return args[0], args[1], nil
+	default:
+		return "", "", errors.New(usage)
+	}
+}
+
+// resolveIDOptionalSelectorWithTail handles `ticket <cmd> [<id>] [<selector>]
+// <tail>` shapes where the last positional is mandatory and the selector
+// before it is optional.
+func resolveIDOptionalSelectorWithTail(ticket string, args []string, usage string) (id, selector, tail string, err error) {
+	if ticket != "" {
+		switch len(args) {
+		case 1:
+			return ticket, "", args[0], nil
+		case 2:
+			return ticket, args[0], args[1], nil
+		default:
+			return "", "", "", errors.New(usage)
+		}
+	}
+	switch len(args) {
+	case 2:
+		return args[0], "", args[1], nil
+	case 3:
+		return args[0], args[1], args[2], nil
+	default:
+		return "", "", "", errors.New(usage)
 	}
 }
 
