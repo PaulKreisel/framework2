@@ -323,8 +323,11 @@ func walkAndImport(ctx context.Context, opts Options, email, token, rootKey stri
 
 // discoverChildren returns the direct children of issue: every key in its
 // `subtasks` field, plus every issue Jira reports as having issue.Key as its
-// parent. Order is preserved (subtasks first, then reverse-parent matches not
-// already covered) so test output stays deterministic.
+// parent. For Epic-typed issues, when neither subtasks nor the `parent` JQL
+// search yields anything, falls back to the legacy `"Epic Link" = <KEY>` JQL
+// so older projects (where stories don't carry a `parent` field) still work.
+// Order is preserved (subtasks first, then reverse-parent matches, then
+// epic-link matches) so test output stays deterministic.
 func discoverChildren(ctx context.Context, opts Options, email, token, parentKey string, issue *Issue) ([]string, error) {
 	seen := map[string]bool{parentKey: true}
 	var out []string
@@ -335,7 +338,7 @@ func discoverChildren(ctx context.Context, opts Options, email, token, parentKey
 		seen[st.Key] = true
 		out = append(out, st.Key)
 	}
-	reverse, err := searchChildKeys(ctx, opts, email, token, parentKey)
+	reverse, err := searchByJQL(ctx, opts, email, token, fmt.Sprintf("parent = %s", parentKey))
 	if err != nil {
 		return nil, err
 	}
@@ -346,13 +349,26 @@ func discoverChildren(ctx context.Context, opts Options, email, token, parentKey
 		seen[k] = true
 		out = append(out, k)
 	}
+	if issue.Fields.IssueType.Name == "Epic" && len(out) == 0 {
+		viaEpicLink, err := searchByJQL(ctx, opts, email, token, fmt.Sprintf(`"Epic Link" = %s`, parentKey))
+		if err != nil {
+			return nil, err
+		}
+		for _, k := range viaEpicLink {
+			if k == "" || seen[k] {
+				continue
+			}
+			seen[k] = true
+			out = append(out, k)
+		}
+	}
 	return out, nil
 }
 
-// searchChildKeys runs a JQL search for `parent = <parentKey>` and returns
-// the resulting issue keys. Walks pages until Jira reports it has returned
-// everything.
-func searchChildKeys(ctx context.Context, opts Options, email, token, parentKey string) ([]string, error) {
+// searchByJQL runs an arbitrary JQL query against /rest/api/2/search and
+// returns the resulting issue keys. Walks pages until Jira reports it has
+// returned everything.
+func searchByJQL(ctx context.Context, opts Options, email, token, jql string) ([]string, error) {
 	base := opts.BaseURL
 	if base == "" {
 		base = DefaultBaseURL
@@ -366,9 +382,9 @@ func searchChildKeys(ctx context.Context, opts Options, email, token, parentKey 
 	var keys []string
 	startAt := 0
 	for {
-		jql := url.QueryEscape(fmt.Sprintf("parent = %s", parentKey))
+		encJQL := url.QueryEscape(jql)
 		u := fmt.Sprintf("%s/rest/api/2/search?jql=%s&fields=key&startAt=%d&maxResults=%d",
-			base, jql, startAt, pageSize)
+			base, encJQL, startAt, pageSize)
 
 		cctx, cancel := context.WithTimeout(ctx, httpTimeout)
 		req, err := http.NewRequestWithContext(cctx, http.MethodGet, u, nil)
@@ -382,14 +398,14 @@ func searchChildKeys(ctx context.Context, opts Options, email, token, parentKey 
 		resp, err := client.Do(req)
 		if err != nil {
 			cancel()
-			return nil, fmt.Errorf("search children of %s: %w", parentKey, err)
+			return nil, fmt.Errorf("search %q: %w", jql, err)
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 			resp.Body.Close()
 			cancel()
-			return nil, fmt.Errorf("search children of %s: status %d: %s",
-				parentKey, resp.StatusCode, strings.TrimSpace(string(body)))
+			return nil, fmt.Errorf("search %q: status %d: %s",
+				jql, resp.StatusCode, strings.TrimSpace(string(body)))
 		}
 		var page struct {
 			StartAt int `json:"startAt"`
@@ -402,7 +418,7 @@ func searchChildKeys(ctx context.Context, opts Options, email, token, parentKey 
 		resp.Body.Close()
 		cancel()
 		if err != nil {
-			return nil, fmt.Errorf("parse search response for %s: %w", parentKey, err)
+			return nil, fmt.Errorf("parse search response for %q: %w", jql, err)
 		}
 		for _, i := range page.Issues {
 			keys = append(keys, i.Key)

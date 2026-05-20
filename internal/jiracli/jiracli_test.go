@@ -216,9 +216,11 @@ func TestRunCreatesBead(t *testing.T) {
 
 // fakeIssue is the subset of a Jira issue our test fixtures need.
 type fakeIssue struct {
-	subtasks []string // keys reachable via the subtasks field
-	children []string // keys reachable via the reverse parent JQL search
-	parent   string   // populated on returned issue, for completeness
+	subtasks         []string // keys reachable via the subtasks field
+	children         []string // keys reachable via the reverse `parent = KEY` JQL search
+	epicLinkChildren []string // keys reachable via `"Epic Link" = KEY` JQL (older Jira)
+	parent           string   // populated on returned issue, for completeness
+	issueType        string   // Jira issuetype name; defaults to "Task"
 }
 
 // fakeJira spins up an httptest.Server that serves /rest/api/2/issue/<KEY>
@@ -250,10 +252,14 @@ func newFakeJira(t *testing.T, fixture map[string]fakeIssue) *fakeJira {
 			for _, s := range f.subtasks {
 				subtasks = append(subtasks, map[string]string{"key": s})
 			}
+			issueType := f.issueType
+			if issueType == "" {
+				issueType = "Task"
+			}
 			fields := map[string]any{
 				"summary":     key + " summary",
 				"description": key + " body",
-				"issuetype":   map[string]any{"name": "Task"},
+				"issuetype":   map[string]any{"name": issueType},
 				"subtasks":    subtasks,
 			}
 			if f.parent != "" {
@@ -262,14 +268,24 @@ func newFakeJira(t *testing.T, fixture map[string]fakeIssue) *fakeJira {
 			_ = json.NewEncoder(w).Encode(map[string]any{"key": key, "fields": fields})
 		case r.URL.Path == "/rest/api/2/search":
 			jql := r.URL.Query().Get("jql")
-			// JQL we issue is `parent = <KEY>`; pull the key back out.
-			var parentKey string
-			if _, after, found := strings.Cut(jql, "parent = "); found {
-				parentKey = strings.TrimSpace(after)
+			// JQL we issue is either `parent = <KEY>` or `"Epic Link" = <KEY>`.
+			var (
+				key      string
+				epicLink bool
+			)
+			if _, after, found := strings.Cut(jql, `"Epic Link" = `); found {
+				key = strings.TrimSpace(after)
+				epicLink = true
+			} else if _, after, found := strings.Cut(jql, "parent = "); found {
+				key = strings.TrimSpace(after)
 			}
 			issues := []map[string]string{}
-			if f, ok := fixture[parentKey]; ok {
-				for _, c := range f.children {
+			if f, ok := fixture[key]; ok {
+				src := f.children
+				if epicLink {
+					src = f.epicLinkChildren
+				}
+				for _, c := range src {
 					issues = append(issues, map[string]string{"key": c})
 				}
 			}
@@ -469,6 +485,70 @@ func equalTree(a, b map[string][]string) bool {
 		}
 	}
 	return true
+}
+
+// TestRunEpicWithStories covers the Epic membership fallback: the epic has
+// no `subtasks` and no `parent = KEY` matches, but its stories are reachable
+// via the legacy `"Epic Link" = KEY` JQL.
+func TestRunEpicWithStories(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	fj := newFakeJira(t, map[string]fakeIssue{
+		"EPIC-1":  {issueType: "Epic", epicLinkChildren: []string{"STORY-1", "STORY-2"}},
+		"STORY-1": {},
+		"STORY-2": {},
+	})
+	runJira(t, fj.server, beadsDir, "EPIC-1")
+	tree := importedTree(t, beadsDir)
+	want := map[string][]string{
+		"EPIC-1":  {"STORY-1", "STORY-2"},
+		"STORY-1": nil,
+		"STORY-2": nil,
+	}
+	if !equalTree(tree, want) {
+		t.Errorf("tree mismatch:\n got=%v\nwant=%v", tree, want)
+	}
+}
+
+// TestRunEpicWithStoriesAndSubtasks verifies that the slice-1 recursion
+// engine picks up from the Epic Link discovery: stories returned via the
+// Epic Link JQL further recurse into their own subtasks.
+func TestRunEpicWithStoriesAndSubtasks(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	fj := newFakeJira(t, map[string]fakeIssue{
+		"EPIC-1":  {issueType: "Epic", epicLinkChildren: []string{"STORY-1"}},
+		"STORY-1": {subtasks: []string{"SUB-1", "SUB-2"}},
+		"SUB-1":   {},
+		"SUB-2":   {},
+	})
+	runJira(t, fj.server, beadsDir, "EPIC-1")
+	tree := importedTree(t, beadsDir)
+	want := map[string][]string{
+		"EPIC-1":  {"STORY-1"},
+		"STORY-1": {"SUB-1", "SUB-2"},
+		"SUB-1":   nil,
+		"SUB-2":   nil,
+	}
+	if !equalTree(tree, want) {
+		t.Errorf("tree mismatch:\n got=%v\nwant=%v", tree, want)
+	}
+}
+
+// TestRunEpicWithNoStories makes sure an empty Epic produces no error and no
+// children — both the `parent` and `"Epic Link"` searches return nothing.
+func TestRunEpicWithNoStories(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	fj := newFakeJira(t, map[string]fakeIssue{
+		"EPIC-1": {issueType: "Epic"},
+	})
+	runJira(t, fj.server, beadsDir, "EPIC-1")
+	tree := importedTree(t, beadsDir)
+	want := map[string][]string{"EPIC-1": nil}
+	if !equalTree(tree, want) {
+		t.Errorf("tree mismatch:\n got=%v\nwant=%v", tree, want)
+	}
 }
 
 func TestRunHandles404(t *testing.T) {
