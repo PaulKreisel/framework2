@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	"framework2/internal/jiracli"
@@ -121,26 +123,29 @@ func TestRunCreatesBead(t *testing.T) {
 	beadsDir := testutil.TestDB(t)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/rest/api/2/issue/UIEXT-9999" {
-			t.Errorf("unexpected path %q", r.URL.Path)
-			http.Error(w, "not found", 404)
-			return
-		}
 		user, pass, ok := r.BasicAuth()
 		if !ok || user != "me@example.com" || pass != "tok" {
 			http.Error(w, "unauth", 401)
 			return
 		}
-		issue := map[string]any{
-			"key": "UIEXT-9999",
-			"fields": map[string]any{
-				"summary":            "Make widgets clickable",
-				"description":        "When the user clicks, things should happen.",
-				"issuetype":          map[string]any{"name": "Enhancement"},
-				"customfield_11444":  "1. click widget\n2. observe nothing\n",
-			},
+		switch r.URL.Path {
+		case "/rest/api/2/issue/UIEXT-9999":
+			issue := map[string]any{
+				"key": "UIEXT-9999",
+				"fields": map[string]any{
+					"summary":           "Make widgets clickable",
+					"description":       "When the user clicks, things should happen.",
+					"issuetype":         map[string]any{"name": "Enhancement"},
+					"customfield_11444": "1. click widget\n2. observe nothing\n",
+				},
+			}
+			_ = json.NewEncoder(w).Encode(issue)
+		case "/rest/api/2/search":
+			_ = json.NewEncoder(w).Encode(map[string]any{"issues": []any{}, "total": 0})
+		default:
+			t.Errorf("unexpected path %q", r.URL.Path)
+			http.Error(w, "not found", 404)
 		}
-		_ = json.NewEncoder(w).Encode(issue)
 	}))
 	t.Cleanup(server.Close)
 
@@ -207,6 +212,263 @@ func TestRunCreatesBead(t *testing.T) {
 	if got.Metadata.Slug == "" {
 		t.Errorf("slug missing")
 	}
+}
+
+// fakeIssue is the subset of a Jira issue our test fixtures need.
+type fakeIssue struct {
+	subtasks []string // keys reachable via the subtasks field
+	children []string // keys reachable via the reverse parent JQL search
+	parent   string   // populated on returned issue, for completeness
+}
+
+// fakeJira spins up an httptest.Server that serves /rest/api/2/issue/<KEY>
+// and /rest/api/2/search?jql=parent=<KEY> against an in-memory fixture, and
+// counts how often each key is fetched so tests can assert the cache works.
+type fakeJira struct {
+	t       *testing.T
+	server  *httptest.Server
+	mu      sync.Mutex
+	fetches map[string]int
+}
+
+func newFakeJira(t *testing.T, fixture map[string]fakeIssue) *fakeJira {
+	t.Helper()
+	fj := &fakeJira{t: t, fetches: map[string]int{}}
+	fj.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/rest/api/2/issue/"):
+			key := strings.TrimPrefix(r.URL.Path, "/rest/api/2/issue/")
+			f, ok := fixture[key]
+			if !ok {
+				http.Error(w, "not found", 404)
+				return
+			}
+			fj.mu.Lock()
+			fj.fetches[key]++
+			fj.mu.Unlock()
+			subtasks := make([]map[string]string, 0, len(f.subtasks))
+			for _, s := range f.subtasks {
+				subtasks = append(subtasks, map[string]string{"key": s})
+			}
+			fields := map[string]any{
+				"summary":     key + " summary",
+				"description": key + " body",
+				"issuetype":   map[string]any{"name": "Task"},
+				"subtasks":    subtasks,
+			}
+			if f.parent != "" {
+				fields["parent"] = map[string]string{"key": f.parent}
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"key": key, "fields": fields})
+		case r.URL.Path == "/rest/api/2/search":
+			jql := r.URL.Query().Get("jql")
+			// JQL we issue is `parent = <KEY>`; pull the key back out.
+			var parentKey string
+			if _, after, found := strings.Cut(jql, "parent = "); found {
+				parentKey = strings.TrimSpace(after)
+			}
+			issues := []map[string]string{}
+			if f, ok := fixture[parentKey]; ok {
+				for _, c := range f.children {
+					issues = append(issues, map[string]string{"key": c})
+				}
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"issues":  issues,
+				"total":   len(issues),
+				"startAt": 0,
+			})
+		default:
+			http.Error(w, "not found", 404)
+		}
+	}))
+	t.Cleanup(fj.server.Close)
+	return fj
+}
+
+// importedTree returns parent → []child as bd reports it, keyed by Jira key
+// (read off the bead's external_ref). Each child slice is sorted for stable
+// comparison; tree shape is what we care about, not BFS insertion order.
+func importedTree(t *testing.T, beadsDir string) map[string][]string {
+	t.Helper()
+	out, err := testutil.BdCmd(beadsDir, "--json", "list", "--all").Output()
+	if err != nil {
+		t.Fatalf("bd list: %v", err)
+	}
+	var rows []struct {
+		ID          string `json:"id"`
+		Parent      string `json:"parent"`
+		ExternalRef string `json:"external_ref"`
+	}
+	if err := json.Unmarshal(out, &rows); err != nil {
+		t.Fatalf("parse bd list: %v", err)
+	}
+	idToKey := map[string]string{}
+	for _, r := range rows {
+		if i := strings.LastIndex(r.ExternalRef, "/"); i >= 0 {
+			idToKey[r.ID] = r.ExternalRef[i+1:]
+		}
+	}
+	tree := map[string][]string{}
+	for _, r := range rows {
+		key := idToKey[r.ID]
+		if _, ok := tree[key]; !ok {
+			tree[key] = nil
+		}
+		if r.Parent == "" {
+			continue
+		}
+		parentKey := idToKey[r.Parent]
+		tree[parentKey] = append(tree[parentKey], key)
+	}
+	for k := range tree {
+		sort.Strings(tree[k])
+	}
+	return tree
+}
+
+func runJira(t *testing.T, server *httptest.Server, beadsDir, key string) string {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	code := jiracli.RunWithOptions(jiracli.Options{
+		BaseURL:  server.URL,
+		BeadsDir: beadsDir,
+		Email:    "me@example.com",
+		Token:    "tok",
+	}, []string{key}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("jira %s: exit=%d stderr=%q", key, code, stderr.String())
+	}
+	return strings.TrimSpace(stdout.String())
+}
+
+func TestRunRecursiveShallow(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	fj := newFakeJira(t, map[string]fakeIssue{
+		"FOO-1": {},
+	})
+	rootID := runJira(t, fj.server, beadsDir, "FOO-1")
+	if rootID == "" {
+		t.Fatal("no root id printed")
+	}
+	tree := importedTree(t, beadsDir)
+	if len(tree) != 1 || len(tree["FOO-1"]) != 0 {
+		t.Errorf("expected single bead, got tree=%v", tree)
+	}
+}
+
+func TestRunRecursiveSubtasks(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	fj := newFakeJira(t, map[string]fakeIssue{
+		"FOO-1": {subtasks: []string{"FOO-2", "FOO-3"}},
+		"FOO-2": {},
+		"FOO-3": {},
+	})
+	runJira(t, fj.server, beadsDir, "FOO-1")
+	tree := importedTree(t, beadsDir)
+	want := map[string][]string{
+		"FOO-1": {"FOO-2", "FOO-3"},
+		"FOO-2": nil,
+		"FOO-3": nil,
+	}
+	if !equalTree(tree, want) {
+		t.Errorf("tree mismatch:\n got=%v\nwant=%v", tree, want)
+	}
+}
+
+func TestRunRecursiveThreeDeep(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	fj := newFakeJira(t, map[string]fakeIssue{
+		"FOO-1": {subtasks: []string{"FOO-2"}},
+		"FOO-2": {subtasks: []string{"FOO-3"}},
+		"FOO-3": {subtasks: []string{"FOO-4"}},
+		"FOO-4": {},
+	})
+	runJira(t, fj.server, beadsDir, "FOO-1")
+	tree := importedTree(t, beadsDir)
+	want := map[string][]string{
+		"FOO-1": {"FOO-2"},
+		"FOO-2": {"FOO-3"},
+		"FOO-3": {"FOO-4"},
+		"FOO-4": nil,
+	}
+	if !equalTree(tree, want) {
+		t.Errorf("tree mismatch:\n got=%v\nwant=%v", tree, want)
+	}
+}
+
+func TestRunRecursiveMixedDiscovery(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	// FOO-2 is reachable via the subtasks field; FOO-3 is reachable only
+	// via the reverse parent search. Both must end up under FOO-1.
+	fj := newFakeJira(t, map[string]fakeIssue{
+		"FOO-1": {subtasks: []string{"FOO-2"}, children: []string{"FOO-3"}},
+		"FOO-2": {},
+		"FOO-3": {parent: "FOO-1"},
+	})
+	runJira(t, fj.server, beadsDir, "FOO-1")
+	tree := importedTree(t, beadsDir)
+	want := map[string][]string{
+		"FOO-1": {"FOO-2", "FOO-3"},
+		"FOO-2": nil,
+		"FOO-3": nil,
+	}
+	if !equalTree(tree, want) {
+		t.Errorf("tree mismatch:\n got=%v\nwant=%v", tree, want)
+	}
+}
+
+func TestRunRecursiveCacheDedups(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	// FOO-2 is reachable both via FOO-1's subtasks AND via the reverse
+	// parent search for FOO-1. The cache must collapse those into a
+	// single fetch and a single bead.
+	fj := newFakeJira(t, map[string]fakeIssue{
+		"FOO-1": {subtasks: []string{"FOO-2"}, children: []string{"FOO-2"}},
+		"FOO-2": {parent: "FOO-1"},
+	})
+	runJira(t, fj.server, beadsDir, "FOO-1")
+
+	fj.mu.Lock()
+	defer fj.mu.Unlock()
+	if fj.fetches["FOO-2"] != 1 {
+		t.Errorf("FOO-2 fetched %d times, want 1", fj.fetches["FOO-2"])
+	}
+	if fj.fetches["FOO-1"] != 1 {
+		t.Errorf("FOO-1 fetched %d times, want 1", fj.fetches["FOO-1"])
+	}
+
+	tree := importedTree(t, beadsDir)
+	want := map[string][]string{
+		"FOO-1": {"FOO-2"},
+		"FOO-2": nil,
+	}
+	if !equalTree(tree, want) {
+		t.Errorf("tree mismatch:\n got=%v\nwant=%v", tree, want)
+	}
+}
+
+func equalTree(a, b map[string][]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, av := range a {
+		bv, ok := b[k]
+		if !ok || len(av) != len(bv) {
+			return false
+		}
+		for i := range av {
+			if av[i] != bv[i] {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func TestRunHandles404(t *testing.T) {

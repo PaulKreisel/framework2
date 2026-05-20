@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"regexp"
@@ -92,16 +93,11 @@ func dispatch(opts Options, args []string, stdout io.Writer) error {
 		return err
 	}
 
-	issue, err := Fetch(context.Background(), opts, email, token, key)
+	rootID, err := walkAndImport(context.Background(), opts, email, token, key)
 	if err != nil {
 		return err
 	}
-
-	id, err := createBead(opts, key, issue)
-	if err != nil {
-		return err
-	}
-	_, werr := fmt.Fprintln(stdout, id)
+	_, werr := fmt.Fprintln(stdout, rootID)
 	return werr
 }
 
@@ -120,6 +116,12 @@ func credentials(opts Options) (email, token string, err error) {
 	return email, token, nil
 }
 
+// IssueRef is a minimal Jira issue reference, used for the subtasks list and
+// the parent link.
+type IssueRef struct {
+	Key string `json:"key"`
+}
+
 // Issue is the subset of Jira's REST v2 response we consume.
 type Issue struct {
 	Key    string `json:"key"`
@@ -131,6 +133,11 @@ type Issue struct {
 		} `json:"issuetype"`
 		// customfield_11444 is KNIME's "Steps to Reproduce" field.
 		StepsToReproduce string `json:"customfield_11444"`
+		// Subtasks lists classic Jira sub-tasks of this issue.
+		Subtasks []IssueRef `json:"subtasks"`
+		// Parent is the issue this one hangs off of in next-gen
+		// parent/child relationships. nil for top-level issues.
+		Parent *IssueRef `json:"parent,omitempty"`
 	} `json:"fields"`
 }
 
@@ -141,11 +148,11 @@ func Fetch(ctx context.Context, opts Options, email, token, key string) (*Issue,
 	if base == "" {
 		base = DefaultBaseURL
 	}
-	url := fmt.Sprintf("%s/rest/api/2/issue/%s?fields=summary,description,issuetype,customfield_11444", base, key)
+	reqURL := fmt.Sprintf("%s/rest/api/2/issue/%s?fields=summary,description,issuetype,customfield_11444,subtasks,parent", base, key)
 
 	cctx, cancel := context.WithTimeout(ctx, httpTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(cctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(cctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
@@ -212,8 +219,9 @@ func BuildDescription(issue *Issue) string {
 	return desc + "\n\n## Steps to Reproduce\n\n" + steps
 }
 
-// createBead shells out to `bd create` and returns the new bead id.
-func createBead(opts Options, key string, issue *Issue) (string, error) {
+// createBead shells out to `bd create` and returns the new bead id. When
+// parentBead is non-empty it is forwarded as `--parent`.
+func createBead(opts Options, key string, issue *Issue, parentBead string) (string, error) {
 	title := issue.Fields.Summary
 	body := BuildDescription(issue)
 	beadType := MapType(issue.Fields.IssueType.Name)
@@ -229,6 +237,9 @@ func createBead(opts Options, key string, issue *Issue) (string, error) {
 		"--type", beadType,
 		"--priority", "2",
 		"--external-ref", externalRef,
+	}
+	if parentBead != "" {
+		args = append(args, "--parent", parentBead)
 	}
 	if body != "" {
 		args = append(args, "--body-file", "-")
@@ -254,4 +265,155 @@ func createBead(opts Options, key string, issue *Issue) (string, error) {
 		return "", errors.New("bd create returned empty id")
 	}
 	return id, nil
+}
+
+// walkAndImport imports rootKey and every descendant reachable via the
+// `subtasks` field or via a reverse `parent` lookup. Issues are fetched at
+// most once (in-memory cache keyed by Jira key) and each bead is created with
+// `--parent` pointing at its imported parent bead, so `bd list --parent <root>`
+// reproduces the Jira hierarchy. BFS order keeps parents created before their
+// children, which is what bd requires.
+func walkAndImport(ctx context.Context, opts Options, email, token, rootKey string) (string, error) {
+	type work struct{ key, parentBead string }
+
+	issueCache := map[string]*Issue{}
+	imported := map[string]string{} // jira key -> bead id
+	var rootID string
+
+	queue := []work{{key: rootKey}}
+	for len(queue) > 0 {
+		w := queue[0]
+		queue = queue[1:]
+		if _, done := imported[w.key]; done {
+			continue
+		}
+
+		issue, ok := issueCache[w.key]
+		if !ok {
+			fetched, err := Fetch(ctx, opts, email, token, w.key)
+			if err != nil {
+				return "", err
+			}
+			issueCache[w.key] = fetched
+			issue = fetched
+		}
+
+		beadID, err := createBead(opts, w.key, issue, w.parentBead)
+		if err != nil {
+			return "", err
+		}
+		imported[w.key] = beadID
+		if w.parentBead == "" {
+			rootID = beadID
+		}
+
+		children, err := discoverChildren(ctx, opts, email, token, w.key, issue)
+		if err != nil {
+			return "", err
+		}
+		for _, ck := range children {
+			if _, done := imported[ck]; done {
+				continue
+			}
+			queue = append(queue, work{key: ck, parentBead: beadID})
+		}
+	}
+	return rootID, nil
+}
+
+// discoverChildren returns the direct children of issue: every key in its
+// `subtasks` field, plus every issue Jira reports as having issue.Key as its
+// parent. Order is preserved (subtasks first, then reverse-parent matches not
+// already covered) so test output stays deterministic.
+func discoverChildren(ctx context.Context, opts Options, email, token, parentKey string, issue *Issue) ([]string, error) {
+	seen := map[string]bool{parentKey: true}
+	var out []string
+	for _, st := range issue.Fields.Subtasks {
+		if st.Key == "" || seen[st.Key] {
+			continue
+		}
+		seen[st.Key] = true
+		out = append(out, st.Key)
+	}
+	reverse, err := searchChildKeys(ctx, opts, email, token, parentKey)
+	if err != nil {
+		return nil, err
+	}
+	for _, k := range reverse {
+		if k == "" || seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, k)
+	}
+	return out, nil
+}
+
+// searchChildKeys runs a JQL search for `parent = <parentKey>` and returns
+// the resulting issue keys. Walks pages until Jira reports it has returned
+// everything.
+func searchChildKeys(ctx context.Context, opts Options, email, token, parentKey string) ([]string, error) {
+	base := opts.BaseURL
+	if base == "" {
+		base = DefaultBaseURL
+	}
+	client := opts.HTTPClient
+	if client == nil {
+		client = &http.Client{Timeout: httpTimeout}
+	}
+
+	const pageSize = 100
+	var keys []string
+	startAt := 0
+	for {
+		jql := url.QueryEscape(fmt.Sprintf("parent = %s", parentKey))
+		u := fmt.Sprintf("%s/rest/api/2/search?jql=%s&fields=key&startAt=%d&maxResults=%d",
+			base, jql, startAt, pageSize)
+
+		cctx, cancel := context.WithTimeout(ctx, httpTimeout)
+		req, err := http.NewRequestWithContext(cctx, http.MethodGet, u, nil)
+		if err != nil {
+			cancel()
+			return nil, fmt.Errorf("build search request: %w", err)
+		}
+		req.SetBasicAuth(email, token)
+		req.Header.Set("Accept", "application/json")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			cancel()
+			return nil, fmt.Errorf("search children of %s: %w", parentKey, err)
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+			resp.Body.Close()
+			cancel()
+			return nil, fmt.Errorf("search children of %s: status %d: %s",
+				parentKey, resp.StatusCode, strings.TrimSpace(string(body)))
+		}
+		var page struct {
+			StartAt int `json:"startAt"`
+			Total   int `json:"total"`
+			Issues  []struct {
+				Key string `json:"key"`
+			} `json:"issues"`
+		}
+		err = json.NewDecoder(resp.Body).Decode(&page)
+		resp.Body.Close()
+		cancel()
+		if err != nil {
+			return nil, fmt.Errorf("parse search response for %s: %w", parentKey, err)
+		}
+		for _, i := range page.Issues {
+			keys = append(keys, i.Key)
+		}
+		if len(page.Issues) == 0 {
+			break
+		}
+		startAt += len(page.Issues)
+		if startAt >= page.Total {
+			break
+		}
+	}
+	return keys, nil
 }
