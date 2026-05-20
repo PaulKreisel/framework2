@@ -399,6 +399,381 @@ func TestRefreshOpenChildrenBlockAutoClose(t *testing.T) {
 	}
 }
 
+// --- Show / ShowAll --------------------------------------------------------
+
+// stubOpenURL replaces pr.OpenURL with a recorder for the duration of the
+// test. Returns a pointer to the slice of URLs that the production code
+// called OpenURL with.
+func stubOpenURL(t *testing.T) *[]string {
+	t.Helper()
+	var got []string
+	prev := pr.OpenURL
+	pr.OpenURL = func(url string) error {
+		got = append(got, url)
+		return nil
+	}
+	t.Cleanup(func() { pr.OpenURL = prev })
+	return &got
+}
+
+func TestShowOpensAttachedPR(t *testing.T) {
+	beadsDir := testutil.TestDB(t)
+	id := testutil.CreateBead(t, beadsDir, "pr-show")
+	tmp := t.TempDir()
+	mustLinkDir(t, beadsDir, id, tmp)
+	mustSavePRs(t, beadsDir, id, []pr.Record{{Repo: "o/r", Number: 42, Branch: "feat"}})
+
+	ghMap := map[string]ghResp{
+		"repo view": ghResp{Out: ghJSON(t, struct {
+			NameWithOwner string `json:"nameWithOwner"`
+		}{"o/r"})},
+	}
+	installStubs(t, ghMap, nil)
+	opened := stubOpenURL(t)
+
+	var buf bytes.Buffer
+	if err := pr.Show("", beadsDir, id, "", &buf); err != nil {
+		t.Fatalf("Show: %v", err)
+	}
+	if len(*opened) != 1 || (*opened)[0] != "https://github.com/o/r/pull/42" {
+		t.Errorf("opened = %v, want [https://github.com/o/r/pull/42]", *opened)
+	}
+	if !strings.Contains(buf.String(), "https://github.com/o/r/pull/42") {
+		t.Errorf("stdout = %q, want PR url printed", buf.String())
+	}
+}
+
+func TestShowErrorsWhenNoPRAttached(t *testing.T) {
+	beadsDir := testutil.TestDB(t)
+	id := testutil.CreateBead(t, beadsDir, "pr-show-none")
+	tmp := t.TempDir()
+	mustLinkDir(t, beadsDir, id, tmp)
+
+	ghMap := map[string]ghResp{
+		"repo view": ghResp{Out: ghJSON(t, struct {
+			NameWithOwner string `json:"nameWithOwner"`
+		}{"o/r"})},
+	}
+	installStubs(t, ghMap, nil)
+	opened := stubOpenURL(t)
+
+	var buf bytes.Buffer
+	err := pr.Show("", beadsDir, id, "", &buf)
+	if err == nil {
+		t.Fatal("Show succeeded with no attached PR, want error")
+	}
+	if !strings.Contains(err.Error(), "no PR attached") {
+		t.Errorf("error = %v, want 'no PR attached'", err)
+	}
+	if len(*opened) != 0 {
+		t.Errorf("opened = %v, want no calls", *opened)
+	}
+}
+
+func TestShowAllOpensEligibleWithPR(t *testing.T) {
+	beadsDir := testutil.TestDB(t)
+	id := testutil.CreateBead(t, beadsDir, "pr-show-all")
+	dir1 := t.TempDir()
+	dir2 := t.TempDir()
+	mustLinkDir(t, beadsDir, id, dir1)
+	mustLinkDir(t, beadsDir, id, dir2)
+	mustSavePRs(t, beadsDir, id, []pr.Record{
+		{Repo: "o/a", Number: 1, Branch: "b1"},
+		{Repo: "o/b", Number: 2, Branch: "b2"},
+	})
+
+	// Each dir reports a different repo so the records pair 1:1 with dirs.
+	ghMap := map[string]ghResp{}
+	// We can't key nameWithOwner by dir in matchResp (it keys on args, not
+	// Dir). Two dirs needing different "o/a" vs "o/b" responses: use a
+	// per-dir delegate via a custom ExecGH.
+	stubMutex.Lock()
+	prevGH, prevGit := pr.ExecGH, pr.ExecGit
+	t.Cleanup(func() {
+		pr.ExecGH = prevGH
+		pr.ExecGit = prevGit
+		stubMutex.Unlock()
+	})
+	pr.ExecGH = func(d string, args ...string) ([]byte, error) {
+		if len(args) >= 2 && args[0] == "repo" && args[1] == "view" {
+			for _, a := range args {
+				if a == "nameWithOwner" {
+					if d == dir1 {
+						return ghJSON(t, struct {
+							NameWithOwner string `json:"nameWithOwner"`
+						}{"o/a"}), nil
+					}
+					return ghJSON(t, struct {
+						NameWithOwner string `json:"nameWithOwner"`
+					}{"o/b"}), nil
+				}
+				if a == "defaultBranchRef" {
+					return ghJSON(t, struct {
+						DefaultBranchRef struct {
+							Name string `json:"name"`
+						} `json:"defaultBranchRef"`
+					}{struct {
+						Name string `json:"name"`
+					}{"main"}}), nil
+				}
+			}
+		}
+		return matchResp(ghMap, args)
+	}
+	pr.ExecGit = func(d string, args ...string) ([]byte, error) {
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--abbrev-ref" {
+			return []byte("feat\n"), nil
+		}
+		if len(args) >= 2 && args[0] == "rev-list" && args[1] == "--count" {
+			return []byte("3\n"), nil
+		}
+		return nil, fmt.Errorf("test stub: unhandled git call %v", args)
+	}
+	opened := stubOpenURL(t)
+
+	var buf bytes.Buffer
+	if err := pr.ShowAll("", beadsDir, id, &buf); err != nil {
+		t.Fatalf("ShowAll: %v", err)
+	}
+	if len(*opened) != 2 {
+		t.Fatalf("opened = %v, want two URLs", *opened)
+	}
+	got := map[string]bool{(*opened)[0]: true, (*opened)[1]: true}
+	for _, want := range []string{
+		"https://github.com/o/a/pull/1",
+		"https://github.com/o/b/pull/2",
+	} {
+		if !got[want] {
+			t.Errorf("opened missing %s; got %v", want, *opened)
+		}
+	}
+}
+
+func TestShowAllSkipsDirsWithoutPR(t *testing.T) {
+	beadsDir := testutil.TestDB(t)
+	id := testutil.CreateBead(t, beadsDir, "pr-show-all-skip")
+	dir1 := t.TempDir()
+	dir2 := t.TempDir()
+	mustLinkDir(t, beadsDir, id, dir1)
+	mustLinkDir(t, beadsDir, id, dir2)
+	// Only dir1's repo has a PR record.
+	mustSavePRs(t, beadsDir, id, []pr.Record{
+		{Repo: "o/a", Number: 1, Branch: "b1"},
+	})
+
+	stubMutex.Lock()
+	prevGH, prevGit := pr.ExecGH, pr.ExecGit
+	t.Cleanup(func() {
+		pr.ExecGH = prevGH
+		pr.ExecGit = prevGit
+		stubMutex.Unlock()
+	})
+	pr.ExecGH = func(d string, args ...string) ([]byte, error) {
+		if len(args) >= 2 && args[0] == "repo" && args[1] == "view" {
+			for _, a := range args {
+				if a == "nameWithOwner" {
+					if d == dir1 {
+						return ghJSON(t, struct {
+							NameWithOwner string `json:"nameWithOwner"`
+						}{"o/a"}), nil
+					}
+					return ghJSON(t, struct {
+						NameWithOwner string `json:"nameWithOwner"`
+					}{"o/b"}), nil
+				}
+				if a == "defaultBranchRef" {
+					return ghJSON(t, struct {
+						DefaultBranchRef struct {
+							Name string `json:"name"`
+						} `json:"defaultBranchRef"`
+					}{struct {
+						Name string `json:"name"`
+					}{"main"}}), nil
+				}
+			}
+		}
+		return nil, fmt.Errorf("test stub: unhandled gh call %v", args)
+	}
+	pr.ExecGit = func(d string, args ...string) ([]byte, error) {
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--abbrev-ref" {
+			return []byte("feat\n"), nil
+		}
+		if len(args) >= 2 && args[0] == "rev-list" && args[1] == "--count" {
+			return []byte("2\n"), nil
+		}
+		return nil, fmt.Errorf("test stub: unhandled git call %v", args)
+	}
+	opened := stubOpenURL(t)
+
+	var buf bytes.Buffer
+	if err := pr.ShowAll("", beadsDir, id, &buf); err != nil {
+		t.Fatalf("ShowAll: %v", err)
+	}
+	if len(*opened) != 1 || (*opened)[0] != "https://github.com/o/a/pull/1" {
+		t.Errorf("opened = %v, want only o/a#1", *opened)
+	}
+	if !strings.Contains(buf.String(), "no PR attached, skipping") {
+		t.Errorf("stdout = %q, want skip notice", buf.String())
+	}
+}
+
+func TestShowAllErrorsWhenNoEligibleDirs(t *testing.T) {
+	beadsDir := testutil.TestDB(t)
+	id := testutil.CreateBead(t, beadsDir, "pr-show-all-none")
+	tmp := t.TempDir()
+	mustLinkDir(t, beadsDir, id, tmp)
+
+	stubMutex.Lock()
+	prevGH, prevGit := pr.ExecGH, pr.ExecGit
+	t.Cleanup(func() {
+		pr.ExecGH = prevGH
+		pr.ExecGit = prevGit
+		stubMutex.Unlock()
+	})
+	pr.ExecGH = func(d string, args ...string) ([]byte, error) {
+		if len(args) >= 2 && args[0] == "repo" && args[1] == "view" {
+			for _, a := range args {
+				if a == "defaultBranchRef" {
+					return ghJSON(t, struct {
+						DefaultBranchRef struct {
+							Name string `json:"name"`
+						} `json:"defaultBranchRef"`
+					}{struct {
+						Name string `json:"name"`
+					}{"main"}}), nil
+				}
+			}
+		}
+		return nil, fmt.Errorf("test stub: unhandled gh call %v", args)
+	}
+	pr.ExecGit = func(d string, args ...string) ([]byte, error) {
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--abbrev-ref" {
+			return []byte("feat\n"), nil
+		}
+		if len(args) >= 2 && args[0] == "rev-list" && args[1] == "--count" {
+			return []byte("0\n"), nil
+		}
+		return nil, fmt.Errorf("test stub: unhandled git call %v", args)
+	}
+	stubOpenURL(t)
+
+	var buf bytes.Buffer
+	err := pr.ShowAll("", beadsDir, id, &buf)
+	if err == nil {
+		t.Fatal("ShowAll succeeded with no eligible dirs, want error")
+	}
+	if !strings.Contains(err.Error(), "ahead of their base branch") {
+		t.Errorf("error = %v, want 'ahead of their base branch'", err)
+	}
+}
+
+// --- CreateAll ------------------------------------------------------------
+
+func TestCreateAllSkipsDirsAlreadyAttached(t *testing.T) {
+	beadsDir := testutil.TestDB(t)
+	id := testutil.CreateBead(t, beadsDir, "pr-create-all-dup")
+	tmp := t.TempDir()
+	mustLinkDir(t, beadsDir, id, tmp)
+	mustSavePRs(t, beadsDir, id, []pr.Record{
+		{Repo: "o/a", Number: 1, Branch: "b1"},
+	})
+
+	stubMutex.Lock()
+	prevGH, prevGit := pr.ExecGH, pr.ExecGit
+	t.Cleanup(func() {
+		pr.ExecGH = prevGH
+		pr.ExecGit = prevGit
+		stubMutex.Unlock()
+	})
+	pr.ExecGH = func(d string, args ...string) ([]byte, error) {
+		if len(args) >= 2 && args[0] == "repo" && args[1] == "view" {
+			for _, a := range args {
+				if a == "nameWithOwner" {
+					return ghJSON(t, struct {
+						NameWithOwner string `json:"nameWithOwner"`
+					}{"o/a"}), nil
+				}
+				if a == "defaultBranchRef" {
+					return ghJSON(t, struct {
+						DefaultBranchRef struct {
+							Name string `json:"name"`
+						} `json:"defaultBranchRef"`
+					}{struct {
+						Name string `json:"name"`
+					}{"main"}}), nil
+				}
+			}
+		}
+		return nil, fmt.Errorf("test stub: unhandled gh call %v", args)
+	}
+	pr.ExecGit = func(d string, args ...string) ([]byte, error) {
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--abbrev-ref" {
+			return []byte("b1\n"), nil
+		}
+		if len(args) >= 2 && args[0] == "rev-list" && args[1] == "--count" {
+			return []byte("4\n"), nil
+		}
+		return nil, fmt.Errorf("test stub: unhandled git call %v", args)
+	}
+
+	var buf bytes.Buffer
+	if err := pr.CreateAll("", beadsDir, id, false, &buf); err != nil {
+		t.Fatalf("CreateAll: %v", err)
+	}
+	if !strings.Contains(buf.String(), "PR already attached for o/a") {
+		t.Errorf("stdout = %q, want skip notice for o/a", buf.String())
+	}
+}
+
+func TestCreateAllErrorsWhenNoEligibleDirs(t *testing.T) {
+	beadsDir := testutil.TestDB(t)
+	id := testutil.CreateBead(t, beadsDir, "pr-create-all-none")
+	tmp := t.TempDir()
+	mustLinkDir(t, beadsDir, id, tmp)
+
+	stubMutex.Lock()
+	prevGH, prevGit := pr.ExecGH, pr.ExecGit
+	t.Cleanup(func() {
+		pr.ExecGH = prevGH
+		pr.ExecGit = prevGit
+		stubMutex.Unlock()
+	})
+	pr.ExecGH = func(d string, args ...string) ([]byte, error) {
+		if len(args) >= 2 && args[0] == "repo" && args[1] == "view" {
+			for _, a := range args {
+				if a == "defaultBranchRef" {
+					return ghJSON(t, struct {
+						DefaultBranchRef struct {
+							Name string `json:"name"`
+						} `json:"defaultBranchRef"`
+					}{struct {
+						Name string `json:"name"`
+					}{"main"}}), nil
+				}
+			}
+		}
+		return nil, fmt.Errorf("test stub: unhandled gh call %v", args)
+	}
+	pr.ExecGit = func(d string, args ...string) ([]byte, error) {
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--abbrev-ref" {
+			return []byte("feat\n"), nil
+		}
+		if len(args) >= 2 && args[0] == "rev-list" && args[1] == "--count" {
+			return []byte("0\n"), nil
+		}
+		return nil, fmt.Errorf("test stub: unhandled git call %v", args)
+	}
+
+	var buf bytes.Buffer
+	err := pr.CreateAll("", beadsDir, id, false, &buf)
+	if err == nil {
+		t.Fatal("CreateAll succeeded with no eligible dirs, want error")
+	}
+	if !strings.Contains(err.Error(), "ahead of their base branch") {
+		t.Errorf("error = %v, want 'ahead of their base branch'", err)
+	}
+}
+
 // --- helpers --------------------------------------------------------------
 
 // mustSavePRs writes recs to ticketID's metadata.prs via bd update. Mirrors

@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"runtime"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 
@@ -101,12 +104,71 @@ func Create(db, beadsDir, ticketID, selector string, ready bool, stdout io.Write
 	if _, err := os.Stat(entry.Path); err != nil {
 		return fmt.Errorf("linked dir is gone: %s: %w", entry.Path, err)
 	}
+	existing, err := Load(db, beadsDir, ticketID)
+	if err != nil {
+		return err
+	}
+	return createForEntry(db, beadsDir, ticketID, *entry, existing, ready, stdout)
+}
 
+// CreateAll runs `pr create` for every "eligible" linked dir on ticketID. A
+// dir counts as eligible when it has at least one commit ahead of the base
+// branch resolved via the parent chain. Dirs that already have a PR attached
+// for their repo are skipped with a notice (so `pr create --all` is safe to
+// re-run). Per-dir failures are reported and the function returns an error
+// when any dir failed, but it still tries every eligible dir.
+func CreateAll(db, beadsDir, ticketID string, ready bool, stdout io.Writer) error {
+	entries, err := dir.Load(db, beadsDir, ticketID)
+	if err != nil {
+		return err
+	}
+	if len(entries) == 0 {
+		return fmt.Errorf("ticket %s has no linked dirs", ticketID)
+	}
+	eligible, err := eligibleDirs(db, beadsDir, ticketID, entries)
+	if err != nil {
+		return err
+	}
+	if len(eligible) == 0 {
+		return errors.New("no linked dirs are ahead of their base branch")
+	}
+	var failures []string
+	for _, entry := range eligible {
+		// Reload existing records each iteration so successful Creates from
+		// earlier dirs are reflected in the duplicate check (though each
+		// dir's repo is distinct in practice, this keeps the invariants
+		// consistent if a dir links multiple repos in some future shape).
+		existing, err := Load(db, beadsDir, ticketID)
+		if err != nil {
+			return err
+		}
+		repo, err := nameWithOwner(entry.Path)
+		if err == nil && hasRepoRecord(existing, repo) {
+			fmt.Fprintf(stdout, "%s: PR already attached for %s, skipping\n", entry.Path, repo)
+			continue
+		}
+		fmt.Fprintf(stdout, "%s:\n", entry.Path)
+		if err := createForEntry(db, beadsDir, ticketID, entry, existing, ready, stdout); err != nil {
+			fmt.Fprintf(stdout, "%s: error: %v\n", entry.Path, err)
+			failures = append(failures, entry.Path)
+		}
+	}
+	if len(failures) > 0 {
+		return fmt.Errorf("pr create --all: %d dir(s) failed: %s",
+			len(failures), strings.Join(failures, ", "))
+	}
+	return nil
+}
+
+// createForEntry performs the create-PR work for a single, already-resolved
+// linked dir entry. It is the shared body used by Create and CreateAll.
+// existing is the bead's current PR records; the same-repo duplicate check
+// runs against it.
+func createForEntry(db, beadsDir, ticketID string, entry dir.Entry, existing []Record, ready bool, stdout io.Writer) error {
 	repo, err := nameWithOwner(entry.Path)
 	if err != nil {
 		return err
 	}
-
 	branch, err := gitCurrentBranch(entry.Path)
 	if err != nil {
 		return err
@@ -114,27 +176,21 @@ func Create(db, beadsDir, ticketID, selector string, ready bool, stdout io.Write
 	if branch == "" || branch == "HEAD" {
 		return fmt.Errorf("dir %s is on a detached HEAD; check out a branch before creating a PR", entry.Path)
 	}
-
-	if existing, err := openPRForBranch(repo, branch); err != nil {
+	if existingNum, err := openPRForBranch(repo, branch); err != nil {
 		return err
-	} else if existing != 0 {
+	} else if existingNum != 0 {
 		return fmt.Errorf("an open PR for %s on branch %s already exists (#%d); use `ticket pr link` to attach it",
-			repo, branch, existing)
+			repo, branch, existingNum)
 	}
-
 	// Refuse a second PR for the same (bead, dir) pair. Identity is by repo
 	// because storage doesn't track the originating dir directly.
-	existing, err := Load(db, beadsDir, ticketID)
-	if err != nil {
-		return err
-	}
 	for _, r := range existing {
 		if r.Repo == repo {
 			return fmt.Errorf("bead %s already has a PR attached for %s (#%d)", ticketID, repo, r.Number)
 		}
 	}
 
-	base, baseDir, isDefault, err := resolveBase(db, beadsDir, ticketID, *entry)
+	base, baseDir, isDefault, err := resolveBase(db, beadsDir, ticketID, entry)
 	if err != nil {
 		return err
 	}
@@ -205,6 +261,176 @@ func Create(db, beadsDir, ticketID, selector string, ready bool, stdout io.Write
 	}
 	fmt.Fprintln(stdout, url)
 	return nil
+}
+
+// hasRepoRecord reports whether any of recs targets the given repo.
+func hasRepoRecord(recs []Record, repo string) bool {
+	for _, r := range recs {
+		if r.Repo == repo {
+			return true
+		}
+	}
+	return false
+}
+
+// Show opens the PR URL for the dir at selector in the operator's browser.
+// When the ticket has exactly one linked dir, selector may be empty.
+func Show(db, beadsDir, ticketID, selector string, stdout io.Writer) error {
+	entries, err := dir.Load(db, beadsDir, ticketID)
+	if err != nil {
+		return err
+	}
+	if len(entries) == 0 {
+		return fmt.Errorf("ticket %s has no linked dirs", ticketID)
+	}
+	entry, err := dir.PickEntry(ticketID, entries, selector)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(entry.Path); err != nil {
+		return fmt.Errorf("linked dir is gone: %s: %w", entry.Path, err)
+	}
+	recs, err := Load(db, beadsDir, ticketID)
+	if err != nil {
+		return err
+	}
+	rec, ok, err := recordForEntry(*entry, recs)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("dir %s has no PR attached on ticket %s", entry.Path, ticketID)
+	}
+	fmt.Fprintln(stdout, rec.URL())
+	return OpenURL(rec.URL())
+}
+
+// ShowAll opens the PR URLs for every eligible linked dir. Dirs that are
+// eligible (≥1 commit ahead of base) but have no PR attached are skipped
+// with a notice on stdout.
+func ShowAll(db, beadsDir, ticketID string, stdout io.Writer) error {
+	entries, err := dir.Load(db, beadsDir, ticketID)
+	if err != nil {
+		return err
+	}
+	if len(entries) == 0 {
+		return fmt.Errorf("ticket %s has no linked dirs", ticketID)
+	}
+	eligible, err := eligibleDirs(db, beadsDir, ticketID, entries)
+	if err != nil {
+		return err
+	}
+	if len(eligible) == 0 {
+		return errors.New("no linked dirs are ahead of their base branch")
+	}
+	recs, err := Load(db, beadsDir, ticketID)
+	if err != nil {
+		return err
+	}
+	var failures []string
+	for _, entry := range eligible {
+		rec, ok, err := recordForEntry(entry, recs)
+		if err != nil {
+			fmt.Fprintf(stdout, "%s: error: %v\n", entry.Path, err)
+			failures = append(failures, entry.Path)
+			continue
+		}
+		if !ok {
+			fmt.Fprintf(stdout, "%s: no PR attached, skipping\n", entry.Path)
+			continue
+		}
+		fmt.Fprintln(stdout, rec.URL())
+		if err := OpenURL(rec.URL()); err != nil {
+			fmt.Fprintf(stdout, "%s: open failed: %v\n", entry.Path, err)
+			failures = append(failures, entry.Path)
+		}
+	}
+	if len(failures) > 0 {
+		return fmt.Errorf("pr show --all: %d dir(s) failed: %s",
+			len(failures), strings.Join(failures, ", "))
+	}
+	return nil
+}
+
+// recordForEntry returns the PR record matching entry's repo (and ok=false
+// when none matches). Errors propagate only from the nameWithOwner gh call.
+func recordForEntry(entry dir.Entry, recs []Record) (Record, bool, error) {
+	repo, err := nameWithOwner(entry.Path)
+	if err != nil {
+		return Record{}, false, err
+	}
+	for _, r := range recs {
+		if r.Repo == repo {
+			return r, true, nil
+		}
+	}
+	return Record{}, false, nil
+}
+
+// eligibleDirs returns the entries from `entries` that have at least one
+// commit ahead of their resolved base branch. Entries whose path is missing
+// or whose branch is detached are skipped silently — they can't have a
+// non-zero commits-ahead by definition. resolveBase errors propagate (a
+// missing ancestor worktree is a real configuration problem worth surfacing).
+func eligibleDirs(db, beadsDir, ticketID string, entries []dir.Entry) ([]dir.Entry, error) {
+	var out []dir.Entry
+	for _, e := range entries {
+		if _, err := os.Stat(e.Path); err != nil {
+			continue
+		}
+		branch, err := gitCurrentBranch(e.Path)
+		if err != nil || branch == "" || branch == "HEAD" {
+			continue
+		}
+		base, _, _, err := resolveBase(db, beadsDir, ticketID, e)
+		if err != nil {
+			return nil, err
+		}
+		n, err := commitsAhead(e.Path, base)
+		if err != nil {
+			return nil, err
+		}
+		if n > 0 {
+			out = append(out, e)
+		}
+	}
+	return out, nil
+}
+
+// commitsAhead returns the number of commits in dirPath's HEAD that are not
+// reachable from base.
+func commitsAhead(dirPath, base string) (int, error) {
+	out, err := ExecGit(dirPath, "rev-list", "--count", base+"..HEAD")
+	if err != nil {
+		return 0, err
+	}
+	s := strings.TrimSpace(string(out))
+	if s == "" {
+		return 0, nil
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, fmt.Errorf("parse rev-list --count output %q: %w", s, err)
+	}
+	return n, nil
+}
+
+// OpenURL launches the operator's default browser on the given URL. Tests
+// substitute this to record calls without spawning a process.
+var OpenURL = defaultOpenURL
+
+func defaultOpenURL(url string) error {
+	cmd := exec.Command(openCommand(), url)
+	return cmd.Run()
+}
+
+func openCommand() string {
+	switch runtime.GOOS {
+	case "darwin":
+		return "open"
+	default:
+		return "xdg-open"
+	}
 }
 
 // Link attaches an existing PR (identified by rawURL) to ticketID, associating

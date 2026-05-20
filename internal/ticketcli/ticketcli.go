@@ -198,6 +198,20 @@ subcommands:
                                           (force-with-lease) before calling
                                           ` + "`gh pr create`" + `. The PR is opened as a
                                           draft unless --ready is passed.
+  pr create [<id>] --all [--ready]        run ` + "`pr create`" + ` for every "eligible"
+                                          linked dir (≥1 commit ahead of base).
+                                          Dirs already having a PR attached
+                                          for their repo are skipped with a
+                                          notice; per-dir failures are
+                                          reported but do not abort the rest.
+  pr show [<id>] [<path>]                 open the attached PR for the dir at
+                                          <path> in the default browser. With
+                                          a single linked dir, <path> may be
+                                          omitted.
+  pr show [<id>] --all                    open the attached PRs for every
+                                          "eligible" linked dir (≥1 commit
+                                          ahead of base). Dirs with no PR
+                                          attached are skipped with a notice.
   pr link [<id>] [<path>] <pr-url>        attach an existing PR (identified by
                                           URL) to the bead, associating it
                                           with the dir at <path>. No push.
@@ -1267,7 +1281,7 @@ func resolveOptionalID(ticket string, args []string, extra int, usage string) (s
 // runPR dispatches `ticket pr <sub> ...`.
 func runPR(db, beadsDir, ticket string, args []string, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: ticket pr <list|create|link|create-bead|refresh> ...")
+		return errors.New("usage: ticket pr <list|create|show|link|create-bead|refresh> ...")
 	}
 	sub, rest := args[0], args[1:]
 	switch sub {
@@ -1278,14 +1292,25 @@ func runPR(db, beadsDir, ticket string, args []string, stdout io.Writer) error {
 		}
 		return pr.List(db, beadsDir, id, stdout)
 	case "create":
-		var ready bool
+		var ready, all bool
 		var positional []string
 		for _, a := range rest {
-			if a == "--ready" {
+			switch a {
+			case "--ready":
 				ready = true
-				continue
+			case "--all":
+				all = true
+			default:
+				positional = append(positional, a)
 			}
-			positional = append(positional, a)
+		}
+		if all {
+			usage := "usage: ticket pr create [<id>] --all [--ready]"
+			id, _, err := resolveID(ticket, positional, 0, usage)
+			if err != nil {
+				return err
+			}
+			return pr.CreateAll(db, beadsDir, id, ready, stdout)
 		}
 		usage := "usage: ticket pr create [<id>] [<path>] [--ready]"
 		id, selector, err := resolveIDOptionalSelector(ticket, positional, usage)
@@ -1293,6 +1318,30 @@ func runPR(db, beadsDir, ticket string, args []string, stdout io.Writer) error {
 			return err
 		}
 		return pr.Create(db, beadsDir, id, selector, ready, stdout)
+	case "show":
+		var all bool
+		var positional []string
+		for _, a := range rest {
+			if a == "--all" {
+				all = true
+				continue
+			}
+			positional = append(positional, a)
+		}
+		if all {
+			usage := "usage: ticket pr show [<id>] --all"
+			id, _, err := resolveID(ticket, positional, 0, usage)
+			if err != nil {
+				return err
+			}
+			return pr.ShowAll(db, beadsDir, id, stdout)
+		}
+		usage := "usage: ticket pr show [<id>] [<path>]"
+		id, selector, err := resolveIDOptionalSelector(ticket, positional, usage)
+		if err != nil {
+			return err
+		}
+		return pr.Show(db, beadsDir, id, selector, stdout)
 	case "link":
 		// link needs <pr-url> as the last positional. Optional <path> sits
 		// between id and url when present.
