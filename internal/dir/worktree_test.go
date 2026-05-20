@@ -1,10 +1,13 @@
 package dir_test
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	"framework2/internal/dir"
@@ -160,6 +163,102 @@ func TestDirWorktreeIdempotent(t *testing.T) {
 	entries := listEntries(t, beadsDir, ticket)
 	if len(entries) != 1 {
 		t.Errorf("entries=%+v, want exactly 1 after idempotent re-run", entries)
+	}
+}
+
+// TestDirWorktreeParallelSameTicket regresses
+// https://beads/ai-vrc.58: launching `dir worktree` on the same ticket in
+// parallel against different bare repos would race on the ticket's
+// metadata.dirs read-modify-write and silently drop entries. The lock added
+// in dir/lock.go serialises these calls per beadsDir; this test verifies
+// every concurrent worktree shows up in the final entry list.
+func TestDirWorktreeParallelSameTicket(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBead(t, beadsDir, "wt-parallel")
+
+	const n = 4
+	bares := make([]string, n)
+	for i := range bares {
+		bares[i] = bareRepo(t, "main")
+	}
+
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = dir.Worktree("", beadsDir, ticket, bares[i])
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("Worktree #%d (%s): %v", i, bares[i], err)
+		}
+	}
+
+	entries := listEntries(t, beadsDir, ticket)
+	if len(entries) != n {
+		t.Fatalf("entries=%+v, want %d (one per parallel call)", entries, n)
+	}
+	gotBares := make([]string, len(entries))
+	for i, e := range entries {
+		gotBares[i] = e.BareRepo
+	}
+	sort.Strings(gotBares)
+	wantBares := append([]string(nil), bares...)
+	sort.Strings(wantBares)
+	for i := range wantBares {
+		if gotBares[i] != wantBares[i] {
+			t.Errorf("bareRepo[%d]=%q want %q (full got=%v want=%v)", i, gotBares[i], wantBares[i], gotBares, wantBares)
+		}
+	}
+}
+
+// TestDirWorktreeParallelChildrenSameParent regresses the cascade race: when
+// multiple child beads are addressed in parallel against the same bare repo,
+// each cascade tries to create the shared parent's worktree first. Without
+// the lock they raced on bd metadata and on `git worktree add` against the
+// same bare. The lock makes the parent's worktree appear exactly once and
+// every child cascades through it.
+func TestDirWorktreeParallelChildrenSameParent(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	parent := testutil.CreateBead(t, beadsDir, "wt-par-cascade-parent")
+	const n = 4
+	children := make([]string, n)
+	for i := range children {
+		children[i] = testutil.CreateChildBead(t, beadsDir, fmt.Sprintf("wt-par-cascade-child-%d", i), parent)
+	}
+	bare := bareRepo(t, "main")
+
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = dir.Worktree("", beadsDir, children[i], bare)
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("Worktree child#%d: %v", i, err)
+		}
+	}
+
+	parentEntries := listEntries(t, beadsDir, parent)
+	if len(parentEntries) != 1 {
+		t.Fatalf("parent entries=%+v want exactly 1 (cascade should create the parent's worktree exactly once)", parentEntries)
+	}
+	for i, child := range children {
+		ce := listEntries(t, beadsDir, child)
+		if len(ce) != 1 {
+			t.Errorf("child#%d entries=%+v want exactly 1", i, ce)
+		}
 	}
 }
 

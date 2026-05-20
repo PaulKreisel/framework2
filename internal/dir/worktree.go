@@ -44,8 +44,10 @@ func Worktree(db, beadsDir, ticketID, bareRepo string) error {
 	if err != nil {
 		return err
 	}
-	_, err = ensureWorktree(db, beadsDir, ticketID, bare, cfg)
-	return err
+	return withWorktreeLock(beadsDir, func() error {
+		_, err := ensureWorktree(db, beadsDir, ticketID, bare, cfg)
+		return err
+	})
 }
 
 // ensureWorktree returns the branch name to use as the base for descendants.
