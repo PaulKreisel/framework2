@@ -77,3 +77,64 @@ func gitWorktreeAdd(repo, wtPath, branch, base string) error {
 	}
 	return nil
 }
+
+// AgentSessionNotesRef is the notes ref used by `this finish` to record
+// per-commit session/ticket attribution. Held here in the `dir` package so
+// the worktree config helper can wire fetch up without importing `finish`
+// (which depends on this package).
+const AgentSessionNotesRef = "refs/notes/agent-session"
+
+// ensureNotesFetchRefspec adds
+//
+//	+refs/notes/agent-session:refs/notes/agent-session
+//
+// to remote.<origin>.fetch in repo (a worktree or bare path) when origin
+// exists and the refspec is not already configured. Idempotent: re-running
+// is a no-op. Returns nil silently when the repo has no remotes — a
+// notes-fetch refspec on a remote that doesn't exist would just be dead
+// config.
+func ensureNotesFetchRefspec(repo string) error {
+	remote := defaultRemote(repo)
+	if remote == "" {
+		return nil
+	}
+	want := "+" + AgentSessionNotesRef + ":" + AgentSessionNotesRef
+	existing, _ := exec.Command("git", "-C", repo, "config", "--get-all",
+		"remote."+remote+".fetch").Output()
+	for _, line := range strings.Split(string(existing), "\n") {
+		if strings.TrimSpace(line) == want {
+			return nil
+		}
+	}
+	cmd := exec.Command("git", "-C", repo, "config", "--add",
+		"remote."+remote+".fetch", want)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git config --add remote.%s.fetch: %w: %s",
+			remote, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// defaultRemote returns the remote name to attach the notes refspec to.
+// Prefers "origin" when present, else falls back to the first remote listed
+// by `git remote`. Returns "" when the repo has no remotes — typical for a
+// local-only bare that exists only as a workspace.
+func defaultRemote(repo string) string {
+	out, err := exec.Command("git", "-C", repo, "remote").Output()
+	if err != nil {
+		return ""
+	}
+	remotes := strings.Split(strings.TrimSpace(string(out)), "\n")
+	for _, r := range remotes {
+		if strings.TrimSpace(r) == "origin" {
+			return "origin"
+		}
+	}
+	if len(remotes) > 0 {
+		r := strings.TrimSpace(remotes[0])
+		if r != "" {
+			return r
+		}
+	}
+	return ""
+}

@@ -34,6 +34,11 @@ import (
 	"framework2/internal/ready"
 )
 
+// NotesRef is the git notes ref where `this finish` writes per-commit
+// session/ticket attribution. Held on a dedicated ref (not the default
+// refs/notes/commits) so the namespace stays clean.
+const NotesRef = "refs/notes/agent-session"
+
 // Run executes the finish flow for ticketID. beadsDir must be set so the env
 // folder can be located; db is the optional bd database path forwarded to
 // `bd` invocations.
@@ -64,11 +69,22 @@ func Run(db, beadsDir, ticketID string, continueMode bool, stdout io.Writer) err
 	if err != nil {
 		return err
 	}
-	parentTargets, err := rebaseWorktrees(db, beadsDir, ticketID, parent, worktrees, continueMode)
+	rebaseResults, err := rebaseWorktrees(db, beadsDir, ticketID, parent, worktrees, continueMode)
 	if err != nil {
 		return err
 	}
 
+	if err := writeSessionNotes(db, beadsDir, ticketID, rebaseResults); err != nil {
+		// Notes failures shouldn't tank the finish — the rebase already
+		// landed and reverting it would be more disruptive than losing
+		// attribution. Surface the error and move on.
+		fmt.Fprintf(stdout, "warn: write agent-session notes for %s: %v\n", ticketID, err)
+	}
+
+	parentTargets := make([]dir.Entry, 0, len(rebaseResults))
+	for _, r := range rebaseResults {
+		parentTargets = append(parentTargets, r.ParentEntry)
+	}
 	if err := runPipelines(db, beadsDir, ticketID, parentTargets, stdout); err != nil {
 		return err
 	}
@@ -211,6 +227,17 @@ func inProgressRebase(wt string) bool {
 	return false
 }
 
+// rebaseResult records one parent worktree that received an FF-advance, along
+// with the SHA range that landed on it. OldParentSHA is the parent branch's
+// HEAD BEFORE the advance; NewParentSHA is the same branch's HEAD AFTER (==
+// the child branch's tip). OldParentSHA..NewParentSHA is the range of commits
+// that just landed on the parent — what session-note attribution targets.
+type rebaseResult struct {
+	ParentEntry  dir.Entry
+	OldParentSHA string
+	NewParentSHA string
+}
+
 // rebaseWorktrees brings each worktree's branch onto its parent ticket's
 // branch in the same bare repo, then fast-forwards the parent worktree's
 // branch to match. A root bead (no parent) or a bead whose parent has no
@@ -218,10 +245,10 @@ func inProgressRebase(wt string) bool {
 // worktrees resume via `git rebase --continue`; non-in-rebase worktrees
 // take the normal path.
 //
-// Returns the parent worktree entries that received an ff-advance (one per
-// child worktree that had a matching parent in the same bare). Callers use
-// the returned list to run per-repo post-merge pipelines.
-func rebaseWorktrees(db, beadsDir, ticketID, parent string, worktrees []dir.Entry, continueMode bool) ([]dir.Entry, error) {
+// Returns one [rebaseResult] per child worktree that had a matching parent in
+// the same bare. Callers use the returned list to run per-repo post-merge
+// pipelines and to attach attribution notes.
+func rebaseWorktrees(db, beadsDir, ticketID, parent string, worktrees []dir.Entry, continueMode bool) ([]rebaseResult, error) {
 	if parent == "" {
 		return nil, nil
 	}
@@ -229,7 +256,7 @@ func rebaseWorktrees(db, beadsDir, ticketID, parent string, worktrees []dir.Entr
 	if err != nil {
 		return nil, err
 	}
-	var advanced []dir.Entry
+	var results []rebaseResult
 	for _, e := range worktrees {
 		pe, ok := findEntryForBare(parentEntries, e.BareRepo)
 		if !ok {
@@ -240,12 +267,24 @@ func rebaseWorktrees(db, beadsDir, ticketID, parent string, worktrees []dir.Entr
 		if err := ffRebase(e.Path, pe.Branch, continueMode); err != nil {
 			return nil, err
 		}
+		oldParentSHA, ok := runGit(pe.Path, "rev-parse", "HEAD")
+		if !ok {
+			return nil, fmt.Errorf("rev-parse HEAD failed in %s", pe.Path)
+		}
 		if err := ffAdvance(pe.Path, pe.Branch, e.Branch); err != nil {
 			return nil, err
 		}
-		advanced = append(advanced, pe)
+		newParentSHA, ok := runGit(pe.Path, "rev-parse", "HEAD")
+		if !ok {
+			return nil, fmt.Errorf("rev-parse HEAD failed in %s after advance", pe.Path)
+		}
+		results = append(results, rebaseResult{
+			ParentEntry:  pe,
+			OldParentSHA: oldParentSHA,
+			NewParentSHA: newParentSHA,
+		})
 	}
-	return advanced, nil
+	return results, nil
 }
 
 // ffAdvance fast-forwards the parent worktree's checked-out branch
