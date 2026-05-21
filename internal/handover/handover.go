@@ -11,8 +11,8 @@
 //	<bundle-root>/
 //	  README.md
 //	  beads.jsonl                       (subtree-filtered bd export)
+//	  commits.md                        (single chronological table across the subtree)
 //	  tickets/<id>/conversation.md      (one per bead in subtree)
-//	  tickets/<id>/commits.md           (one per bead with a linked worktree)
 //
 // Git bundles and the `repos.json` mapping are out of scope here: code is
 // shipped via a separate push channel and the bundle deliberately stays
@@ -79,29 +79,40 @@ func Run(db, beadsDir, ticketID, outputOverride string, noArchive bool, stdout i
 	}
 	fmt.Fprintln(stdout, "  wrote beads.jsonl")
 
-	// 4. Per-ticket conversation.md and commits.md.
+	// 4. Per-ticket conversation.md plus a single top-level commits.md.
+	// The commits table is collapsed across the whole subtree: a finished
+	// child's commits live on the parent's branch after FF-rebase, so
+	// listing them per-bead would either double-count them or leave the
+	// child file empty. We collect every (worktree, base-branch) pair in
+	// the subtree and let writeCommitsMD dedupe by SHA.
+	var sources []commitSource
 	for _, id := range order {
-		b := beads[id]
-		if err := writeConversationMD(dirPath, b, beads); err != nil {
+		if err := writeConversationMD(dirPath, beads[id], beads); err != nil {
 			return fmt.Errorf("render conversation for %s: %w", id, err)
 		}
 		dirs, err := loadDirEntries(db, beadsDir, id)
 		if err != nil {
 			return fmt.Errorf("load dirs for %s: %w", id, err)
 		}
-		// commits.md is only emitted for beads with at least one linked
-		// worktree — spec sibling B's "no worktree, no commits" rule.
-		if hasWorktree(dirs) {
-			parentBranches, err := parentBranchesFor(db, beadsDir, id, dirs)
-			if err != nil {
-				return fmt.Errorf("resolve parent branches for %s: %w", id, err)
+		if !hasWorktree(dirs) {
+			continue
+		}
+		parentBranches, err := parentBranchesFor(db, beadsDir, id, dirs)
+		if err != nil {
+			return fmt.Errorf("resolve parent branches for %s: %w", id, err)
+		}
+		for _, e := range dirs {
+			if e.BareRepo == "" || e.Branch == "" {
+				continue
 			}
-			if err := writeCommitsMD(dirPath, b, dirs, parentBranches, beads); err != nil {
-				return fmt.Errorf("render commits for %s: %w", id, err)
-			}
+			sources = append(sources, commitSource{Entry: e, Base: parentBranches[e.BareRepo]})
 		}
 	}
 	fmt.Fprintf(stdout, "  wrote tickets/ (%d bead(s))\n", len(order))
+	if err := writeCommitsMD(dirPath, sources, beads); err != nil {
+		return fmt.Errorf("render commits.md: %w", err)
+	}
+	fmt.Fprintln(stdout, "  wrote commits.md")
 
 	// 5. README.
 	if err := writeReadme(dirPath, ticketID, beads[ticketID], order, beads); err != nil {

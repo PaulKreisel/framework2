@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"framework2/internal/dir"
@@ -80,14 +81,20 @@ func defaultBranch(bare string) string {
 	return "main"
 }
 
-// writeCommitsMD renders <dirPath>/tickets/<id>/commits.md with one section
-// per linked worktree. Per-commit session ids are pulled from the
-// refs/notes/agent-session note attached to that SHA, when present.
-func writeCommitsMD(dirPath string, b *Bead, entries []dir.Entry, parentBranches map[string]string, beads map[string]*Bead) error {
-	out := filepath.Join(dirPath, "tickets", b.ID, "commits.md")
-	if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
-		return err
-	}
+// commitSource is one (bead, worktree) pair to scan for commits.
+type commitSource struct {
+	Entry dir.Entry
+	Base  string
+}
+
+// writeCommitsMD renders <dirPath>/commits.md as a single chronologically
+// ordered table covering every linked worktree in the subtree. Commits
+// that appear in more than one source (e.g. a finished child's commit
+// that has been FF-rebased onto the parent) are deduplicated by SHA. The
+// `Ticket` column is read from the refs/notes/agent-session JSON payload
+// and is empty for commits made outside any agent session.
+func writeCommitsMD(dirPath string, sources []commitSource, beads map[string]*Bead) error {
+	out := filepath.Join(dirPath, "commits.md")
 	f, err := os.Create(out)
 	if err != nil {
 		return err
@@ -96,54 +103,72 @@ func writeCommitsMD(dirPath string, b *Bead, entries []dir.Entry, parentBranches
 	w := bufio.NewWriter(f)
 	defer w.Flush()
 
-	fmt.Fprintf(w, "# %s · commits\n\n", b.ID)
+	fmt.Fprintln(w, "# Commits")
+	fmt.Fprintln(w)
 
-	wrote := false
-	for _, e := range entries {
-		if e.BareRepo == "" || e.Branch == "" {
-			continue
-		}
-		base := parentBranches[e.BareRepo]
-		commits, err := listCommits(e.Path, base, e.Branch)
+	seen := map[string]struct{}{}
+	var rows []gitCommit
+	var problems []string
+	for _, s := range sources {
+		commits, err := listCommits(s.Entry.Path, s.Base, s.Entry.Branch)
 		if err != nil {
-			fmt.Fprintf(w, "## %s — branch `%s`\n\n_error listing commits: %v_\n\n",
-				repoLabel(e.BareRepo), e.Branch, err)
-			wrote = true
+			problems = append(problems, fmt.Sprintf("%s @ `%s`: %v",
+				repoLabel(s.Entry.BareRepo), s.Entry.Branch, err))
 			continue
 		}
-		fmt.Fprintf(w, "## %s — branch `%s`\n\n", repoLabel(e.BareRepo), e.Branch)
-		fmt.Fprintf(w, "Base: `%s`\n\n", nz(base))
-		if len(commits) == 0 {
-			fmt.Fprintln(w, "_No commits in range._")
-			fmt.Fprintln(w)
-			wrote = true
-			continue
-		}
-		fmt.Fprintln(w, "| SHA | Date | Subject | Session |")
-		fmt.Fprintln(w, "| --- | --- | --- | --- |")
 		for _, c := range commits {
-			fmt.Fprintf(w, "| `%s` | %s | %s | %s |\n",
-				c.ShortSHA, c.Date, mdEscape(linkBeadIDs(c.Subject, beads)), c.Session)
+			if _, dup := seen[c.SHA]; dup {
+				continue
+			}
+			seen[c.SHA] = struct{}{}
+			rows = append(rows, c)
 		}
-		fmt.Fprintln(w)
-		wrote = true
 	}
-	if !wrote {
-		fmt.Fprintln(w, "_No worktrees linked._")
+
+	// Chronological order across the whole subtree. Git's `--date=short`
+	// gives YYYY-MM-DD which sorts lexicographically; tie-break by SHA so
+	// the output is stable.
+	sort.SliceStable(rows, func(i, j int) bool {
+		if rows[i].Date != rows[j].Date {
+			return rows[i].Date < rows[j].Date
+		}
+		return rows[i].SHA < rows[j].SHA
+	})
+
+	if len(rows) == 0 {
+		fmt.Fprintln(w, "_No commits in subtree._")
+	} else {
+		fmt.Fprintln(w, "| SHA | Date | Subject | Ticket |")
+		fmt.Fprintln(w, "| --- | --- | --- | --- |")
+		for _, c := range rows {
+			fmt.Fprintf(w, "| `%s` | %s | %s | %s |\n",
+				c.ShortSHA, c.Date,
+				mdEscape(linkBeadIDsFromRoot(c.Subject, beads)),
+				ticketCell(c.Ticket, beads))
+		}
+	}
+	if len(problems) > 0 {
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "## Problems")
+		fmt.Fprintln(w)
+		for _, p := range problems {
+			fmt.Fprintf(w, "- %s\n", p)
+		}
 	}
 	return nil
 }
 
 // gitCommit is one row in the commits.md table.
 type gitCommit struct {
+	SHA      string
 	ShortSHA string
 	Date     string
 	Subject  string
-	Session  string
+	Ticket   string
 }
 
 // listCommits returns the commits in base..branch evaluated from the
-// worktree at wtPath, plus the session-id parsed from the
+// worktree at wtPath, plus the ticket-id parsed from the
 // refs/notes/agent-session note on each commit (empty when no note exists).
 //
 // handover is intended for unfinished tickets — once `this finish` has
@@ -182,16 +207,17 @@ func listCommits(wtPath, base, branch string) ([]gitCommit, error) {
 			continue
 		}
 		commits = append(commits, gitCommit{
+			SHA:      parts[0],
 			ShortSHA: parts[1],
 			Date:     parts[2],
 			Subject:  parts[3],
-			Session:  sessionIDForCommit(wtPath, parts[0]),
+			Ticket:   ticketIDForCommit(wtPath, parts[0]),
 		})
 	}
 	return commits, nil
 }
 
-func sessionIDForCommit(wtPath, sha string) string {
+func ticketIDForCommit(wtPath, sha string) string {
 	out, err := exec.Command("git", "-C", wtPath,
 		"notes", "--ref="+finish.NotesRef, "show", sha,
 	).Output()
@@ -199,12 +225,26 @@ func sessionIDForCommit(wtPath, sha string) string {
 		return ""
 	}
 	var payload struct {
-		SessionID string `json:"sessionId"`
+		TicketID string `json:"ticketId"`
 	}
 	if err := json.Unmarshal(out, &payload); err != nil {
 		return ""
 	}
-	return payload.SessionID
+	return payload.TicketID
+}
+
+// ticketCell renders the Ticket column for a commit row. When the id is
+// in the subtree, the cell is a relative markdown link to the bead's
+// conversation.md; otherwise (or when no note exists) we render the raw
+// string — empty for commits authored outside any session.
+func ticketCell(id string, beads map[string]*Bead) string {
+	if id == "" {
+		return ""
+	}
+	if _, ok := beads[id]; ok {
+		return fmt.Sprintf("[%s](tickets/%s/conversation.md)", id, id)
+	}
+	return id
 }
 
 // repoLabel returns a portable name for the bare repo: basename minus the

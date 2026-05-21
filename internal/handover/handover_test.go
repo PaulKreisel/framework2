@@ -17,10 +17,11 @@ import (
 )
 
 // TestHandoverProducesTarballAndDirectory exercises the end-to-end flow:
-// subtree discovery + beads.jsonl + per-bead conversation.md + commits.md
-// + README + tar.gz packaging. We register an agent session, commit code,
-// finish the leaf so refs/notes/agent-session is written, then run
-// handover on the parent (which is still open and links the same bare).
+// subtree discovery + beads.jsonl + per-bead conversation.md + top-level
+// commits.md + README + tar.gz packaging. We register an agent session,
+// commit code, finish the leaf so refs/notes/agent-session is written,
+// then run handover on the parent (which is still open and links the
+// same bare).
 func TestHandoverProducesTarballAndDirectory(t *testing.T) {
 	t.Parallel()
 	beadsDir := testutil.TestDB(t)
@@ -100,16 +101,36 @@ func TestHandoverProducesTarballAndDirectory(t *testing.T) {
 		t.Errorf("child conversation missing user prompt body")
 	}
 
-	// Parent has a worktree linked (from the cascade), so it gets a
-	// commits.md. After the child finished, the parent's branch is one
-	// commit ahead of the bare default — base is the bare's default
-	// branch, ticket branch is the parent's branch.
-	parentCommits, ok := files["tickets/"+parent+"/commits.md"]
+	// One top-level commits.md covers the whole subtree. After the child
+	// finished, its commit was FF-rebased onto the parent's branch — we
+	// scan the parent's worktree and attribute the commit back to the
+	// child via the `ticketId` from the agent-session note.
+	commitsMD, ok := files["commits.md"]
 	if !ok {
-		t.Fatalf("parent commits.md missing")
+		t.Fatalf("top-level commits.md missing; got keys: %v", keys(files))
 	}
-	if !strings.Contains(string(parentCommits), sessionID) {
-		t.Errorf("parent commits.md missing session id %q\n%s", sessionID, parentCommits)
+	cs := string(commitsMD)
+	if !strings.Contains(cs, "| Ticket |") {
+		t.Errorf("commits.md missing Ticket column header:\n%s", cs)
+	}
+	if strings.Contains(cs, "| Session |") {
+		t.Errorf("commits.md still has Session column:\n%s", cs)
+	}
+	wantTicketLink := "[" + child + "](tickets/" + child + "/conversation.md)"
+	if !strings.Contains(cs, wantTicketLink) {
+		t.Errorf("commits.md missing child ticket link %q:\n%s", wantTicketLink, cs)
+	}
+	if strings.Contains(cs, sessionID) {
+		t.Errorf("commits.md still surfaces session id %q (should be ticket-only):\n%s", sessionID, cs)
+	}
+	if !strings.Contains(cs, "feat: handover-child landing") {
+		t.Errorf("commits.md missing commit subject:\n%s", cs)
+	}
+	// Per-bead commits.md files must no longer be emitted.
+	for k := range files {
+		if strings.HasPrefix(k, "tickets/") && strings.HasSuffix(k, "/commits.md") {
+			t.Errorf("legacy per-bead commits.md leaked: %s", k)
+		}
 	}
 
 	// beads.jsonl: subtree-filtered (just parent + child), host fields

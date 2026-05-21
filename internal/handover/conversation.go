@@ -213,12 +213,26 @@ func childrenBreadcrumb(b *Bead, beads map[string]*Bead) string {
 // letters because every bd setup we run uses that shape.
 var beadIDRe = regexp.MustCompile(`\b([a-z][a-z0-9]+(?:\.[0-9]+)+)\b`)
 
-// linkBeadIDs wraps every bd id in s with a relative markdown link to that
-// ticket's conversation.md, if the id is in the subtree. Plain occurrences
-// of ids outside the subtree are left as-is. We deliberately don't touch
-// occurrences inside fenced code blocks to keep diff hunks readable — that
-// trade-off avoids a heavier markdown-aware walker.
+// linkBeadIDs wraps every bd id in s with a relative markdown link to
+// that ticket's conversation.md, suitable for a sibling under
+// tickets/<id>/ (uses `../<id>/conversation.md`).
 func linkBeadIDs(s string, beads map[string]*Bead) string {
+	return linkBeadIDsWithPrefix(s, beads, "../")
+}
+
+// linkBeadIDsFromRoot wraps every bd id in s for a file at the bundle
+// root (uses `tickets/<id>/conversation.md`).
+func linkBeadIDsFromRoot(s string, beads map[string]*Bead) string {
+	return linkBeadIDsWithPrefix(s, beads, "tickets/")
+}
+
+// linkBeadIDsWithPrefix wraps every bd id in s with a relative markdown
+// link to that ticket's conversation.md, if the id is in the subtree.
+// Plain occurrences of ids outside the subtree are left as-is. We
+// deliberately don't touch occurrences inside fenced code blocks to keep
+// diff hunks readable — that trade-off avoids a heavier markdown-aware
+// walker.
+func linkBeadIDsWithPrefix(s string, beads map[string]*Bead, prefix string) string {
 	if s == "" || len(beads) == 0 {
 		return s
 	}
@@ -230,7 +244,7 @@ func linkBeadIDs(s string, beads map[string]*Bead) string {
 		}
 		parts[i] = beadIDRe.ReplaceAllStringFunc(parts[i], func(m string) string {
 			if _, ok := beads[m]; ok {
-				return fmt.Sprintf("[%s](../%s/conversation.md)", m, m)
+				return fmt.Sprintf("[%s](%s%s/conversation.md)", m, prefix, m)
 			}
 			return m
 		})
