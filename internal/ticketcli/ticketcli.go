@@ -25,6 +25,7 @@ import (
 	"framework2/internal/dir"
 	"framework2/internal/env"
 	"framework2/internal/finish"
+	"framework2/internal/handover"
 	"framework2/internal/next"
 	"framework2/internal/pr"
 	"framework2/internal/ready"
@@ -227,6 +228,18 @@ subcommands:
                                           and when every attached PR is
                                           merged and no open children block,
                                           run the full ` + "`finish`" + ` flow.
+  handover [<id>] [--output <path>] [--no-archive]
+                                          produce a portable, snapshot package
+                                          describing the ticket subtree (beads,
+                                          per-bead conversation.md and
+                                          commits.md, README). Defaults to a
+                                          tarball at
+                                          ` + "`<beadsDir>/handovers/<id>-<UTC TS>.tar.gz`" + `;
+                                          ` + "`--no-archive`" + ` leaves the directory
+                                          in place. Non-destructive: never
+                                          closes beads, removes worktrees, or
+                                          touches the env folder. See ai-vrc.57
+                                          for the package format.
 
 WAITING REASON column:
   Surfaced by ` + "`agent list`" + `, ` + "`agent status`" + ` and ` + "`next agent`" + ` for agents
@@ -315,6 +328,8 @@ func dispatch(beadsDir string, args []string, stdout, stderr io.Writer) error {
 		return runFinish(db, beadsDir, ticket, rest[1:], stdout)
 	case "pr":
 		return runPR(db, beadsDir, ticket, rest[1:], stdout)
+	case "handover":
+		return runHandover(db, beadsDir, ticket, rest[1:], stdout)
 	case "pipeline-async":
 		// Hidden subcommand: detached runner spawned by `finish` to execute
 		// pipeline.md commands after the parent process has exited. Not
@@ -1061,6 +1076,34 @@ func runNotReady(db, beadsDir, ticket string, args []string) error {
 		return err
 	}
 	return ready.Remove(db, beadsDir, id)
+}
+
+func runHandover(db, beadsDir, ticket string, args []string, stdout io.Writer) error {
+	var output string
+	var noArchive bool
+	positional := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--output":
+			if i+1 >= len(args) {
+				return errors.New("--output requires a value")
+			}
+			output = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--output="):
+			output = strings.TrimPrefix(a, "--output=")
+		case a == "--no-archive":
+			noArchive = true
+		default:
+			positional = append(positional, a)
+		}
+	}
+	id, _, err := resolveID(ticket, positional, 0, "usage: ticket handover [<id>] [--output <path>] [--no-archive]")
+	if err != nil {
+		return err
+	}
+	return handover.Run(db, beadsDir, id, output, noArchive, stdout)
 }
 
 func runFinish(db, beadsDir, ticket string, args []string, stdout io.Writer) error {
