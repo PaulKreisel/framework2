@@ -122,6 +122,23 @@ type IssueRef struct {
 	Key string `json:"key"`
 }
 
+// IssueLinkType captures just the name fields we need from a Jira issue link
+// type. The `inward` text (e.g. "is blocked by") is what we match on.
+type IssueLinkType struct {
+	Name    string `json:"name"`
+	Inward  string `json:"inward"`
+	Outward string `json:"outward"`
+}
+
+// IssueLink is one entry in Jira's `issuelinks` field. Exactly one of
+// InwardIssue / OutwardIssue is populated, depending on this issue's role in
+// the link.
+type IssueLink struct {
+	Type         IssueLinkType `json:"type"`
+	InwardIssue  *IssueRef     `json:"inwardIssue,omitempty"`
+	OutwardIssue *IssueRef     `json:"outwardIssue,omitempty"`
+}
+
 // Issue is the subset of Jira's REST v2 response we consume.
 type Issue struct {
 	Key    string `json:"key"`
@@ -138,6 +155,9 @@ type Issue struct {
 		// Parent is the issue this one hangs off of in next-gen
 		// parent/child relationships. nil for top-level issues.
 		Parent *IssueRef `json:"parent,omitempty"`
+		// IssueLinks lists generic Jira link relationships (blocks,
+		// relates to, …). We only act on inward "is blocked by" links.
+		IssueLinks []IssueLink `json:"issuelinks"`
 	} `json:"fields"`
 }
 
@@ -148,7 +168,7 @@ func Fetch(ctx context.Context, opts Options, email, token, key string) (*Issue,
 	if base == "" {
 		base = DefaultBaseURL
 	}
-	reqURL := fmt.Sprintf("%s/rest/api/2/issue/%s?fields=summary,description,issuetype,customfield_11444,subtasks,parent", base, key)
+	reqURL := fmt.Sprintf("%s/rest/api/2/issue/%s?fields=summary,description,issuetype,customfield_11444,subtasks,parent,issuelinks", base, key)
 
 	cctx, cancel := context.WithTimeout(ctx, httpTimeout)
 	defer cancel()
@@ -318,7 +338,39 @@ func walkAndImport(ctx context.Context, opts Options, email, token, rootKey stri
 			queue = append(queue, work{key: ck, parentBead: beadID})
 		}
 	}
+
+	if err := wireBlockedBy(opts, imported, issueCache); err != nil {
+		return "", err
+	}
 	return rootID, nil
+}
+
+// wireBlockedBy translates Jira's inward "is blocked by" links into
+// `bd dep add` edges, but only between issues that were imported in this run.
+// Links whose target is outside the imported tree are silently skipped.
+func wireBlockedBy(opts Options, imported map[string]string, issueCache map[string]*Issue) error {
+	for key, beadID := range imported {
+		issue := issueCache[key]
+		if issue == nil {
+			continue
+		}
+		for _, link := range issue.Fields.IssueLinks {
+			if link.InwardIssue == nil || link.Type.Inward != "is blocked by" {
+				continue
+			}
+			blockerKey := link.InwardIssue.Key
+			blockerBead, ok := imported[blockerKey]
+			if !ok {
+				continue
+			}
+			cmd := bdcli.Cmd(opts.BeadsDir, opts.DB, "dep", "add", beadID, blockerBead)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				return fmt.Errorf("bd dep add %s %s: %w: %s", beadID, blockerBead, err, strings.TrimSpace(string(out)))
+			}
+		}
+	}
+	return nil
 }
 
 // discoverChildren returns the direct children of issue: every key in its

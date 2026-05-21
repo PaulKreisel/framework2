@@ -221,6 +221,8 @@ type fakeIssue struct {
 	epicLinkChildren []string // keys reachable via `"Epic Link" = KEY` JQL (older Jira)
 	parent           string   // populated on returned issue, for completeness
 	issueType        string   // Jira issuetype name; defaults to "Task"
+	blockedBy        []string // keys appearing as inward "is blocked by" links
+	relatesTo        []string // keys appearing as inward "relates to" links (ignored by importer)
 }
 
 // fakeJira spins up an httptest.Server that serves /rest/api/2/issue/<KEY>
@@ -256,11 +258,33 @@ func newFakeJira(t *testing.T, fixture map[string]fakeIssue) *fakeJira {
 			if issueType == "" {
 				issueType = "Task"
 			}
+			links := make([]map[string]any, 0, len(f.blockedBy)+len(f.relatesTo))
+			for _, b := range f.blockedBy {
+				links = append(links, map[string]any{
+					"type": map[string]string{
+						"name":    "Blocks",
+						"inward":  "is blocked by",
+						"outward": "blocks",
+					},
+					"inwardIssue": map[string]string{"key": b},
+				})
+			}
+			for _, r := range f.relatesTo {
+				links = append(links, map[string]any{
+					"type": map[string]string{
+						"name":    "Relates",
+						"inward":  "relates to",
+						"outward": "relates to",
+					},
+					"inwardIssue": map[string]string{"key": r},
+				})
+			}
 			fields := map[string]any{
 				"summary":     key + " summary",
 				"description": key + " body",
 				"issuetype":   map[string]any{"name": issueType},
 				"subtasks":    subtasks,
+				"issuelinks":  links,
 			}
 			if f.parent != "" {
 				fields["parent"] = map[string]string{"key": f.parent}
@@ -341,6 +365,55 @@ func importedTree(t *testing.T, beadsDir string) map[string][]string {
 		sort.Strings(tree[k])
 	}
 	return tree
+}
+
+// blockedByEdges returns blocked-jira-key → sorted blocker-jira-keys for the
+// `blocks` deps stored in bd. Keys are derived from each bead's external_ref.
+func blockedByEdges(t *testing.T, beadsDir string) map[string][]string {
+	t.Helper()
+	listOut, err := testutil.BdCmd(beadsDir, "--json", "list", "--all").Output()
+	if err != nil {
+		t.Fatalf("bd list: %v", err)
+	}
+	var rows []struct {
+		ID          string `json:"id"`
+		ExternalRef string `json:"external_ref"`
+	}
+	if err := json.Unmarshal(listOut, &rows); err != nil {
+		t.Fatalf("parse bd list: %v", err)
+	}
+	idToKey := map[string]string{}
+	ids := []string{}
+	for _, r := range rows {
+		if i := strings.LastIndex(r.ExternalRef, "/"); i >= 0 {
+			idToKey[r.ID] = r.ExternalRef[i+1:]
+			ids = append(ids, r.ID)
+		}
+	}
+	edges := map[string][]string{}
+	for _, id := range ids {
+		out, err := testutil.BdCmd(beadsDir, "--json", "dep", "list", id, "-t", "blocks").Output()
+		if err != nil {
+			t.Fatalf("bd dep list %s: %v", id, err)
+		}
+		var deps []struct {
+			ID             string `json:"id"`
+			DependencyType string `json:"dependency_type"`
+		}
+		if err := json.Unmarshal(out, &deps); err != nil {
+			t.Fatalf("parse bd dep list %s: %v", id, err)
+		}
+		for _, d := range deps {
+			if d.DependencyType != "blocks" {
+				continue
+			}
+			edges[idToKey[id]] = append(edges[idToKey[id]], idToKey[d.ID])
+		}
+		if v, ok := edges[idToKey[id]]; ok {
+			sort.Strings(v)
+		}
+	}
+	return edges
 }
 
 func runJira(t *testing.T, server *httptest.Server, beadsDir, key string) string {
@@ -572,5 +645,61 @@ func TestRunHandles404(t *testing.T) {
 	}
 	if stdout.Len() != 0 {
 		t.Errorf("stdout should be empty on error, got %q", stdout.String())
+	}
+}
+
+// TestRunBlockedBySiblingSubtasks covers the common case: two sibling
+// subtasks where one is blocked by the other. Both are inside the imported
+// tree so the dep must be wired.
+func TestRunBlockedBySiblingSubtasks(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	fj := newFakeJira(t, map[string]fakeIssue{
+		"FOO-1": {subtasks: []string{"FOO-2", "FOO-3"}},
+		"FOO-2": {},
+		"FOO-3": {blockedBy: []string{"FOO-2"}},
+	})
+	runJira(t, fj.server, beadsDir, "FOO-1")
+	edges := blockedByEdges(t, beadsDir)
+	want := map[string][]string{"FOO-3": {"FOO-2"}}
+	if !equalTree(edges, want) {
+		t.Errorf("blocked-by edges mismatch:\n got=%v\nwant=%v", edges, want)
+	}
+}
+
+// TestRunBlockedByCrossLevel makes sure deps work across hierarchy levels:
+// a deep descendant blocks an ancestor's sibling.
+func TestRunBlockedByCrossLevel(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	fj := newFakeJira(t, map[string]fakeIssue{
+		"FOO-1": {subtasks: []string{"FOO-2", "FOO-3"}},
+		"FOO-2": {subtasks: []string{"FOO-4"}},
+		"FOO-3": {blockedBy: []string{"FOO-4"}},
+		"FOO-4": {},
+	})
+	runJira(t, fj.server, beadsDir, "FOO-1")
+	edges := blockedByEdges(t, beadsDir)
+	want := map[string][]string{"FOO-3": {"FOO-4"}}
+	if !equalTree(edges, want) {
+		t.Errorf("blocked-by edges mismatch:\n got=%v\nwant=%v", edges, want)
+	}
+}
+
+// TestRunBlockedByExternalIgnored verifies external blockers and non-blocks
+// link types produce no edges and no error.
+func TestRunBlockedByExternalIgnored(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	fj := newFakeJira(t, map[string]fakeIssue{
+		"FOO-1": {subtasks: []string{"FOO-2"}},
+		// EXT-9 is not in the imported tree; the "relates to" link to
+		// FOO-1 (also in-tree) must be ignored entirely.
+		"FOO-2": {blockedBy: []string{"EXT-9"}, relatesTo: []string{"FOO-1"}},
+	})
+	runJira(t, fj.server, beadsDir, "FOO-1")
+	edges := blockedByEdges(t, beadsDir)
+	if len(edges) != 0 {
+		t.Errorf("expected no blocked-by edges, got %v", edges)
 	}
 }
