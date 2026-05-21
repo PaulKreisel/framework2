@@ -7,13 +7,13 @@
 package jiracli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"regexp"
@@ -417,9 +417,9 @@ func discoverChildren(ctx context.Context, opts Options, email, token, parentKey
 	return out, nil
 }
 
-// searchByJQL runs an arbitrary JQL query against /rest/api/2/search and
-// returns the resulting issue keys. Walks pages until Jira reports it has
-// returned everything.
+// searchByJQL runs an arbitrary JQL query against /rest/api/3/search/jql and
+// returns the resulting issue keys. Walks pages via the opaque nextPageToken
+// until Jira reports isLast (or stops handing back a token).
 func searchByJQL(ctx context.Context, opts Options, email, token, jql string) ([]string, error) {
 	base := opts.BaseURL
 	if base == "" {
@@ -432,20 +432,31 @@ func searchByJQL(ctx context.Context, opts Options, email, token, jql string) ([
 
 	const pageSize = 100
 	var keys []string
-	startAt := 0
+	var nextPageToken string
 	for {
-		encJQL := url.QueryEscape(jql)
-		u := fmt.Sprintf("%s/rest/api/2/search?jql=%s&fields=key&startAt=%d&maxResults=%d",
-			base, encJQL, startAt, pageSize)
+		body := map[string]any{
+			"jql":        jql,
+			"fields":     []string{"key"},
+			"maxResults": pageSize,
+		}
+		if nextPageToken != "" {
+			body["nextPageToken"] = nextPageToken
+		}
+		bodyJSON, err := json.Marshal(body)
+		if err != nil {
+			return nil, fmt.Errorf("encode search request for %q: %w", jql, err)
+		}
 
 		cctx, cancel := context.WithTimeout(ctx, httpTimeout)
-		req, err := http.NewRequestWithContext(cctx, http.MethodGet, u, nil)
+		req, err := http.NewRequestWithContext(cctx, http.MethodPost,
+			base+"/rest/api/3/search/jql", bytes.NewReader(bodyJSON))
 		if err != nil {
 			cancel()
 			return nil, fmt.Errorf("build search request: %w", err)
 		}
 		req.SetBasicAuth(email, token)
 		req.Header.Set("Accept", "application/json")
+		req.Header.Set("Content-Type", "application/json")
 
 		resp, err := client.Do(req)
 		if err != nil {
@@ -453,18 +464,18 @@ func searchByJQL(ctx context.Context, opts Options, email, token, jql string) ([
 			return nil, fmt.Errorf("search %q: %w", jql, err)
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+			respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 			resp.Body.Close()
 			cancel()
 			return nil, fmt.Errorf("search %q: status %d: %s",
-				jql, resp.StatusCode, strings.TrimSpace(string(body)))
+				jql, resp.StatusCode, strings.TrimSpace(string(respBody)))
 		}
 		var page struct {
-			StartAt int `json:"startAt"`
-			Total   int `json:"total"`
-			Issues  []struct {
+			Issues []struct {
 				Key string `json:"key"`
 			} `json:"issues"`
+			NextPageToken string `json:"nextPageToken"`
+			IsLast        bool   `json:"isLast"`
 		}
 		err = json.NewDecoder(resp.Body).Decode(&page)
 		resp.Body.Close()
@@ -475,13 +486,10 @@ func searchByJQL(ctx context.Context, opts Options, email, token, jql string) ([
 		for _, i := range page.Issues {
 			keys = append(keys, i.Key)
 		}
-		if len(page.Issues) == 0 {
+		if page.IsLast || page.NextPageToken == "" {
 			break
 		}
-		startAt += len(page.Issues)
-		if startAt >= page.Total {
-			break
-		}
+		nextPageToken = page.NextPageToken
 	}
 	return keys, nil
 }

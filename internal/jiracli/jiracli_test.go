@@ -140,8 +140,13 @@ func TestRunCreatesBead(t *testing.T) {
 				},
 			}
 			_ = json.NewEncoder(w).Encode(issue)
-		case "/rest/api/2/search":
-			_ = json.NewEncoder(w).Encode(map[string]any{"issues": []any{}, "total": 0})
+		case "/rest/api/3/search/jql":
+			if r.Method != http.MethodPost {
+				t.Errorf("expected POST for /rest/api/3/search/jql, got %s", r.Method)
+				http.Error(w, "method", 405)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"issues": []any{}, "isLast": true})
 		default:
 			t.Errorf("unexpected path %q", r.URL.Path)
 			http.Error(w, "not found", 404)
@@ -226,8 +231,8 @@ type fakeIssue struct {
 }
 
 // fakeJira spins up an httptest.Server that serves /rest/api/2/issue/<KEY>
-// and /rest/api/2/search?jql=parent=<KEY> against an in-memory fixture, and
-// counts how often each key is fetched so tests can assert the cache works.
+// and POST /rest/api/3/search/jql against an in-memory fixture, and counts
+// how often each key is fetched so tests can assert the cache works.
 type fakeJira struct {
 	t       *testing.T
 	server  *httptest.Server
@@ -290,17 +295,35 @@ func newFakeJira(t *testing.T, fixture map[string]fakeIssue) *fakeJira {
 				fields["parent"] = map[string]string{"key": f.parent}
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"key": key, "fields": fields})
-		case r.URL.Path == "/rest/api/2/search":
-			jql := r.URL.Query().Get("jql")
+		case r.URL.Path == "/rest/api/3/search/jql":
+			if r.Method != http.MethodPost {
+				t.Errorf("expected POST for /rest/api/3/search/jql, got %s", r.Method)
+				http.Error(w, "method", 405)
+				return
+			}
+			if ct := r.Header.Get("Content-Type"); ct != "application/json" {
+				t.Errorf("expected Content-Type application/json, got %q", ct)
+			}
+			var body struct {
+				JQL           string   `json:"jql"`
+				Fields        []string `json:"fields"`
+				NextPageToken string   `json:"nextPageToken"`
+				MaxResults    int      `json:"maxResults"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode search body: %v", err)
+				http.Error(w, "bad body", 400)
+				return
+			}
 			// JQL we issue is either `parent = <KEY>` or `"Epic Link" = <KEY>`.
 			var (
 				key      string
 				epicLink bool
 			)
-			if _, after, found := strings.Cut(jql, `"Epic Link" = `); found {
+			if _, after, found := strings.Cut(body.JQL, `"Epic Link" = `); found {
 				key = strings.TrimSpace(after)
 				epicLink = true
-			} else if _, after, found := strings.Cut(jql, "parent = "); found {
+			} else if _, after, found := strings.Cut(body.JQL, "parent = "); found {
 				key = strings.TrimSpace(after)
 			}
 			issues := []map[string]string{}
@@ -314,9 +337,8 @@ func newFakeJira(t *testing.T, fixture map[string]fakeIssue) *fakeJira {
 				}
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"issues":  issues,
-				"total":   len(issues),
-				"startAt": 0,
+				"issues": issues,
+				"isLast": true,
 			})
 		default:
 			http.Error(w, "not found", 404)
@@ -619,6 +641,93 @@ func TestRunEpicWithNoStories(t *testing.T) {
 	runJira(t, fj.server, beadsDir, "EPIC-1")
 	tree := importedTree(t, beadsDir)
 	want := map[string][]string{"EPIC-1": nil}
+	if !equalTree(tree, want) {
+		t.Errorf("tree mismatch:\n got=%v\nwant=%v", tree, want)
+	}
+}
+
+// TestRunPaginatesJQLSearch verifies the new token-based pagination loop:
+// the search endpoint hands back two pages joined by an opaque nextPageToken
+// and terminates with isLast=true.
+func TestRunPaginatesJQLSearch(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/rest/api/2/issue/"):
+			key := strings.TrimPrefix(r.URL.Path, "/rest/api/2/issue/")
+			fields := map[string]any{
+				"summary":     key + " summary",
+				"description": key + " body",
+				"issuetype":   map[string]any{"name": "Task"},
+				"subtasks":    []any{},
+				"issuelinks":  []any{},
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"key": key, "fields": fields})
+		case r.URL.Path == "/rest/api/3/search/jql":
+			if r.Method != http.MethodPost {
+				http.Error(w, "method", 405)
+				return
+			}
+			var body struct {
+				JQL           string `json:"jql"`
+				NextPageToken string `json:"nextPageToken"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, "bad body", 400)
+				return
+			}
+			// Only paginate the `parent = FOO-1` query; all others
+			// return a single empty page.
+			if body.JQL != "parent = FOO-1" {
+				_ = json.NewEncoder(w).Encode(map[string]any{"issues": []any{}, "isLast": true})
+				return
+			}
+			switch body.NextPageToken {
+			case "":
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"issues": []map[string]string{
+						{"key": "FOO-2"},
+						{"key": "FOO-3"},
+					},
+					"nextPageToken": "tok-2",
+					"isLast":        false,
+				})
+			case "tok-2":
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"issues": []map[string]string{
+						{"key": "FOO-4"},
+					},
+					"isLast": true,
+				})
+			default:
+				t.Errorf("unexpected nextPageToken %q", body.NextPageToken)
+				http.Error(w, "bad token", 400)
+			}
+		default:
+			http.Error(w, "not found", 404)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	var stdout, stderr bytes.Buffer
+	code := jiracli.RunWithOptions(jiracli.Options{
+		BaseURL:  server.URL,
+		BeadsDir: beadsDir,
+		Email:    "me@example.com",
+		Token:    "tok",
+	}, []string{"FOO-1"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
+	}
+	tree := importedTree(t, beadsDir)
+	want := map[string][]string{
+		"FOO-1": {"FOO-2", "FOO-3", "FOO-4"},
+		"FOO-2": nil,
+		"FOO-3": nil,
+		"FOO-4": nil,
+	}
 	if !equalTree(tree, want) {
 		t.Errorf("tree mismatch:\n got=%v\nwant=%v", tree, want)
 	}
