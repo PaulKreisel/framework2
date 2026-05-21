@@ -73,6 +73,11 @@ func Run(db, beadsDir, ticketID string, continueMode bool, stdout io.Writer) err
 		return err
 	}
 
+	tearDown, err := allParentBranchesAreDefault(db, beadsDir, parent, worktrees)
+	if err != nil {
+		return err
+	}
+
 	if err := bdClose(db, beadsDir, ticketID); err != nil {
 		return err
 	}
@@ -83,6 +88,14 @@ func Run(db, beadsDir, ticketID string, continueMode bool, stdout io.Writer) err
 	// stdout but never abort the finish.
 	if err := ready.LaunchReadyFollowups(db, beadsDir, ticketID, stdout); err != nil {
 		fmt.Fprintf(stdout, "warn: launch ready follow-ups for %s: %v\n", ticketID, err)
+	}
+	if !tearDown {
+		// Parent branch in at least one bare is itself a feature branch — the
+		// work isn't fully done yet (the parent ticket is still in flight),
+		// so keep the env folder and worktrees intact for follow-up tweaks
+		// or reruns before the whole stack lands on the default branch.
+		fmt.Fprintf(stdout, "finished %s (kept env and worktrees: parent branch is non-default)\n", ticketID)
+		return nil
 	}
 	for _, e := range worktrees {
 		if err := gitWorktreeRemove(e.BareRepo, e.Path); err != nil {
@@ -98,6 +111,40 @@ func Run(db, beadsDir, ticketID string, continueMode bool, stdout io.Writer) err
 	}
 	fmt.Fprintf(stdout, "finished %s\n", ticketID)
 	return nil
+}
+
+// allParentBranchesAreDefault reports whether every worktree's parent branch
+// is the default branch of its bare repo. A worktree counts as "based on
+// default" when (a) the bead has no parent ticket, (b) the parent ticket has
+// no entry in this bare, or (c) the parent ticket's branch in this bare
+// equals the bare's default branch.
+//
+// When this returns false, `Run` skips its destructive teardown (worktree
+// removal, env folder removal, terminal close) and keeps the workspace
+// intact — the parent ticket is still in flight, so the env may still be
+// needed before the whole stack eventually lands on the default branch.
+func allParentBranchesAreDefault(db, beadsDir, parent string, worktrees []dir.Entry) (bool, error) {
+	if parent == "" {
+		return true, nil
+	}
+	parentEntries, err := dir.Load(db, beadsDir, parent)
+	if err != nil {
+		return false, err
+	}
+	for _, e := range worktrees {
+		pe, ok := findEntryForBare(parentEntries, e.BareRepo)
+		if !ok {
+			continue
+		}
+		def, err := dir.DefaultBranch(e.BareRepo)
+		if err != nil {
+			return false, fmt.Errorf("determine default branch of %s: %w", e.BareRepo, err)
+		}
+		if pe.Branch != def {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // worktreeEntries returns just the entries that were created by

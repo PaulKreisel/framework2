@@ -53,6 +53,21 @@ func gitDefaultBase(repo string) (string, error) {
 	return "", fmt.Errorf("cannot determine base branch in %s: no origin/HEAD and no local main/master", repo)
 }
 
+// DefaultBranch returns the local short branch name (e.g. "main") that this
+// repo treats as its default. Mirrors gitDefaultBase but strips any
+// "origin/" prefix so the result is directly comparable against branch
+// names recorded in dir.Entry.
+func DefaultBranch(repo string) (string, error) {
+	base, err := gitDefaultBase(repo)
+	if err != nil {
+		return "", err
+	}
+	if i := strings.IndexByte(base, '/'); i >= 0 {
+		return base[i+1:], nil
+	}
+	return base, nil
+}
+
 // gitWorktreeAdd creates a new worktree at wtPath with a new branch named
 // branch, based on base. Returns the combined git output on failure.
 func gitWorktreeAdd(repo, wtPath, branch, base string) error {

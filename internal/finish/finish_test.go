@@ -15,8 +15,43 @@ import (
 func TestFinishRemovesWorktreeAndEnvAndClosesBead(t *testing.T) {
 	t.Parallel()
 	beadsDir := testutil.TestDB(t)
-	parent := testutil.CreateBead(t, beadsDir, "finish-removes-parent")
-	child := testutil.CreateChildBead(t, beadsDir, "finish-removes-child", parent)
+	// Root bead: no parent ticket, so the worktree is based on the bare's
+	// default branch and `this finish` should tear down the env+worktree.
+	ticket := testutil.CreateBead(t, beadsDir, "finish-removes-root")
+	bare := bareRepo(t, "main")
+
+	mustRunTicket(t, beadsDir, "dir", "worktree", ticket, bare)
+	if _, err := env.Create("", beadsDir, ticket); err != nil {
+		t.Fatalf("env.Create: %v", err)
+	}
+	wt := worktreePath(bare, ticket)
+
+	if _, stderr, code := testutil.RunTicketIn(t, beadsDir, "finish", ticket); code != 0 {
+		t.Fatalf("finish exit=%d stderr=%q", code, stderr)
+	}
+
+	if _, err := os.Stat(wt); !os.IsNotExist(err) {
+		t.Errorf("worktree %s still exists after finish (err=%v)", wt, err)
+	}
+	envPath := filepath.Join(beadsDir, "envs", ticket)
+	if _, err := os.Stat(envPath); !os.IsNotExist(err) {
+		t.Errorf("env folder %s still exists after finish (err=%v)", envPath, err)
+	}
+	if status := beadStatus(t, beadsDir, ticket); status != "closed" {
+		t.Errorf("bead status=%q want closed", status)
+	}
+}
+
+// TestFinishKeepsEnvAndWorktreesWhenParentBranchNonDefault covers the
+// "stacked feature branch" case: the child's parent ticket is itself an
+// open feature branch (not the bare's default branch), so the work isn't
+// fully done. `this finish` should merge into the parent + close the bead
+// but keep the env folder and worktrees intact.
+func TestFinishKeepsEnvAndWorktreesWhenParentBranchNonDefault(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	parent := testutil.CreateBead(t, beadsDir, "finish-keep-parent")
+	child := testutil.CreateChildBead(t, beadsDir, "finish-keep-child", parent)
 	bare := bareRepo(t, "main")
 
 	mustRunTicket(t, beadsDir, "dir", "worktree", child, bare)
@@ -26,19 +61,23 @@ func TestFinishRemovesWorktreeAndEnvAndClosesBead(t *testing.T) {
 	childWT := worktreePath(bare, child)
 	parentWT := worktreePath(bare, parent)
 
-	if _, stderr, code := testutil.RunTicketIn(t, beadsDir, "finish", child); code != 0 {
+	stdout, stderr, code := testutil.RunTicketIn(t, beadsDir, "finish", child)
+	if code != 0 {
 		t.Fatalf("finish exit=%d stderr=%q", code, stderr)
 	}
+	if !strings.Contains(stdout, "kept env and worktrees") {
+		t.Errorf("stdout=%q want to mention 'kept env and worktrees'", stdout)
+	}
 
-	if _, err := os.Stat(childWT); !os.IsNotExist(err) {
-		t.Errorf("child worktree %s still exists after finish (err=%v)", childWT, err)
+	if _, err := os.Stat(childWT); err != nil {
+		t.Errorf("child worktree %s should still exist: %v", childWT, err)
 	}
 	if _, err := os.Stat(parentWT); err != nil {
 		t.Errorf("parent worktree %s should still exist: %v", parentWT, err)
 	}
 	envPath := filepath.Join(beadsDir, "envs", child)
-	if _, err := os.Stat(envPath); !os.IsNotExist(err) {
-		t.Errorf("env folder %s still exists after finish (err=%v)", envPath, err)
+	if _, err := os.Stat(envPath); err != nil {
+		t.Errorf("env folder %s should still exist: %v", envPath, err)
 	}
 	if status := beadStatus(t, beadsDir, child); status != "closed" {
 		t.Errorf("bead status=%q want closed", status)
@@ -166,8 +205,10 @@ func TestFinishRebasesCleanlyDivergedBranch(t *testing.T) {
 	if status := beadStatus(t, beadsDir, child); status != "closed" {
 		t.Errorf("bead status=%q want closed after successful finish", status)
 	}
-	if _, err := os.Stat(childWT); !os.IsNotExist(err) {
-		t.Errorf("child worktree still present after finish: err=%v", err)
+	// Parent branch is non-default (a feature branch), so finish keeps the
+	// child worktree and env intact.
+	if _, err := os.Stat(childWT); err != nil {
+		t.Errorf("child worktree should still exist after finish (parent non-default): %v", err)
 	}
 	// Parent branch should now point at the child's rebased tip, which is
 	// the latest commit on the parent worktree.
@@ -233,8 +274,9 @@ func TestFinishPausesOnConflictAndResumesWithContinue(t *testing.T) {
 	if status := beadStatus(t, beadsDir, child); status != "closed" {
 		t.Errorf("bead status=%q want closed after --continue", status)
 	}
-	if _, err := os.Stat(childWT); !os.IsNotExist(err) {
-		t.Errorf("child worktree still present after --continue finish: err=%v", err)
+	// Parent branch is non-default, so finish keeps the child worktree.
+	if _, err := os.Stat(childWT); err != nil {
+		t.Errorf("child worktree should still exist after --continue finish (parent non-default): %v", err)
 	}
 }
 
