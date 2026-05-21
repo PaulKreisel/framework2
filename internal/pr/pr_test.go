@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -313,6 +314,9 @@ func TestCreateBeadSpawnsChild(t *testing.T) {
 	title := beadTitle(t, beadsDir, childID)
 	if title != "PR Add bar" {
 		t.Errorf("child title = %q, want %q", title, "PR Add bar")
+	}
+	if !slices.Contains(beadLabels(t, beadsDir, childID), pr.Label) {
+		t.Errorf("child missing %q label", pr.Label)
 	}
 }
 
@@ -792,6 +796,24 @@ func mustLinkDir(t *testing.T, beadsDir, ticketID, path string) {
 	if _, stderr, code := testutil.RunTicketIn(t, beadsDir, "dir", "link", ticketID, path); code != 0 {
 		t.Fatalf("dir link: exit=%d stderr=%q", code, stderr)
 	}
+}
+
+func beadLabels(t *testing.T, beadsDir, id string) []string {
+	t.Helper()
+	out, err := testutil.BdCmd(beadsDir, "--json", "show", id).Output()
+	if err != nil {
+		t.Fatalf("bd show: %v", err)
+	}
+	var rows []struct {
+		Labels []string `json:"labels"`
+	}
+	if err := json.Unmarshal(out, &rows); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	return rows[0].Labels
 }
 
 func beadTitle(t *testing.T, beadsDir, id string) string {

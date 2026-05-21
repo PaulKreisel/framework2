@@ -515,9 +515,15 @@ func CreateBead(db, beadsDir, currentID, rawURL string, stdout io.Writer) error 
 	}); err != nil {
 		return err
 	}
+	if out, err := bdcli.Cmd(beadsDir, db, "label", "add", newID, Label).CombinedOutput(); err != nil {
+		return fmt.Errorf("bd label add %s %s: %w: %s", newID, Label, err, strings.TrimSpace(string(out)))
+	}
 	fmt.Fprintln(stdout, newID)
 	return nil
 }
+
+// Label is the literal label stamped on beads created via `pr create-bead`.
+const Label = "pr"
 
 // Refresh reconciles the bead's PR state with GitHub.
 //
