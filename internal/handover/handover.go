@@ -1,173 +1,143 @@
 // Package handover implements the `ticket handover` subcommand: it produces
-// a portable, self-contained package describing a ticket subtree so a
-// colleague can review the work using only `bd` + a markdown viewer.
+// a portable, single-file JSON package describing a ticket subtree so a
+// colleague can review the work using only `bd` plus the project's git
+// remote.
 //
 // The package is non-destructive: it never closes beads, removes worktrees,
 // or touches the env folder. It is not invoked from `this finish`. The
 // snapshot reflects state at the moment Run is called.
 //
-// On-disk shape (per sibling ai-vrc.57.2, narrowed for sibling C):
+// Output shape (single JSON file):
 //
-//	<bundle-root>/
-//	  README.md
-//	  beads.jsonl                       (subtree-filtered bd export)
-//	  commits.md                        (single chronological table across the subtree)
-//	  tickets/<id>/conversation.md      (one per bead in subtree)
+//	{
+//	  "beads": [ /* bd export rows for the subtree, host fields stripped;
+//	               conversations already live under metadata.agents[].conversation[] */ ],
+//	  "code": [
+//	    {
+//	      "repo": "<bare-repo-name>",
+//	      "commits": [ { "SHA": "...", "message": "...", "bead_id": "ai-vrc.57.x" } ]
+//	    }
+//	  ]
+//	}
 //
-// Git bundles and the `repos.json` mapping are out of scope here: code is
-// shipped via a separate push channel and the bundle deliberately stays
-// markdown + JSONL only.
+// Diffs are not shipped: the reviewer fetches code from a shared remote
+// using the SHAs. The author is expected to have pushed every ticket
+// branch to a reachable remote before running handover.
 package handover
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"time"
-
-	"framework2/internal/dir"
 )
 
-// Run produces a handover package for ticketID and its descendants.
+// Package is the top-level JSON document emitted by Run.
+type Package struct {
+	Beads []map[string]any `json:"beads"`
+	Code  []RepoSection    `json:"code"`
+}
+
+// RepoSection is one bare repo's slice of the handover: the repo's
+// portable name plus every commit in the subtree authored against it.
+type RepoSection struct {
+	Repo    string   `json:"repo"`
+	Commits []Commit `json:"commits"`
+}
+
+// Commit is one row in a RepoSection.commits[]. The field set is fixed by
+// the handover spec: SHA, message, bead_id (in that order).
+type Commit struct {
+	SHA     string `json:"SHA"`
+	Message string `json:"message"`
+	BeadID  string `json:"bead_id"`
+}
+
+// Run produces a handover JSON file for ticketID and its descendants.
 //
-// outputOverride, when non-empty, sets the final artifact path (the tarball,
-// or — under noArchive — the directory). Otherwise the default location is
-// <beadsDir>/handovers/<id>-<UTC YYYYMMDD-HHMMSS>(.tar.gz)?.
-//
-// When noArchive is true the function leaves the directory in place; the
-// default is to tar+gzip it and remove the directory.
+// outputOverride, when non-empty, sets the final file path. Otherwise the
+// default location is <beadsDir>/handovers/<id>-<UTC YYYYMMDD-HHMMSS>.json.
 //
 // Status messages are written to stdout; the final artifact path is the
 // last line emitted so callers can scrape it.
-func Run(db, beadsDir, ticketID, outputOverride string, noArchive bool, stdout io.Writer) error {
+func Run(db, beadsDir, ticketID, outputOverride string, stdout io.Writer) error {
 	if ticketID == "" {
 		return errors.New("ticket id required")
 	}
 	if beadsDir == "" {
-		return errors.New("BEADS_DIR not set: cannot derive default handover root")
+		return errors.New("BEADS_DIR not set: cannot derive default handover path")
 	}
 
-	// 1. Subtree discovery (root + descendants via parent-child deps).
 	beads, order, err := loadSubtree(db, beadsDir, ticketID)
 	if err != nil {
 		return err
 	}
 	fmt.Fprintf(stdout, "handover %s: subtree has %d bead(s)\n", ticketID, len(order))
 
-	// 2. Resolve output paths. We always materialise the directory first
-	// (under a stable name) and optionally fold it into a tarball at the
-	// end.
-	dirPath, archivePath, err := resolveOutputPaths(beadsDir, ticketID, outputOverride, noArchive)
+	code, err := collectCode(db, beadsDir, order)
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(dirPath), 0o755); err != nil {
+	totalCommits := 0
+	for _, r := range code {
+		totalCommits += len(r.Commits)
+	}
+	fmt.Fprintf(stdout, "  collected %d commit(s) across %d repo(s)\n", totalCommits, len(code))
+
+	pkg := Package{
+		Beads: subtreeBeadsRaw(order, beads),
+		Code:  code,
+	}
+
+	outPath, err := resolveOutputPath(beadsDir, ticketID, outputOverride)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
 		return fmt.Errorf("create handover parent: %w", err)
 	}
-	if _, err := os.Stat(dirPath); err == nil {
-		return fmt.Errorf("handover directory already exists: %s", dirPath)
-	}
-	if err := os.MkdirAll(dirPath, 0o755); err != nil {
-		return fmt.Errorf("create handover dir: %w", err)
+	if err := writeJSON(outPath, pkg); err != nil {
+		return fmt.Errorf("write handover json: %w", err)
 	}
 
-	// 3. beads.jsonl (subtree-filtered, host-fields stripped).
-	if err := writeBeadsJSONL(dirPath, order, beads); err != nil {
-		return fmt.Errorf("write beads.jsonl: %w", err)
-	}
-	fmt.Fprintln(stdout, "  wrote beads.jsonl")
-
-	// 4. Per-ticket conversation.md plus a single top-level commits.md.
-	// The commits table is collapsed across the whole subtree: a finished
-	// child's commits live on the parent's branch after FF-rebase, so
-	// listing them per-bead would either double-count them or leave the
-	// child file empty. We collect every (worktree, base-branch) pair in
-	// the subtree and let writeCommitsMD dedupe by SHA.
-	var sources []commitSource
-	for _, id := range order {
-		if err := writeConversationMD(dirPath, beads[id], beads); err != nil {
-			return fmt.Errorf("render conversation for %s: %w", id, err)
-		}
-		dirs, err := loadDirEntries(db, beadsDir, id)
-		if err != nil {
-			return fmt.Errorf("load dirs for %s: %w", id, err)
-		}
-		if !hasWorktree(dirs) {
-			continue
-		}
-		parentBranches, err := parentBranchesFor(db, beadsDir, id, dirs)
-		if err != nil {
-			return fmt.Errorf("resolve parent branches for %s: %w", id, err)
-		}
-		for _, e := range dirs {
-			if e.BareRepo == "" || e.Branch == "" {
-				continue
-			}
-			sources = append(sources, commitSource{Entry: e, Base: parentBranches[e.BareRepo]})
-		}
-	}
-	fmt.Fprintf(stdout, "  wrote tickets/ (%d bead(s))\n", len(order))
-	if err := writeCommitsMD(dirPath, sources, beads); err != nil {
-		return fmt.Errorf("render commits.md: %w", err)
-	}
-	fmt.Fprintln(stdout, "  wrote commits.md")
-
-	// 5. README.
-	if err := writeReadme(dirPath, ticketID, beads[ticketID], order, beads); err != nil {
-		return fmt.Errorf("write README: %w", err)
-	}
-	fmt.Fprintln(stdout, "  wrote README.md")
-
-	// 6. Optional tarball.
-	finalPath := dirPath
-	if !noArchive {
-		if err := writeTarball(archivePath, dirPath); err != nil {
-			return fmt.Errorf("archive: %w", err)
-		}
-		if err := os.RemoveAll(dirPath); err != nil {
-			return fmt.Errorf("remove staging dir %s: %w", dirPath, err)
-		}
-		finalPath = archivePath
-		fmt.Fprintln(stdout, "  wrote tarball")
-	}
-
-	fmt.Fprintln(stdout, finalPath)
+	fmt.Fprintln(stdout, outPath)
 	return nil
 }
 
-// hasWorktree reports whether any entry was created via `dir worktree`
-// (BareRepo set). Plain `dir link` entries don't participate in commits.md
-// since they have no branch model.
-func hasWorktree(entries []dir.Entry) bool {
-	for _, e := range entries {
-		if e.BareRepo != "" {
-			return true
-		}
+func resolveOutputPath(beadsDir, ticketID, outputOverride string) (string, error) {
+	if outputOverride != "" {
+		return outputOverride, nil
 	}
-	return false
+	ts := time.Now().UTC().Format("20060102-150405")
+	return filepath.Join(beadsDir, "handovers", fmt.Sprintf("%s-%s.json", ticketID, ts)), nil
 }
 
-// resolveOutputPaths returns (stagingDir, archivePath). When outputOverride
-// is non-empty we honour it as the final artifact path; we still need a
-// staging directory to populate, even in archive mode.
-func resolveOutputPaths(beadsDir, ticketID, outputOverride string, noArchive bool) (string, string, error) {
-	ts := time.Now().UTC().Format("20060102-150405")
-	if outputOverride != "" {
-		if noArchive {
-			return outputOverride, "", nil
-		}
-		// Tarball mode: stage next to the target archive so we don't
-		// clobber whatever's at outputOverride until the very last step.
-		staging := outputOverride + ".staging-" + ts
-		return staging, outputOverride, nil
+// writeJSON serialises pkg to path atomically: write to a sibling .tmp,
+// then rename. Pretty-printed so reviewers can read it without tooling.
+func writeJSON(path string, pkg Package) error {
+	tmp := path + ".tmp"
+	f, err := os.Create(tmp)
+	if err != nil {
+		return err
 	}
-	root := filepath.Join(beadsDir, "handovers")
-	dirName := fmt.Sprintf("%s-%s", ticketID, ts)
-	staging := filepath.Join(root, dirName)
-	if noArchive {
-		return staging, "", nil
+	enc := json.NewEncoder(f)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(pkg); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
 	}
-	return staging, staging + ".tar.gz", nil
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
 }

@@ -1,11 +1,7 @@
 package handover_test
 
 import (
-	"archive/tar"
-	"bytes"
-	"compress/gzip"
 	"encoding/json"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,13 +12,30 @@ import (
 	"framework2/internal/testutil"
 )
 
-// TestHandoverProducesTarballAndDirectory exercises the end-to-end flow:
-// subtree discovery + beads.jsonl + per-bead conversation.md + top-level
-// commits.md + README + tar.gz packaging. We register an agent session,
-// commit code, finish the leaf so refs/notes/agent-session is written,
-// then run handover on the parent (which is still open and links the
-// same bare).
-func TestHandoverProducesTarballAndDirectory(t *testing.T) {
+// pkg mirrors the on-disk JSON shape so tests can introspect without
+// importing the production type (which lives in the package under test).
+type pkg struct {
+	Beads []map[string]any `json:"beads"`
+	Code  []repoSection    `json:"code"`
+}
+
+type repoSection struct {
+	Repo    string   `json:"repo"`
+	Commits []commit `json:"commits"`
+}
+
+type commit struct {
+	SHA     string `json:"SHA"`
+	Message string `json:"message"`
+	BeadID  string `json:"bead_id"`
+}
+
+// TestHandoverProducesSingleJSON exercises the end-to-end flow on the new
+// single-file format: subtree discovery + host-stripped beads[] +
+// per-repo code[].commits[], where each commit row has exactly SHA,
+// message, bead_id and the FF-rebased child commit is attributed back to
+// the child via refs/notes/agent-session.
+func TestHandoverProducesSingleJSON(t *testing.T) {
 	t.Parallel()
 	beadsDir := testutil.TestDB(t)
 	parent := testutil.CreateBead(t, beadsDir, "handover-parent")
@@ -43,113 +56,76 @@ func TestHandoverProducesTarballAndDirectory(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("register agent: %v", err)
 	}
-	writeAndCommit(t, childWT, "a.txt", "a\n", "feat: handover-child landing")
+	writeAndCommit(t, childWT, "a.txt", "a\n", "feat: handover-child landing\n\nbody line.")
 	mustRunTicket(t, beadsDir, "finish", child)
 
 	stdout, stderr, code := testutil.RunTicketIn(t, beadsDir, "handover", parent)
 	if code != 0 {
 		t.Fatalf("handover exit=%d stderr=%q", code, stderr)
 	}
-	// Final line is the artifact path — tar.gz under <beadsDir>/handovers/.
 	lines := strings.Split(strings.TrimRight(stdout, "\n"), "\n")
 	if len(lines) == 0 {
 		t.Fatalf("handover stdout empty")
 	}
-	tarPath := lines[len(lines)-1]
-	if !strings.HasPrefix(tarPath, filepath.Join(beadsDir, "handovers")+string(os.PathSeparator)) {
-		t.Errorf("tarball not under beads handovers dir: %q", tarPath)
+	jsonPath := lines[len(lines)-1]
+
+	wantPrefix := filepath.Join(beadsDir, "handovers") + string(os.PathSeparator)
+	if !strings.HasPrefix(jsonPath, wantPrefix) {
+		t.Errorf("json not under beads handovers dir: %q (want prefix %q)", jsonPath, wantPrefix)
 	}
-	if !strings.HasSuffix(tarPath, ".tar.gz") {
-		t.Errorf("expected .tar.gz suffix, got %q", tarPath)
+	if !strings.HasSuffix(jsonPath, ".json") {
+		t.Errorf("expected .json suffix, got %q", jsonPath)
 	}
-	if _, err := os.Stat(tarPath); err != nil {
-		t.Fatalf("tarball not created: %v", err)
+	if strings.HasSuffix(jsonPath, ".tar.gz") {
+		t.Errorf("legacy tarball produced: %q", jsonPath)
 	}
-	// Staging dir should be gone in the default (archive) mode.
-	if _, err := os.Stat(strings.TrimSuffix(tarPath, ".tar.gz")); !os.IsNotExist(err) {
-		t.Errorf("staging dir still present after archive: err=%v", err)
+	// No legacy tarball sibling.
+	if _, err := os.Stat(strings.TrimSuffix(jsonPath, ".json") + ".tar.gz"); !os.IsNotExist(err) {
+		t.Errorf("legacy tarball leaked: err=%v", err)
+	}
+	// No legacy staging directory.
+	if _, err := os.Stat(strings.TrimSuffix(jsonPath, ".json")); !os.IsNotExist(err) {
+		t.Errorf("legacy staging dir present: err=%v", err)
 	}
 
-	files := extractTarball(t, tarPath)
-	if _, ok := files["README.md"]; !ok {
-		t.Errorf("README.md missing from tarball; got keys: %v", keys(files))
-	}
-	if _, ok := files["beads.jsonl"]; !ok {
-		t.Errorf("beads.jsonl missing from tarball")
-	}
-	parentConv, ok := files["tickets/"+parent+"/conversation.md"]
-	if !ok {
-		t.Fatalf("parent conversation.md missing")
-	}
-	if !strings.Contains(string(parentConv), parent) {
-		t.Errorf("parent conversation does not mention parent id")
-	}
-	// Child of parent should be linked as a relative md link.
-	wantLink := "[" + child + "](../" + child + "/conversation.md)"
-	if !strings.Contains(string(parentConv), wantLink) {
-		t.Errorf("parent conversation missing child link %q", wantLink)
+	raw, err := os.ReadFile(jsonPath)
+	if err != nil {
+		t.Fatalf("read json: %v", err)
 	}
 
-	childConv, ok := files["tickets/"+child+"/conversation.md"]
-	if !ok {
-		t.Fatalf("child conversation.md missing")
+	// Top-level keys must be exactly { beads, code }.
+	var topKeys map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &topKeys); err != nil {
+		t.Fatalf("unmarshal top-level: %v", err)
 	}
-	if !strings.Contains(string(childConv), sessionID) {
-		t.Errorf("child conversation missing session id %q", sessionID)
+	if len(topKeys) != 2 {
+		t.Errorf("top-level keys = %d, want 2; got %v", len(topKeys), mapKeys(topKeys))
 	}
-	if !strings.Contains(string(childConv), "Implement the ticket") {
-		t.Errorf("child conversation missing user prompt body")
+	for _, k := range []string{"beads", "code"} {
+		if _, ok := topKeys[k]; !ok {
+			t.Errorf("missing top-level key %q", k)
+		}
 	}
-
-	// One top-level commits.md covers the whole subtree. After the child
-	// finished, its commit was FF-rebased onto the parent's branch — we
-	// scan the parent's worktree and attribute the commit back to the
-	// child via the `ticketId` from the agent-session note.
-	commitsMD, ok := files["commits.md"]
-	if !ok {
-		t.Fatalf("top-level commits.md missing; got keys: %v", keys(files))
-	}
-	cs := string(commitsMD)
-	if !strings.Contains(cs, "| Ticket |") {
-		t.Errorf("commits.md missing Ticket column header:\n%s", cs)
-	}
-	if strings.Contains(cs, "| Session |") {
-		t.Errorf("commits.md still has Session column:\n%s", cs)
-	}
-	wantTicketLink := "[" + child + "](tickets/" + child + "/conversation.md)"
-	if !strings.Contains(cs, wantTicketLink) {
-		t.Errorf("commits.md missing child ticket link %q:\n%s", wantTicketLink, cs)
-	}
-	if strings.Contains(cs, sessionID) {
-		t.Errorf("commits.md still surfaces session id %q (should be ticket-only):\n%s", sessionID, cs)
-	}
-	if !strings.Contains(cs, "feat: handover-child landing") {
-		t.Errorf("commits.md missing commit subject:\n%s", cs)
-	}
-	// Per-bead commits.md files must no longer be emitted.
-	for k := range files {
-		if strings.HasPrefix(k, "tickets/") && strings.HasSuffix(k, "/commits.md") {
-			t.Errorf("legacy per-bead commits.md leaked: %s", k)
+	for k := range topKeys {
+		if k != "beads" && k != "code" {
+			t.Errorf("unexpected top-level key %q", k)
 		}
 	}
 
-	// beads.jsonl: subtree-filtered (just parent + child), host fields
-	// stripped from metadata.dirs[].
-	bj := string(files["beads.jsonl"])
-	rows := strings.Split(strings.TrimRight(bj, "\n"), "\n")
-	if len(rows) != 2 {
-		t.Errorf("beads.jsonl row count = %d, want 2:\n%s", len(rows), bj)
+	var p pkg
+	if err := json.Unmarshal(raw, &p); err != nil {
+		t.Fatalf("unmarshal pkg: %v", err)
+	}
+
+	// beads[]: just the subtree, host fields stripped from metadata.dirs[].
+	if len(p.Beads) != 2 {
+		t.Errorf("beads[] count = %d, want 2", len(p.Beads))
 	}
 	gotIDs := map[string]bool{}
-	for _, r := range rows {
-		var row map[string]any
-		if err := json.Unmarshal([]byte(r), &row); err != nil {
-			t.Fatalf("parse jsonl row: %v\n%s", err, r)
-		}
-		id, _ := row["id"].(string)
+	for _, b := range p.Beads {
+		id, _ := b["id"].(string)
 		gotIDs[id] = true
-		// metadata.dirs[].path / .bareRepo / .localRepo must have been stripped.
-		md, _ := row["metadata"].(map[string]any)
+		md, _ := b["metadata"].(map[string]any)
 		if md == nil {
 			continue
 		}
@@ -158,66 +134,99 @@ func TestHandoverProducesTarballAndDirectory(t *testing.T) {
 			e, _ := d.(map[string]any)
 			for _, banned := range []string{"path", "localRepo", "bareRepo", "repo"} {
 				if _, has := e[banned]; has {
-					t.Errorf("metadata.dirs[].%s leaked into beads.jsonl row %s: %v", banned, id, e)
+					t.Errorf("host field %q leaked into bead %s: %v", banned, id, e)
 				}
 			}
 		}
 	}
 	if !gotIDs[parent] || !gotIDs[child] {
-		t.Errorf("beads.jsonl missing expected ids: got %v", gotIDs)
+		t.Errorf("beads[] missing expected ids: got %v", gotIDs)
 	}
-}
 
-// TestHandoverNoArchiveLeavesDirectory verifies the --no-archive flag emits
-// the staging directory in place and skips tarball creation.
-func TestHandoverNoArchiveLeavesDirectory(t *testing.T) {
-	t.Parallel()
-	beadsDir := testutil.TestDB(t)
-	root := testutil.CreateBead(t, beadsDir, "handover-no-archive-root")
+	// Conversations live under metadata.agents[].conversation[]; the
+	// sessionID we registered must round-trip.
+	if !strings.Contains(string(raw), sessionID) {
+		t.Errorf("expected session id %q in beads[].metadata.agents[]", sessionID)
+	}
 
-	stdout, stderr, code := testutil.RunTicketIn(t, beadsDir, "handover", root, "--no-archive")
-	if code != 0 {
-		t.Fatalf("handover exit=%d stderr=%q", code, stderr)
+	// code[]: exactly one repo (the bare we set up), with the FF-rebased
+	// child commit attributed back to the child via bead_id.
+	if len(p.Code) != 1 {
+		t.Fatalf("code[] count = %d, want 1; got %+v", len(p.Code), p.Code)
 	}
-	lines := strings.Split(strings.TrimRight(stdout, "\n"), "\n")
-	dirPath := lines[len(lines)-1]
-	info, err := os.Stat(dirPath)
-	if err != nil {
-		t.Fatalf("staging dir missing: %v", err)
+	wantRepo := strings.TrimSuffix(filepath.Base(bare), ".git")
+	if p.Code[0].Repo != wantRepo {
+		t.Errorf("code[0].repo = %q, want %q", p.Code[0].Repo, wantRepo)
 	}
-	if !info.IsDir() {
-		t.Fatalf("expected a directory, got file at %s", dirPath)
+	if len(p.Code[0].Commits) != 1 {
+		t.Fatalf("code[0].commits count = %d, want 1; got %+v", len(p.Code[0].Commits), p.Code[0].Commits)
 	}
-	if _, err := os.Stat(dirPath + ".tar.gz"); !os.IsNotExist(err) {
-		t.Errorf("tarball produced despite --no-archive: err=%v", err)
+	c := p.Code[0].Commits[0]
+	if c.SHA == "" {
+		t.Errorf("commit SHA empty")
 	}
-	for _, expected := range []string{"README.md", "beads.jsonl", filepath.Join("tickets", root, "conversation.md")} {
-		if _, err := os.Stat(filepath.Join(dirPath, expected)); err != nil {
-			t.Errorf("expected %s in handover dir: %v", expected, err)
+	if !strings.HasPrefix(c.Message, "feat: handover-child landing") {
+		t.Errorf("commit message = %q, want subject prefix", c.Message)
+	}
+	if !strings.Contains(c.Message, "body line.") {
+		t.Errorf("commit message missing body: %q", c.Message)
+	}
+	if c.BeadID != child {
+		t.Errorf("commit bead_id = %q, want %q", c.BeadID, child)
+	}
+
+	// Each commit object has exactly { SHA, message, bead_id } — no
+	// extra fields like date, short_sha, session, etc.
+	var rawCode struct {
+		Code []struct {
+			Commits []map[string]json.RawMessage `json:"commits"`
+		} `json:"code"`
+	}
+	if err := json.Unmarshal(raw, &rawCode); err != nil {
+		t.Fatalf("unmarshal raw code: %v", err)
+	}
+	for _, c := range rawCode.Code[0].Commits {
+		if len(c) != 3 {
+			t.Errorf("commit has %d fields, want 3: %v", len(c), mapKeys(c))
+		}
+		for _, k := range []string{"SHA", "message", "bead_id"} {
+			if _, ok := c[k]; !ok {
+				t.Errorf("commit missing field %q: %v", k, mapKeys(c))
+			}
 		}
 	}
 }
 
 // TestHandoverHonoursOutputFlag covers the --output override: caller picks
-// the exact final path for both archive and no-archive modes.
+// the exact final file path.
 func TestHandoverHonoursOutputFlag(t *testing.T) {
 	t.Parallel()
 	beadsDir := testutil.TestDB(t)
 	root := testutil.CreateBead(t, beadsDir, "handover-output-flag")
-	custom := filepath.Join(t.TempDir(), "my-handover")
+	custom := filepath.Join(t.TempDir(), "my-handover.json")
 
-	_, stderr, code := testutil.RunTicketIn(t, beadsDir, "handover", root, "--output", custom, "--no-archive")
+	_, stderr, code := testutil.RunTicketIn(t, beadsDir, "handover", root, "--output", custom)
 	if code != 0 {
 		t.Fatalf("handover exit=%d stderr=%q", code, stderr)
 	}
-	if _, err := os.Stat(filepath.Join(custom, "README.md")); err != nil {
-		t.Errorf("custom output dir not populated: %v", err)
+	if _, err := os.Stat(custom); err != nil {
+		t.Errorf("custom output file not produced: %v", err)
+	}
+	raw, err := os.ReadFile(custom)
+	if err != nil {
+		t.Fatalf("read custom output: %v", err)
+	}
+	var p pkg
+	if err := json.Unmarshal(raw, &p); err != nil {
+		t.Fatalf("unmarshal custom output: %v", err)
+	}
+	if len(p.Beads) != 1 {
+		t.Errorf("beads[] count = %d, want 1", len(p.Beads))
 	}
 }
 
 // TestHandoverSubtreeOnlyExcludesAncestors confirms we honour the
-// "subtree only" decision: ancestors of <id> never appear in beads.jsonl
-// nor in tickets/.
+// "subtree only" decision: ancestors of <id> never appear in beads[].
 func TestHandoverSubtreeOnlyExcludesAncestors(t *testing.T) {
 	t.Parallel()
 	beadsDir := testutil.TestDB(t)
@@ -225,37 +234,49 @@ func TestHandoverSubtreeOnlyExcludesAncestors(t *testing.T) {
 	mid := testutil.CreateChildBead(t, beadsDir, "handover-subtree-mid", root)
 	leaf := testutil.CreateChildBead(t, beadsDir, "handover-subtree-leaf", mid)
 
-	stdout, stderr, code := testutil.RunTicketIn(t, beadsDir, "handover", mid, "--no-archive")
+	stdout, stderr, code := testutil.RunTicketIn(t, beadsDir, "handover", mid)
 	if code != 0 {
 		t.Fatalf("handover exit=%d stderr=%q", code, stderr)
 	}
 	lines := strings.Split(strings.TrimRight(stdout, "\n"), "\n")
-	dirPath := lines[len(lines)-1]
+	jsonPath := lines[len(lines)-1]
 
-	bj, err := os.ReadFile(filepath.Join(dirPath, "beads.jsonl"))
+	raw, err := os.ReadFile(jsonPath)
 	if err != nil {
-		t.Fatalf("read beads.jsonl: %v", err)
+		t.Fatalf("read json: %v", err)
+	}
+	var p pkg
+	if err := json.Unmarshal(raw, &p); err != nil {
+		t.Fatalf("unmarshal: %v", err)
 	}
 	got := map[string]bool{}
-	for _, r := range strings.Split(strings.TrimRight(string(bj), "\n"), "\n") {
-		var row struct {
-			ID string `json:"id"`
+	for _, b := range p.Beads {
+		if id, _ := b["id"].(string); id != "" {
+			got[id] = true
 		}
-		_ = json.Unmarshal([]byte(r), &row)
-		got[row.ID] = true
 	}
 	if got[root] {
-		t.Errorf("ancestor %s leaked into beads.jsonl", root)
+		t.Errorf("ancestor %s leaked into beads[]", root)
 	}
 	if !got[mid] || !got[leaf] {
-		t.Errorf("expected mid+leaf in beads.jsonl, got %v", got)
-	}
-	if _, err := os.Stat(filepath.Join(dirPath, "tickets", root, "conversation.md")); !os.IsNotExist(err) {
-		t.Errorf("conversation.md for ancestor %s should not exist: err=%v", root, err)
+		t.Errorf("expected mid+leaf in beads[], got %v", got)
 	}
 }
 
-// --- helpers (mirrors of internal/finish/finish_test.go's helpers) ---
+// TestHandoverRejectsNoArchive covers the cleanup of the legacy flag:
+// --no-archive must no longer be accepted (it was previously the toggle
+// between tarball and staging-directory output).
+func TestHandoverRejectsNoArchive(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	root := testutil.CreateBead(t, beadsDir, "handover-rejects-no-archive")
+	_, _, code := testutil.RunTicketIn(t, beadsDir, "handover", root, "--no-archive")
+	if code == 0 {
+		t.Errorf("expected non-zero exit when --no-archive is passed")
+	}
+}
+
+// --- helpers ---
 
 func mustRunTicket(t *testing.T, beadsDir string, args ...string) {
 	t.Helper()
@@ -333,49 +354,7 @@ func runGitCmd(dir string, env []string, args ...string) (string, error) {
 	return string(out), err
 }
 
-// extractTarball returns the contents of every regular file in the .tar.gz
-// at path, keyed by entry name (forward-slash separated, with the leading
-// root directory component stripped).
-func extractTarball(t *testing.T, path string) map[string][]byte {
-	t.Helper()
-	f, err := os.Open(path)
-	if err != nil {
-		t.Fatalf("open tarball: %v", err)
-	}
-	defer f.Close()
-	gz, err := gzip.NewReader(f)
-	if err != nil {
-		t.Fatalf("gzip reader: %v", err)
-	}
-	defer gz.Close()
-	tr := tar.NewReader(gz)
-	files := map[string][]byte{}
-	for {
-		hdr, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			t.Fatalf("tar next: %v", err)
-		}
-		if hdr.Typeflag != tar.TypeReg {
-			continue
-		}
-		var buf bytes.Buffer
-		if _, err := io.Copy(&buf, tr); err != nil {
-			t.Fatalf("read tar entry %s: %v", hdr.Name, err)
-		}
-		// Strip the leading directory component (the bundle's root folder).
-		name := hdr.Name
-		if i := strings.Index(name, "/"); i >= 0 {
-			name = name[i+1:]
-		}
-		files[name] = buf.Bytes()
-	}
-	return files
-}
-
-func keys(m map[string][]byte) []string {
+func mapKeys[V any](m map[string]V) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
 		out = append(out, k)

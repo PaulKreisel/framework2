@@ -228,18 +228,21 @@ subcommands:
                                           and when every attached PR is
                                           merged and no open children block,
                                           run the full ` + "`finish`" + ` flow.
-  handover [<id>] [--output <path>] [--no-archive]
-                                          produce a portable, snapshot package
-                                          describing the ticket subtree (beads,
-                                          per-bead conversation.md and
-                                          commits.md, README). Defaults to a
-                                          tarball at
-                                          ` + "`<beadsDir>/handovers/<id>-<UTC TS>.tar.gz`" + `;
-                                          ` + "`--no-archive`" + ` leaves the directory
-                                          in place. Non-destructive: never
-                                          closes beads, removes worktrees, or
-                                          touches the env folder. See ai-vrc.57
-                                          for the package format.
+  handover [<id>] [--output <path>]       produce a portable, single-JSON
+                                          snapshot of the ticket subtree:
+                                          ` + "`{ beads: [...], code: [...] }`" + `
+                                          (host paths stripped; conversations
+                                          already live under each bead's
+                                          ` + "`metadata.agents[].conversation[]`" + `).
+                                          Defaults to
+                                          ` + "`<beadsDir>/handovers/<id>-<UTC TS>.json`" + `.
+                                          Diffs are not shipped: the reviewer
+                                          fetches commits from the project's
+                                          remote using the SHAs, so ticket
+                                          branches must be pushed first.
+                                          Non-destructive: never closes beads,
+                                          removes worktrees, or touches the env
+                                          folder.
 
 WAITING REASON column:
   Surfaced by ` + "`agent list`" + `, ` + "`agent status`" + ` and ` + "`next agent`" + ` for agents
@@ -1080,7 +1083,6 @@ func runNotReady(db, beadsDir, ticket string, args []string) error {
 
 func runHandover(db, beadsDir, ticket string, args []string, stdout io.Writer) error {
 	var output string
-	var noArchive bool
 	positional := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -1093,17 +1095,15 @@ func runHandover(db, beadsDir, ticket string, args []string, stdout io.Writer) e
 			i++
 		case strings.HasPrefix(a, "--output="):
 			output = strings.TrimPrefix(a, "--output=")
-		case a == "--no-archive":
-			noArchive = true
 		default:
 			positional = append(positional, a)
 		}
 	}
-	id, _, err := resolveID(ticket, positional, 0, "usage: ticket handover [<id>] [--output <path>] [--no-archive]")
+	id, _, err := resolveID(ticket, positional, 0, "usage: ticket handover [<id>] [--output <path>]")
 	if err != nil {
 		return err
 	}
-	return handover.Run(db, beadsDir, id, output, noArchive, stdout)
+	return handover.Run(db, beadsDir, id, output, stdout)
 }
 
 func runFinish(db, beadsDir, ticket string, args []string, stdout io.Writer) error {

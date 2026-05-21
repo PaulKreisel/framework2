@@ -3,30 +3,26 @@ package handover
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 
 	"framework2/internal/bdcli"
 )
 
 // Bead is the decoded JSONL row from `bd export`, plus a few fields we
-// surface in rendering. The Raw map preserves every field bd emitted so we
-// can re-marshal without losing schema we don't model in Go.
+// surface to other helpers (parent/children lookup). The Raw map preserves
+// every field bd emitted so we can re-marshal without losing schema we
+// don't model in Go.
 type Bead struct {
 	ID       string
 	Title    string
-	Status   string
-	Owner    string
-	Created  string
-	Updated  string
 	ParentID string
 	// Children is the set of subtree ids whose parent-child dep points at
 	// this bead. Populated by loadSubtree from the inverse index.
 	Children []string
-	// Raw is the original JSON object emitted by `bd export`. We mutate it
-	// in place to strip host-specific metadata.dirs fields before writing.
+	// Raw is the original JSON object emitted by `bd export`. We mutate
+	// clones of it (via cloneJSONMap) to strip host-specific metadata.dirs
+	// fields before serialising.
 	Raw map[string]any
 }
 
@@ -58,13 +54,9 @@ func loadSubtree(db, beadsDir, root string) (map[string]*Bead, []string, error) 
 			continue
 		}
 		b := &Bead{
-			ID:      id,
-			Title:   strOr(raw["title"]),
-			Status:  strOr(raw["status"]),
-			Owner:   strOr(raw["owner"]),
-			Created: strOr(raw["created_at"]),
-			Updated: strOr(raw["updated_at"]),
-			Raw:     raw,
+			ID:    id,
+			Title: strOr(raw["title"]),
+			Raw:   raw,
 		}
 		b.ParentID = parentFromDeps(raw)
 		all[id] = b
@@ -73,8 +65,6 @@ func loadSubtree(db, beadsDir, root string) (map[string]*Bead, []string, error) 
 		return nil, nil, fmt.Errorf("ticket %s not found in export", root)
 	}
 
-	// Inverse index: parent → children. Restricted to ids present in the
-	// export so we don't trip on dangling parents.
 	childIdx := map[string][]string{}
 	for id, b := range all {
 		if b.ParentID != "" {
@@ -82,8 +72,6 @@ func loadSubtree(db, beadsDir, root string) (map[string]*Bead, []string, error) 
 		}
 	}
 
-	// BFS from root, preserving discovery order and de-duplicating against
-	// stable visits.
 	order := []string{root}
 	subtree := map[string]*Bead{root: all[root]}
 	queue := []string{root}
@@ -91,7 +79,6 @@ func loadSubtree(db, beadsDir, root string) (map[string]*Bead, []string, error) 
 		cur := queue[0]
 		queue = queue[1:]
 		children := childIdx[cur]
-		// Sort children for deterministic output.
 		sortStrings(children)
 		all[cur].Children = children
 		for _, c := range children {
@@ -119,8 +106,6 @@ func parentFromDeps(raw map[string]any) string {
 		if t, _ := dm["type"].(string); t != "parent-child" {
 			continue
 		}
-		// The owning bead depends-on its parent; depends_on_id is the
-		// parent's id.
 		if pid, _ := dm["depends_on_id"].(string); pid != "" {
 			return pid
 		}
@@ -128,30 +113,23 @@ func parentFromDeps(raw map[string]any) string {
 	return ""
 }
 
-// writeBeadsJSONL emits one JSONL row per subtree bead, in the order
-// produced by loadSubtree. Host-specific fields inside metadata.dirs[] are
-// stripped on the way out (path, localRepo, bareRepo); branch is kept.
-func writeBeadsJSONL(dirPath string, order []string, beads map[string]*Bead) error {
-	f, err := os.Create(filepath.Join(dirPath, "beads.jsonl"))
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	enc := json.NewEncoder(f)
-	enc.SetEscapeHTML(false)
+// subtreeBeadsRaw returns one host-stripped raw row per subtree bead, in
+// the deterministic order produced by loadSubtree. Each row is a deep
+// clone of the export payload with host-specific keys removed from
+// metadata.dirs[]; the branch field is preserved so the reviewer can still
+// see which branch a ticket lived on.
+func subtreeBeadsRaw(order []string, beads map[string]*Bead) []map[string]any {
+	out := make([]map[string]any, 0, len(order))
 	for _, id := range order {
 		raw := cloneJSONMap(beads[id].Raw)
 		stripHostDirs(raw)
-		if err := enc.Encode(raw); err != nil {
-			return err
-		}
+		out = append(out, raw)
 	}
-	return nil
+	return out
 }
 
 // stripHostDirs rewrites metadata.dirs[] inside raw to remove host-specific
-// keys (path, localRepo, bareRepo). The branch field is preserved so the
-// reviewer can still see which branch a ticket lived on.
+// keys (path, localRepo, bareRepo, repo). The branch field is preserved.
 func stripHostDirs(raw map[string]any) {
 	md, ok := raw["metadata"].(map[string]any)
 	if !ok {
@@ -197,7 +175,6 @@ func cloneJSON(v any) any {
 	}
 }
 
-// cloneJSON returns a deep copy but typed as a map for the top-level row.
 func cloneJSONMap(v map[string]any) map[string]any {
 	return cloneJSON(v).(map[string]any)
 }
@@ -210,7 +187,6 @@ func strOr(v any) string {
 }
 
 func sortStrings(s []string) {
-	// Avoid pulling in sort just for a tiny slice; insertion sort is fine.
 	for i := 1; i < len(s); i++ {
 		for j := i; j > 0 && s[j-1] > s[j]; j-- {
 			s[j-1], s[j] = s[j], s[j-1]
