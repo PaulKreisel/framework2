@@ -264,7 +264,7 @@ func TestRunCodeHumanOutput(t *testing.T) {
 	}
 	var stdout, stderr bytes.Buffer
 	code := RunWithOptions(Options{GHRunner: fr.run},
-		[]string{"code", "Unpivot"}, &stdout, &stderr)
+		[]string{"code", "Unpivot", "--org", "orgA", "--org", "orgB"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
 	}
@@ -295,7 +295,7 @@ func TestRunCodeJSONOutput(t *testing.T) {
 	}
 	var stdout, stderr bytes.Buffer
 	code := RunWithOptions(Options{GHRunner: fr.run},
-		[]string{"code", "match", "--json"}, &stdout, &stderr)
+		[]string{"code", "match", "--org", "o", "--json"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
 	}
@@ -324,7 +324,7 @@ func TestRunCodeForwardsGhExtras(t *testing.T) {
 	}
 	var stdout, stderr bytes.Buffer
 	code := RunWithOptions(Options{GHRunner: fr.run},
-		[]string{"code", "term", "--", "--language", "python"}, &stdout, &stderr)
+		[]string{"code", "term", "--org", "o", "--", "--language", "python"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
 	}
@@ -352,7 +352,7 @@ func TestRunCodeNoResults(t *testing.T) {
 	}
 	var stdout, stderr bytes.Buffer
 	code := RunWithOptions(Options{GHRunner: fr.run},
-		[]string{"code", "term"}, &stdout, &stderr)
+		[]string{"code", "term", "--org", "o"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
 	}
@@ -426,7 +426,7 @@ func TestRunCodeAbbreviatesAboveThreshold(t *testing.T) {
 	}
 	var stdout, stderr bytes.Buffer
 	code := RunWithOptions(Options{GHRunner: fr.run},
-		[]string{"code", "needle", "--threshold", "2"}, &stdout, &stderr)
+		[]string{"code", "needle", "--org", "o", "--threshold", "2"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
 	}
@@ -441,14 +441,11 @@ func TestRunCodeAbbreviatesAboveThreshold(t *testing.T) {
 func TestRunCodePropagatesRunnerError(t *testing.T) {
 	t.Parallel()
 	runner := func(_ context.Context, args []string) ([]byte, error) {
-		if len(args) >= 2 && args[0] == "api" && args[1] == "user/orgs" {
-			return []byte("o\n"), nil
-		}
 		return nil, fmt.Errorf("gh search exploded")
 	}
 	var stdout, stderr bytes.Buffer
 	code := RunWithOptions(Options{GHRunner: runner},
-		[]string{"code", "x"}, &stdout, &stderr)
+		[]string{"code", "x", "--org", "o"}, &stdout, &stderr)
 	if code == 0 {
 		t.Fatal("expected nonzero exit")
 	}

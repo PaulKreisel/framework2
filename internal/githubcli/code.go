@@ -28,9 +28,18 @@ func codeCommand(ctx context.Context, runner GHRunner, args []string, stdout io.
 		terms     []string
 		ghExtra   []string
 		threshold = defaultCodeThreshold
+		limit     = defaultCodeSearchLimit
+		orgs      []string
 		asJSON    bool
 		sawDDash  bool
 	)
+	parseIntFlag := func(name, raw string) (int, error) {
+		n, err := strconv.Atoi(raw)
+		if err != nil {
+			return 0, fmt.Errorf("%s value %q is not an integer\n\n%s", name, raw, codeUsage)
+		}
+		return n, nil
+	}
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if sawDDash {
@@ -49,18 +58,42 @@ func codeCommand(ctx context.Context, runner GHRunner, args []string, stdout io.
 			if i+1 >= len(args) {
 				return fmt.Errorf("--threshold requires a value\n\n%s", codeUsage)
 			}
-			n, err := strconv.Atoi(args[i+1])
+			n, err := parseIntFlag("--threshold", args[i+1])
 			if err != nil {
-				return fmt.Errorf("--threshold %q is not an integer\n\n%s", args[i+1], codeUsage)
+				return err
 			}
 			threshold = n
 			i++
 		case strings.HasPrefix(a, "--threshold="):
-			n, err := strconv.Atoi(strings.TrimPrefix(a, "--threshold="))
+			n, err := parseIntFlag("--threshold", strings.TrimPrefix(a, "--threshold="))
 			if err != nil {
-				return fmt.Errorf("--threshold value %q is not an integer\n\n%s", strings.TrimPrefix(a, "--threshold="), codeUsage)
+				return err
 			}
 			threshold = n
+		case a == "--limit":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--limit requires a value\n\n%s", codeUsage)
+			}
+			n, err := parseIntFlag("--limit", args[i+1])
+			if err != nil {
+				return err
+			}
+			limit = n
+			i++
+		case strings.HasPrefix(a, "--limit="):
+			n, err := parseIntFlag("--limit", strings.TrimPrefix(a, "--limit="))
+			if err != nil {
+				return err
+			}
+			limit = n
+		case a == "--org":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--org requires a value\n\n%s", codeUsage)
+			}
+			orgs = append(orgs, args[i+1])
+			i++
+		case strings.HasPrefix(a, "--org="):
+			orgs = append(orgs, strings.TrimPrefix(a, "--org="))
 		case strings.HasPrefix(a, "-"):
 			return fmt.Errorf("unknown flag %q (forward gh flags after `--`)\n\n%s", a, codeUsage)
 		default:
@@ -70,8 +103,11 @@ func codeCommand(ctx context.Context, runner GHRunner, args []string, stdout io.
 	if len(terms) == 0 {
 		return errors.New(codeUsage)
 	}
+	if len(orgs) == 0 {
+		orgs = []string{defaultCodeSearchOrg}
+	}
 
-	matches, err := SearchCode(ctx, runner, terms, ghExtra)
+	matches, err := SearchCode(ctx, runner, terms, ghExtra, orgs, limit)
 	if err != nil {
 		return err
 	}
@@ -82,10 +118,12 @@ func codeCommand(ctx context.Context, runner GHRunner, args []string, stdout io.
 	return writeCodeHuman(stdout, grouped, threshold)
 }
 
-// codeSearchLimit is the per-org cap on results returned by `gh search code`.
-// 600 mirrors the prior bash script (6 pages * 100). gh enforces a hard cap of
-// 1000.
-const codeSearchLimit = 600
+// defaultCodeSearchLimit is the default per-org cap on results returned by
+// `gh search code`. Override with `--limit`. gh enforces a hard cap of 1000.
+const defaultCodeSearchLimit = 100
+
+// defaultCodeSearchOrg is the org searched when no `--org` is given.
+const defaultCodeSearchOrg = "knime"
 
 // CodeMatch is one path-level hit in a repo. Mirrors the subset of
 // `gh search code --json repository,path` that we use.
@@ -114,10 +152,10 @@ type ghSearchCodeItem struct {
 
 // runCodeSearch shells out for a single org and decodes the result list.
 // Empty orgs (no matches) yield a nil slice without error.
-func runCodeSearch(ctx context.Context, runner GHRunner, org string, terms, ghExtra []string) ([]CodeMatch, error) {
+func runCodeSearch(ctx context.Context, runner GHRunner, org string, terms, ghExtra []string, limit int) ([]CodeMatch, error) {
 	args := []string{"search", "code"}
 	args = append(args, terms...)
-	args = append(args, "--owner", org, "--limit", fmt.Sprintf("%d", codeSearchLimit), "--json", "repository,path")
+	args = append(args, "--owner", org, "--limit", fmt.Sprintf("%d", limit), "--json", "repository,path")
 	args = append(args, ghExtra...)
 	out, err := runner(ctx, args)
 	if err != nil {
@@ -137,14 +175,9 @@ func runCodeSearch(ctx context.Context, runner GHRunner, org string, terms, ghEx
 	return matches, nil
 }
 
-// SearchCode enumerates the user's orgs, fans out one `gh search code` per
-// org in parallel, and returns the merged list. Order is not stable; the
-// caller groups and sorts.
-func SearchCode(ctx context.Context, runner GHRunner, terms, ghExtra []string) ([]CodeMatch, error) {
-	orgs, err := listOrgs(ctx, runner)
-	if err != nil {
-		return nil, err
-	}
+// SearchCode fans out one `gh search code` per org in parallel and returns
+// the merged list. Order is not stable; the caller groups and sorts.
+func SearchCode(ctx context.Context, runner GHRunner, terms, ghExtra, orgs []string, limit int) ([]CodeMatch, error) {
 	var (
 		mu       sync.Mutex
 		all      []CodeMatch
@@ -155,7 +188,7 @@ func SearchCode(ctx context.Context, runner GHRunner, terms, ghExtra []string) (
 		wg.Add(1)
 		go func(org string) {
 			defer wg.Done()
-			res, err := runCodeSearch(ctx, runner, org, terms, ghExtra)
+			res, err := runCodeSearch(ctx, runner, org, terms, ghExtra, limit)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {

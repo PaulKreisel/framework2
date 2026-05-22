@@ -17,8 +17,8 @@ const usage = `usage: github <subcommand> [args...]
 
 subcommands:
   branches <search-term> [--json]                        find branches whose name contains <search-term>
-  code <search-term>... [--threshold N] [--json] [-- <gh flags>...]
-                                                         search code across every org you belong to
+  code <search-term>... [--org <org>]... [--limit N] [--threshold N] [--json] [-- <gh flags>...]
+                                                         search code in the given GitHub org(s) (default: knime)
 
 Requires the gh CLI to be authenticated. See 'github <subcommand> --help'.`
 
@@ -33,13 +33,17 @@ Output:
            or "No branches found." when nothing matches.
   --json:  a single JSON array of {owner, repo, branch} objects.`
 
-const codeUsage = `usage: github code <search-term>... [--threshold <n>] [--json] [-- <gh flags>...]
+const codeUsage = `usage: github code <search-term>... [--org <org>]... [--limit <n>] [--threshold <n>] [--json] [-- <gh flags>...]
 
-Runs ` + "`gh search code`" + ` against every GitHub org the authenticated user
-belongs to (one --owner per org, concurrently) and merges the results.
+Runs ` + "`gh search code`" + ` against one or more GitHub orgs (one --owner per
+org, concurrently) and merges the results.
 
 Arguments:
   <search-term>...    one or more positional terms forwarded to gh search code.
+  --org <org>         org to search; repeat to fan out across multiple orgs
+                      (default: knime).
+  --limit <n>         per-org cap forwarded as --limit to gh search code
+                      (default: 100; gh caps at 1000).
   --threshold <n>     when total results exceed n, content-only matches are
                       collapsed to a count per repo (default: 100). Does not
                       affect --json output.
