@@ -475,6 +475,113 @@ type-prefix:
 	}
 }
 
+// gitInTest runs git in dir with deterministic author env. Fails the test
+// on non-zero exit.
+func gitInTest(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	envv := append(os.Environ(),
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com",
+	)
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = envv
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git -C %s %v: %v\n%s", dir, args, err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// sourceOf returns the path to the source (non-bare) repo that bareRepo
+// cloned from; it lives next to the bare under the same parent tempdir.
+func sourceOf(bare string) string {
+	return filepath.Join(filepath.Dir(bare), "source")
+}
+
+func TestDirWorktreeReusesRemoteBranch(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBead(t, beadsDir, "wt-remote-reuse")
+	bare := bareRepo(t, "main")
+	// bareRepo is a `git clone --bare`, whose default fetch refspec maps
+	// origin's heads into local refs/heads/. To exercise the same
+	// upstream-tracking semantics a real (non-bare) clone would have,
+	// rewrite the refspec to the standard remote-tracking layout. Without
+	// this, git refuses to resolve @{upstream} for refs that aren't stored
+	// under refs/remotes/<remote>/*.
+	gitInTest(t, bare, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
+	source := sourceOf(bare)
+
+	// Create the branch on the remote ahead of `dir worktree`, with a commit
+	// that is NOT on main, so we can distinguish remote-reuse from
+	// based-on-main.
+	branch := "todo/" + ticket
+	gitInTest(t, source, "checkout", "-q", "-b", branch)
+	gitInTest(t, source, "commit", "--allow-empty", "-q", "-m", "remote-only commit")
+	remoteSHA := gitInTest(t, source, "rev-parse", "HEAD")
+	gitInTest(t, source, "checkout", "-q", "main")
+
+	if _, stderr, code := testutil.RunTicketIn(t, beadsDir, "dir", "worktree", ticket, bare); code != 0 {
+		t.Fatalf("worktree exit=%d stderr=%q", code, stderr)
+	}
+
+	entries := listEntries(t, beadsDir, ticket)
+	if len(entries) != 1 {
+		t.Fatalf("entries=%+v want 1", entries)
+	}
+	if sha := refSHA(t, entries[0].Path, "HEAD"); sha != remoteSHA {
+		t.Errorf("worktree HEAD %q != origin/%s %q (should reuse remote branch)", sha, branch, remoteSHA)
+	}
+	upstream, err := exec.Command("git", "-C", entries[0].Path, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}").CombinedOutput()
+	if err != nil {
+		t.Fatalf("rev-parse upstream: %v\n%s", err, upstream)
+	}
+	if got := strings.TrimSpace(string(upstream)); got != "origin/"+branch {
+		t.Errorf("upstream=%q want %q", got, "origin/"+branch)
+	}
+}
+
+func TestDirWorktreeFetchFailureFallsThrough(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBead(t, beadsDir, "wt-fetch-fail")
+	bare := bareRepo(t, "main")
+	// Break origin: point it at a non-existent path. fetch must fail but
+	// `dir worktree` should still succeed via the existing code path.
+	gitInTest(t, bare, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "does-not-exist"))
+
+	if _, stderr, code := testutil.RunTicketIn(t, beadsDir, "dir", "worktree", ticket, bare); code != 0 {
+		t.Fatalf("worktree exit=%d stderr=%q", code, stderr)
+	}
+	entries := listEntries(t, beadsDir, ticket)
+	if len(entries) != 1 {
+		t.Fatalf("entries=%+v want 1", entries)
+	}
+	if sha := refSHA(t, entries[0].Path, "HEAD"); sha != bareBranchSHA(t, bare, "main") {
+		t.Errorf("worktree HEAD %q != bare main %q (should fall through to base)", sha, bareBranchSHA(t, bare, "main"))
+	}
+}
+
+func TestDirWorktreeLocalBranchCollisionErrors(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBead(t, beadsDir, "wt-local-collide")
+	bare := bareRepo(t, "main")
+	branch := "todo/" + ticket
+	gitInTest(t, bare, "branch", branch, "main")
+
+	_, stderr, code := testutil.RunTicketIn(t, beadsDir, "dir", "worktree", ticket, bare)
+	if code == 0 {
+		t.Fatal("worktree succeeded despite local branch collision, want error")
+	}
+	if !strings.Contains(stderr, "worktree add") && !strings.Contains(stderr, "already exists") {
+		t.Errorf("stderr=%q want to mention git worktree add error", stderr)
+	}
+	if entries := listEntries(t, beadsDir, ticket); len(entries) != 0 {
+		t.Errorf("entries=%+v want none", entries)
+	}
+}
+
 func TestDirWorktreeBadTemplateFailsLoudly(t *testing.T) {
 	t.Parallel()
 	beadsDir := testutil.TestDB(t)

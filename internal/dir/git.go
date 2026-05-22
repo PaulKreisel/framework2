@@ -54,11 +54,40 @@ func gitDefaultBase(repo string) (string, error) {
 }
 
 // gitWorktreeAdd creates a new worktree at wtPath with a new branch named
-// branch, based on base. Returns the combined git output on failure.
+// branch. If origin/<branch> exists (after a best-effort fetch from origin),
+// the new branch tracks it; otherwise the new branch is created based on
+// base. Returns the combined git output on failure.
 func gitWorktreeAdd(repo, wtPath, branch, base string) error {
-	cmd := exec.Command("git", "-C", repo, "worktree", "add", "-b", branch, wtPath, base)
+	// Best-effort fetch of the target branch (into refs/remotes/origin/) and
+	// the base ref from origin so we can detect a pre-existing remote
+	// branch. Ignore failures (offline, no origin configured, branch
+	// doesn't exist on remote, ...). An explicit refspec is used for the
+	// branch so this works in bare repos (where the default fetch refspec
+	// targets refs/heads/* rather than refs/remotes/origin/*).
+	_ = exec.Command("git", "-C", repo, "fetch", "origin",
+		"+refs/heads/"+branch+":refs/remotes/origin/"+branch).Run()
+	baseRef := strings.TrimPrefix(base, "origin/")
+	_ = exec.Command("git", "-C", repo, "fetch", "origin", baseRef).Run()
+
+	_, hasLocal := runGit(repo, "rev-parse", "--verify", "refs/heads/"+branch)
+	_, hasRemote := runGit(repo, "rev-parse", "--verify", "refs/remotes/origin/"+branch)
+
+	addBase := base
+	if !hasLocal && hasRemote {
+		addBase = "refs/remotes/origin/" + branch
+	}
+	cmd := exec.Command("git", "-C", repo, "worktree", "add", "-b", branch, wtPath, addBase)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git worktree add: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	if !hasLocal && hasRemote {
+		// Set upstream manually. `git worktree add --track` requires that
+		// refs/remotes/origin/* be recognised as remote-tracking via the
+		// remote's fetch refspec, which is not the case in a bare clone
+		// (default refspec is +refs/heads/*:refs/heads/*). Writing the
+		// config keys directly works regardless of refspec config.
+		_ = exec.Command("git", "-C", repo, "config", "branch."+branch+".remote", "origin").Run()
+		_ = exec.Command("git", "-C", repo, "config", "branch."+branch+".merge", "refs/heads/"+branch).Run()
 	}
 	return nil
 }
