@@ -16,9 +16,11 @@ import (
 const usage = `usage: github <subcommand> [args...]
 
 subcommands:
-  branches <search-term> [--json]    find branches whose name contains <search-term>
+  branches <search-term> [--json]                        find branches whose name contains <search-term>
+  code <search-term>... [--threshold N] [--json] [-- <gh flags>...]
+                                                         search code across every org you belong to
 
-Requires the gh CLI to be authenticated. See 'github branches --help'.`
+Requires the gh CLI to be authenticated. See 'github <subcommand> --help'.`
 
 const branchesUsage = `usage: github branches <search-term> [--json]
 
@@ -30,6 +32,20 @@ Output:
   default: one tab-separated <owner>/<repo>\t<branch> line per match,
            or "No branches found." when nothing matches.
   --json:  a single JSON array of {owner, repo, branch} objects.`
+
+const codeUsage = `usage: github code <search-term>... [--threshold <n>] [--json] [-- <gh flags>...]
+
+Runs ` + "`gh search code`" + ` against every GitHub org the authenticated user
+belongs to (one --owner per org, concurrently) and merges the results.
+
+Arguments:
+  <search-term>...    one or more positional terms forwarded to gh search code.
+  --threshold <n>     when total results exceed n, content-only matches are
+                      collapsed to a count per repo (default: 100). Does not
+                      affect --json output.
+  --json              emit the grouped results as JSON.
+  -- <gh flags>...    everything after -- is forwarded verbatim to gh search
+                      code (e.g. --language python, --filename package.json).`
 
 // Options pins values that production reads from the environment. Tests use
 // it to inject a fake [GHRunner] in place of the real gh CLI.
@@ -68,6 +84,8 @@ func dispatch(ctx context.Context, runner GHRunner, args []string, stdout io.Wri
 		return nil
 	case "branches":
 		return branchesCommand(ctx, runner, args[1:], stdout)
+	case "code":
+		return codeCommand(ctx, runner, args[1:], stdout)
 	default:
 		return fmt.Errorf("unknown subcommand %q\n\n%s", args[0], usage)
 	}
