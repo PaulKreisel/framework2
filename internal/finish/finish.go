@@ -227,11 +227,20 @@ type rebaseResult struct {
 }
 
 // rebaseWorktrees brings each worktree's branch onto its parent ticket's
-// branch in the same bare repo, then fast-forwards the parent worktree's
-// branch to match. A root bead (no parent) or a bead whose parent has no
-// worktree in the same bare repo is left alone. In continueMode, in-rebase
-// worktrees resume via `git rebase --continue`; non-in-rebase worktrees
-// take the normal path.
+// branch in the same bare repo, rewrites the now-landed child commits with
+// the `Subtask N` trailer, then fast-forwards the parent worktree's branch
+// to match. A root bead (no parent) or a bead whose parent has no worktree
+// in the same bare repo is left alone. In continueMode, in-rebase worktrees
+// resume via `git rebase --continue`; non-in-rebase worktrees take the
+// normal path.
+//
+// The index N is allocated once across all bares (via the parent bead's
+// metadata.handover.contributors counter), so every worktree in this finish
+// shares the same trailer. Empty subtasks — zero new commits across all
+// bares — don't consume an index. A resume after partial failure reuses the
+// child's existing contributionIndex instead of bumping the parent again;
+// the per-commit rewrite is idempotent so already-rewritten commits are
+// left alone.
 //
 // Returns one [rebaseResult] per child worktree that had a matching parent in
 // the same bare. Callers use the returned list to run per-repo post-merge
@@ -244,7 +253,16 @@ func rebaseWorktrees(db, beadsDir, ticketID, parent string, worktrees []dir.Entr
 	if err != nil {
 		return nil, err
 	}
-	var results []rebaseResult
+	// Pass 1: ffRebase every matching worktree (may pause on conflicts) and
+	// capture the SHA range that would land on each parent.
+	type pending struct {
+		ChildEntry   dir.Entry
+		ParentEntry  dir.Entry
+		OldParentSHA string
+		ChildTipSHA  string
+	}
+	var pendings []pending
+	anyCommits := false
 	for _, e := range worktrees {
 		pe, ok := findEntryForBare(parentEntries, e.BareRepo)
 		if !ok {
@@ -259,16 +277,53 @@ func rebaseWorktrees(db, beadsDir, ticketID, parent string, worktrees []dir.Entr
 		if !ok {
 			return nil, fmt.Errorf("rev-parse HEAD failed in %s", pe.Path)
 		}
-		if err := ffAdvance(pe.Path, pe.Branch, e.Branch); err != nil {
-			return nil, err
-		}
-		newParentSHA, ok := runGit(pe.Path, "rev-parse", "HEAD")
+		childTipSHA, ok := runGit(pe.Path, "rev-parse", e.Branch)
 		if !ok {
-			return nil, fmt.Errorf("rev-parse HEAD failed in %s after advance", pe.Path)
+			return nil, fmt.Errorf("rev-parse %s failed in %s", e.Branch, pe.Path)
 		}
-		results = append(results, rebaseResult{
+		if oldParentSHA != childTipSHA {
+			anyCommits = true
+		}
+		pendings = append(pendings, pending{
+			ChildEntry:   e,
 			ParentEntry:  pe,
 			OldParentSHA: oldParentSHA,
+			ChildTipSHA:  childTipSHA,
+		})
+	}
+	// Allocate the per-child index once, against the parent bead. Empty
+	// subtasks (no new commits in any bare) skip allocation entirely —
+	// the parent's contributors counter is not bumped and the child stays
+	// unindexed.
+	var (
+		index  int
+		reused bool
+	)
+	if anyCommits {
+		index, reused, err = allocateContributionIndex(db, beadsDir, parent, ticketID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	// Pass 2: rewrite commit messages on each child branch with the
+	// allocated index, then ffAdvance the parent.
+	var results []rebaseResult
+	for _, p := range pendings {
+		if anyCommits && p.OldParentSHA != p.ChildTipSHA {
+			if _, err := rewriteCommitsInRange(p.ChildEntry.Path, p.ChildEntry.Branch, p.OldParentSHA, p.ChildTipSHA, index, reused); err != nil {
+				return nil, err
+			}
+		}
+		if err := ffAdvance(p.ParentEntry.Path, p.ParentEntry.Branch, p.ChildEntry.Branch); err != nil {
+			return nil, err
+		}
+		newParentSHA, ok := runGit(p.ParentEntry.Path, "rev-parse", "HEAD")
+		if !ok {
+			return nil, fmt.Errorf("rev-parse HEAD failed in %s after advance", p.ParentEntry.Path)
+		}
+		results = append(results, rebaseResult{
+			ParentEntry:  p.ParentEntry,
+			OldParentSHA: p.OldParentSHA,
 			NewParentSHA: newParentSHA,
 		})
 	}

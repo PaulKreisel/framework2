@@ -168,19 +168,26 @@ func TestFinishAdvancesParentBranchToChildTip(t *testing.T) {
 
 	// Child makes a commit; parent branch stays put.
 	advanceBranch(t, childWT)
-	childTip := gitOut(t, childWT, "rev-parse", "HEAD")
+	childTipTree := gitOut(t, childWT, "rev-parse", "HEAD^{tree}")
 
 	if _, stderr, code := testutil.RunTicketIn(t, beadsDir, "finish", child); code != 0 {
 		t.Fatalf("finish exit=%d stderr=%q", code, stderr)
 	}
 
 	parentBranchTip := gitOut(t, bare, "rev-parse", "refs/heads/todo/"+parent)
-	if parentBranchTip != childTip {
-		t.Errorf("parent branch tip %q != child tip %q (expected FF-advance)", parentBranchTip, childTip)
+	childBranchTip := gitOut(t, bare, "rev-parse", "refs/heads/todo/"+child)
+	if parentBranchTip != childBranchTip {
+		t.Errorf("parent branch tip %q != child branch tip %q (expected FF-advance)", parentBranchTip, childBranchTip)
 	}
 	parentHeadTip := gitOut(t, parentWT, "rev-parse", "HEAD")
-	if parentHeadTip != childTip {
-		t.Errorf("parent worktree HEAD %q != child tip %q (expected FF-advance in worktree)", parentHeadTip, childTip)
+	if parentHeadTip != childBranchTip {
+		t.Errorf("parent worktree HEAD %q != child branch tip %q (expected FF-advance in worktree)", parentHeadTip, childBranchTip)
+	}
+	// Tree must be the same as pre-finish (the Subtask-trailer rewrite only
+	// touches messages, not tree contents).
+	gotTree := gitOut(t, parentWT, "rev-parse", "HEAD^{tree}")
+	if gotTree != childTipTree {
+		t.Errorf("parent tip tree %q != original child tip tree %q (rewrite must not change tree)", gotTree, childTipTree)
 	}
 }
 
