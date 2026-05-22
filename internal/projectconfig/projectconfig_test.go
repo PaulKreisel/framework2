@@ -200,6 +200,93 @@ func TestRenderUnterminatedBrace(t *testing.T) {
 	}
 }
 
+func TestRenderBareRepoHomeExpansion(t *testing.T) {
+	t.Parallel()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := projectconfig.Config{BareRepo: "~/knime/repos/{repo-name}.git"}
+	got, err := cfg.RenderBareRepo("knime", "knime-core-ui")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(home, "knime/repos/knime-core-ui.git")
+	if got != want {
+		t.Errorf("got=%q want=%q", got, want)
+	}
+}
+
+func TestRenderBareRepoOwnerPlaceholder(t *testing.T) {
+	t.Parallel()
+	cfg := projectconfig.Config{BareRepo: "/repos/{owner}/{repo-name}.git"}
+	got, err := cfg.RenderBareRepo("knime", "x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "/repos/knime/x.git" {
+		t.Errorf("got=%q", got)
+	}
+}
+
+func TestRenderBareRepoMissingTemplate(t *testing.T) {
+	t.Parallel()
+	cfg := projectconfig.Defaults()
+	_, err := cfg.RenderBareRepo("o", "r")
+	if err == nil || !strings.Contains(err.Error(), "bare-repo") {
+		t.Errorf("err=%v want bare-repo missing error", err)
+	}
+}
+
+func TestLoadBareRepoAndJiraType(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	yaml := `
+bare-repo: "~/knime/repos/{repo-name}.git"
+jira-type:
+  New node: feature
+`
+	if err := os.WriteFile(filepath.Join(dir, "project.yaml"), []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := projectconfig.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.BareRepo != "~/knime/repos/{repo-name}.git" {
+		t.Errorf("bare-repo=%q", cfg.BareRepo)
+	}
+	got, ok := cfg.MapJiraType("New node")
+	if !ok || got != "feature" {
+		t.Errorf("MapJiraType(New node)=%q,%v want feature,true", got, ok)
+	}
+	// Case-insensitive lookup matches the TypePrefix convention.
+	if got, ok := cfg.MapJiraType("new NODE"); !ok || got != "feature" {
+		t.Errorf("MapJiraType(case)=%q,%v", got, ok)
+	}
+	if _, ok := cfg.MapJiraType("Bug"); ok {
+		t.Errorf("Bug should not be overridden")
+	}
+}
+
+func TestRenderPathWithBranchPlaceholder(t *testing.T) {
+	t.Parallel()
+	cfg := projectconfig.Config{
+		Worktree: projectconfig.WorktreeConfig{
+			Branch: "{type-prefix}/{bead-id}",
+			Path:   "{bare-repo-dir}/{bare-repo-name}.git/branches/{branch}",
+		},
+	}
+	v := projectconfig.Vars{BeadID: "ai-42", Type: "bug", BareRepoPath: "/repos/foo.git", Branch: "fix/ai-42"}
+	got, err := cfg.RenderPath(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "/repos/foo.git/branches/fix/ai-42" {
+		t.Errorf("got=%q", got)
+	}
+}
+
 func TestJiraIDFromExternalRef(t *testing.T) {
 	t.Parallel()
 	cases := map[string]string{

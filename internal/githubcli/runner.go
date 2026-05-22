@@ -14,6 +14,13 @@ import (
 // default runner so authentication / API errors surface unchanged.
 type GHRunner func(ctx context.Context, args []string) ([]byte, error)
 
+// NewDefaultRunner builds a [GHRunner] that exec's the real `gh` binary and
+// pipes its stderr to ghStderr. Used by [Run] and by external callers that
+// want to reuse the in-process gh wrapper.
+func NewDefaultRunner(ghStderr io.Writer) GHRunner {
+	return newDefaultRunner(ghStderr)
+}
+
 // newDefaultRunner builds a [GHRunner] that exec's the real `gh` binary and
 // pipes its stderr to ghStderr. Used by [Run].
 func newDefaultRunner(ghStderr io.Writer) GHRunner {

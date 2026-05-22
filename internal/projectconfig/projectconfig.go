@@ -54,6 +54,13 @@ const Filename = "project.yaml"
 type Config struct {
 	Worktree     WorktreeConfig    `yaml:"worktree"`
 	TypePrefixes map[string]string `yaml:"type-prefix"`
+	// BareRepo is a template that resolves a GitHub `owner/repo` to an
+	// absolute local bare-repo path. Placeholders: {owner}, {repo-name}.
+	// A leading `~/` is expanded to the user's home directory.
+	BareRepo string `yaml:"bare-repo"`
+	// JiraTypes maps Jira issue type names (case-insensitive) to bead types,
+	// layered on top of the hardcoded jiracli.MapType defaults.
+	JiraTypes map[string]string `yaml:"jira-type"`
 }
 
 // WorktreeConfig holds the two templates that control `ticket dir worktree`.
@@ -108,7 +115,51 @@ func Load(beadsDir string) (Config, error) {
 	if len(loaded.TypePrefixes) > 0 {
 		cfg.TypePrefixes = loaded.TypePrefixes
 	}
+	if loaded.BareRepo != "" {
+		cfg.BareRepo = loaded.BareRepo
+	}
+	if len(loaded.JiraTypes) > 0 {
+		cfg.JiraTypes = loaded.JiraTypes
+	}
 	return cfg, nil
+}
+
+// RenderBareRepo renders the configured bare-repo template against an
+// (owner, repo) pair. Returns an error when no template is configured, when
+// the template contains an unknown placeholder, or when home expansion fails.
+func (c Config) RenderBareRepo(owner, repo string) (string, error) {
+	if c.BareRepo == "" {
+		return "", fmt.Errorf("project.yaml has no `bare-repo:` template")
+	}
+	rendered, err := substitute(c.BareRepo, map[string]string{
+		"owner":     owner,
+		"repo-name": repo,
+	})
+	if err != nil {
+		return "", err
+	}
+	if strings.HasPrefix(rendered, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("expand ~ in bare-repo: %w", err)
+		}
+		rendered = filepath.Join(home, rendered[2:])
+	}
+	return rendered, nil
+}
+
+// MapJiraType returns the bead type for a Jira issue-type name configured via
+// jira-type in project.yaml. The lookup is case-insensitive on the configured
+// keys. Returns ("", false) when no override applies, so callers can fall
+// back to their default map.
+func (c Config) MapJiraType(jiraType string) (string, bool) {
+	key := strings.ToLower(strings.TrimSpace(jiraType))
+	for k, v := range c.JiraTypes {
+		if strings.ToLower(strings.TrimSpace(k)) == key {
+			return v, true
+		}
+	}
+	return "", false
 }
 
 // Vars is the input to template rendering. Fields map 1:1 to placeholders
@@ -119,6 +170,9 @@ type Vars struct {
 	Slug         string
 	Type         string
 	BareRepoPath string
+	// Branch is the rendered branch name, populated by the caller before
+	// rendering the path template so `{branch}` resolves there.
+	Branch string
 }
 
 // TypePrefix returns the type-prefix configured for issueType, falling back
@@ -157,6 +211,7 @@ func (c Config) render(tmpl string, v Vars) (string, error) {
 		"type-prefix":    c.TypePrefix(v.Type),
 		"bare-repo-dir":  bareDir,
 		"bare-repo-name": bareName,
+		"branch":         v.Branch,
 	}
 	return substitute(tmpl, values)
 }

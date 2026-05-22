@@ -21,6 +21,9 @@ import (
 	"time"
 
 	"framework2/internal/bdcli"
+	"framework2/internal/dir"
+	"framework2/internal/githubcli"
+	"framework2/internal/projectconfig"
 	"framework2/internal/slug"
 )
 
@@ -49,6 +52,9 @@ type Options struct {
 	// Email + Token override the env-var auth lookup. Empty values fall back
 	// to KNIME_ATLASSIAN_EMAIL / KNIME_ATLASSIAN_API_TOKEN.
 	Email, Token string
+	// GHRunner overrides the default `gh` shell-out used by
+	// `--discover-branches`. Nil means: build a real-gh runner.
+	GHRunner githubcli.GHRunner
 }
 
 // Run is the binary entrypoint. Returns the process exit code.
@@ -66,24 +72,43 @@ func RunWithOptions(opts Options, args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-const usage = `usage: jira <KEY>
+const usage = `usage: jira <KEY> [--discover-branches]
 
 Fetch one Jira issue and create a top-level bead for it in the current .beads/
 database. Prints the new bead id to stdout.
 
+  --discover-branches   after creating the bead(s), run `+"`github branches <KEY>`"+`
+                        and attach each distinct owner/repo as a worktree on
+                        the root bead, resolving local bare paths via the
+                        `+"`bare-repo:`"+` template in project.yaml.
+
 Auth: requires KNIME_ATLASSIAN_EMAIL and KNIME_ATLASSIAN_API_TOKEN.`
 
 func dispatch(opts Options, args []string, stdout io.Writer) error {
+	var (
+		key             string
+		sawKey          bool
+		discoverBranchs bool
+	)
 	for _, a := range args {
-		if a == "-h" || a == "--help" || a == "help" {
+		switch {
+		case a == "-h" || a == "--help" || a == "help":
 			fmt.Fprintln(stdout, usage)
 			return nil
+		case a == "--discover-branches":
+			discoverBranchs = true
+		case strings.HasPrefix(a, "-"):
+			return fmt.Errorf("unknown flag %q\n\n%s", a, usage)
+		case !sawKey:
+			key = a
+			sawKey = true
+		default:
+			return fmt.Errorf("unexpected argument %q\n\n%s", a, usage)
 		}
 	}
-	if len(args) != 1 {
+	if !sawKey {
 		return errors.New(usage)
 	}
-	key := args[0]
 	if !keyPattern.MatchString(key) {
 		return fmt.Errorf("%q is not a Jira key (expected e.g. UIEXT-3141)", key)
 	}
@@ -93,12 +118,61 @@ func dispatch(opts Options, args []string, stdout io.Writer) error {
 		return err
 	}
 
-	rootID, err := walkAndImport(context.Background(), opts, email, token, key)
+	ctx := context.Background()
+	cfg, err := projectconfig.Load(opts.BeadsDir)
 	if err != nil {
 		return err
 	}
-	_, werr := fmt.Fprintln(stdout, rootID)
-	return werr
+	rootID, err := walkAndImport(ctx, opts, cfg, email, token, key)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(stdout, rootID); err != nil {
+		return err
+	}
+	if discoverBranchs {
+		if err := discoverAndAttach(ctx, opts, cfg, key, rootID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// discoverAndAttach runs `github branches <key>` and attaches each distinct
+// owner/repo to rootID as a worktree, resolving local bare-repo paths via the
+// `bare-repo:` template in project.yaml. Strict: any missing template or
+// missing bare path fails the whole call.
+func discoverAndAttach(ctx context.Context, opts Options, cfg projectconfig.Config, key, rootID string) error {
+	if cfg.BareRepo == "" {
+		return fmt.Errorf("--discover-branches: project.yaml has no `bare-repo:` template")
+	}
+	runner := opts.GHRunner
+	if runner == nil {
+		runner = githubcli.NewDefaultRunner(os.Stderr)
+	}
+	matches, err := githubcli.ListBranches(ctx, runner, key)
+	if err != nil {
+		return fmt.Errorf("--discover-branches: %w", err)
+	}
+	seen := map[string]bool{}
+	for _, m := range matches {
+		ownerRepo := m.Owner + "/" + m.Repo
+		if seen[ownerRepo] {
+			continue
+		}
+		seen[ownerRepo] = true
+		bare, err := cfg.RenderBareRepo(m.Owner, m.Repo)
+		if err != nil {
+			return fmt.Errorf("--discover-branches: resolve %s: %w", ownerRepo, err)
+		}
+		if _, err := os.Stat(bare); err != nil {
+			return fmt.Errorf("--discover-branches: bare repo for %s not found at %s: %w", ownerRepo, bare, err)
+		}
+		if err := dir.Worktree(opts.DB, opts.BeadsDir, rootID, bare); err != nil {
+			return fmt.Errorf("--discover-branches: attach %s: %w", ownerRepo, err)
+		}
+	}
+	return nil
 }
 
 func credentials(opts Options) (email, token string, err error) {
@@ -241,10 +315,13 @@ func BuildDescription(issue *Issue) string {
 
 // createBead shells out to `bd create` and returns the new bead id. When
 // parentBead is non-empty it is forwarded as `--parent`.
-func createBead(opts Options, key string, issue *Issue, parentBead string) (string, error) {
+func createBead(opts Options, cfg projectconfig.Config, key string, issue *Issue, parentBead string) (string, error) {
 	title := issue.Fields.Summary
 	body := BuildDescription(issue)
 	beadType := MapType(issue.Fields.IssueType.Name)
+	if override, ok := cfg.MapJiraType(issue.Fields.IssueType.Name); ok {
+		beadType = override
+	}
 	base := opts.BaseURL
 	if base == "" {
 		base = DefaultBaseURL
@@ -293,7 +370,7 @@ func createBead(opts Options, key string, issue *Issue, parentBead string) (stri
 // `--parent` pointing at its imported parent bead, so `bd list --parent <root>`
 // reproduces the Jira hierarchy. BFS order keeps parents created before their
 // children, which is what bd requires.
-func walkAndImport(ctx context.Context, opts Options, email, token, rootKey string) (string, error) {
+func walkAndImport(ctx context.Context, opts Options, cfg projectconfig.Config, email, token, rootKey string) (string, error) {
 	type work struct{ key, parentBead string }
 
 	issueCache := map[string]*Issue{}
@@ -318,7 +395,7 @@ func walkAndImport(ctx context.Context, opts Options, email, token, rootKey stri
 			issue = fetched
 		}
 
-		beadID, err := createBead(opts, w.key, issue, w.parentBead)
+		beadID, err := createBead(opts, cfg, w.key, issue, w.parentBead)
 		if err != nil {
 			return "", err
 		}

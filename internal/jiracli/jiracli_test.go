@@ -2,14 +2,21 @@ package jiracli_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"framework2/internal/githubcli"
 	"framework2/internal/jiracli"
 	"framework2/internal/testutil"
 )
@@ -810,5 +817,220 @@ func TestRunBlockedByExternalIgnored(t *testing.T) {
 	edges := blockedByEdges(t, beadsDir)
 	if len(edges) != 0 {
 		t.Errorf("expected no blocked-by edges, got %v", edges)
+	}
+}
+
+// bareRepoForTest creates a bare repo with one commit on main and returns its
+// absolute path. Mirrors the helper in dir/worktree_test.go.
+func bareRepoForTest(t *testing.T) string {
+	t.Helper()
+	parent := t.TempDir()
+	source := filepath.Join(parent, "source")
+	if err := os.MkdirAll(source, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	envv := append(os.Environ(),
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com",
+	)
+	gitIn := func(dir string, args ...string) {
+		t.Helper()
+		c := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		c.Env = envv
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("git -C %s %v: %v\n%s", dir, args, err, out)
+		}
+	}
+	gitIn(source, "init", "-q", "-b", "main")
+	gitIn(source, "commit", "--allow-empty", "-q", "-m", "init")
+	bare := filepath.Join(parent, "my-repo.git")
+	c := exec.Command("git", "clone", "--bare", source, bare)
+	c.Env = envv
+	if out, err := c.CombinedOutput(); err != nil {
+		t.Fatalf("clone --bare: %v\n%s", err, out)
+	}
+	abs, err := filepath.Abs(bare)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return abs
+}
+
+// listEntries reads the ticket's dirs metadata via `ticket dir list`.
+func listEntries(t *testing.T, beadsDir, ticketID string) []map[string]any {
+	t.Helper()
+	stdout, stderr, code := testutil.RunTicketIn(t, beadsDir, "dir", "list", ticketID)
+	if code != 0 {
+		t.Fatalf("ticket dir list: exit=%d stderr=%q", code, stderr)
+	}
+	var entries []map[string]any
+	if err := json.Unmarshal([]byte(stdout), &entries); err != nil {
+		t.Fatalf("parse %q: %v", stdout, err)
+	}
+	return entries
+}
+
+func TestRunDiscoverBranches(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	bare := bareRepoForTest(t)
+	// Configure project.yaml to resolve owner/repo to the test bare.
+	bareDir := filepath.Dir(bare)
+	yaml := fmt.Sprintf("bare-repo: %q\n", filepath.Join(bareDir, "{repo-name}.git"))
+	if err := os.WriteFile(filepath.Join(beadsDir, "project.yaml"), []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(filepath.Join(beadsDir, "project.yaml")) })
+
+	fj := newFakeJira(t, map[string]fakeIssue{"FOO-1": {}})
+
+	// Fake gh runner: one org, one repo (matching the bare basename), one
+	// branch containing the search term.
+	now := time.Now()
+	runner := func(_ context.Context, args []string) ([]byte, error) {
+		switch {
+		case len(args) >= 2 && args[0] == "api" && args[1] == "user/orgs":
+			return []byte("knime\n"), nil
+		case len(args) >= 2 && args[0] == "repo" && args[1] == "list":
+			return json.Marshal([]map[string]any{{
+				"name":     "my-repo",
+				"pushedAt": now.Format(time.RFC3339),
+			}})
+		case len(args) >= 2 && args[0] == "api" && args[1] == "graphql":
+			return json.Marshal(map[string]any{
+				"data": map[string]any{
+					"r0": map[string]any{
+						"name": "my-repo",
+						"refs": map[string]any{"nodes": []map[string]string{
+							{"name": "topic/FOO-1-something"},
+						}},
+					},
+				},
+			})
+		}
+		return nil, fmt.Errorf("unexpected gh args: %v", args)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := jiracli.RunWithOptions(jiracli.Options{
+		BaseURL:  fj.server.URL,
+		BeadsDir: beadsDir,
+		Email:    "me@example.com",
+		Token:    "tok",
+		GHRunner: githubcli.GHRunner(runner),
+	}, []string{"FOO-1", "--discover-branches"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
+	}
+	rootID := strings.TrimSpace(stdout.String())
+	if rootID == "" {
+		t.Fatalf("no root id: stderr=%q", stderr.String())
+	}
+	entries := listEntries(t, beadsDir, rootID)
+	if len(entries) != 1 {
+		t.Fatalf("entries=%v want 1", entries)
+	}
+	if got, _ := entries[0]["bareRepo"].(string); got != bare {
+		t.Errorf("bareRepo=%q want %q", got, bare)
+	}
+}
+
+func TestRunDiscoverBranchesMissingBareRepoTemplate(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	fj := newFakeJira(t, map[string]fakeIssue{"FOO-1": {}})
+	runner := func(context.Context, []string) ([]byte, error) {
+		t.Errorf("gh runner should not be invoked when bare-repo template is missing")
+		return nil, nil
+	}
+	var stdout, stderr bytes.Buffer
+	code := jiracli.RunWithOptions(jiracli.Options{
+		BaseURL:  fj.server.URL,
+		BeadsDir: beadsDir,
+		Email:    "me@example.com",
+		Token:    "tok",
+		GHRunner: githubcli.GHRunner(runner),
+	}, []string{"FOO-1", "--discover-branches"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("expected nonzero exit; stderr=%q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "bare-repo") {
+		t.Errorf("stderr=%q missing bare-repo hint", stderr.String())
+	}
+}
+
+func TestRunDiscoverBranchesBarePathMissing(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	yaml := `bare-repo: "/definitely/does/not/exist/{repo-name}.git"`
+	if err := os.WriteFile(filepath.Join(beadsDir, "project.yaml"), []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(filepath.Join(beadsDir, "project.yaml")) })
+	fj := newFakeJira(t, map[string]fakeIssue{"FOO-1": {}})
+	now := time.Now()
+	runner := func(_ context.Context, args []string) ([]byte, error) {
+		switch {
+		case len(args) >= 2 && args[0] == "api" && args[1] == "user/orgs":
+			return []byte("knime\n"), nil
+		case len(args) >= 2 && args[0] == "repo" && args[1] == "list":
+			return json.Marshal([]map[string]any{{
+				"name":     "ghost",
+				"pushedAt": now.Format(time.RFC3339),
+			}})
+		case len(args) >= 2 && args[0] == "api" && args[1] == "graphql":
+			return json.Marshal(map[string]any{
+				"data": map[string]any{"r0": map[string]any{
+					"name": "ghost",
+					"refs": map[string]any{"nodes": []map[string]string{{"name": "topic/FOO-1"}}},
+				}},
+			})
+		}
+		return nil, fmt.Errorf("unexpected gh args: %v", args)
+	}
+	var stdout, stderr bytes.Buffer
+	code := jiracli.RunWithOptions(jiracli.Options{
+		BaseURL:  fj.server.URL,
+		BeadsDir: beadsDir,
+		Email:    "me@example.com",
+		Token:    "tok",
+		GHRunner: githubcli.GHRunner(runner),
+	}, []string{"FOO-1", "--discover-branches"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("expected nonzero exit; stderr=%q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "not found") {
+		t.Errorf("stderr=%q missing 'not found'", stderr.String())
+	}
+}
+
+func TestRunJiraTypeOverride(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	yaml := `
+jira-type:
+  New node: feature
+`
+	if err := os.WriteFile(filepath.Join(beadsDir, "project.yaml"), []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(filepath.Join(beadsDir, "project.yaml")) })
+
+	fj := newFakeJira(t, map[string]fakeIssue{
+		"FOO-1": {issueType: "New node"},
+	})
+	rootID := runJira(t, fj.server, beadsDir, "FOO-1")
+	out, err := testutil.BdCmd(beadsDir, "--json", "show", rootID).Output()
+	if err != nil {
+		t.Fatalf("bd show: %v", err)
+	}
+	var rows []struct {
+		IssueType string `json:"issue_type"`
+	}
+	if err := json.Unmarshal(out, &rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows[0].IssueType != "feature" {
+		t.Errorf("issue_type=%q want feature (New node → feature via project.yaml)", rows[0].IssueType)
 	}
 }

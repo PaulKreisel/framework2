@@ -97,6 +97,7 @@ func ensureWorktree(db, beadsDir, ticketID, bare string, cfg projectconfig.Confi
 	if err != nil {
 		return "", fmt.Errorf("render branch template: %w", err)
 	}
+	vars.Branch = branch
 	wtPath, err := cfg.RenderPath(vars)
 	if err != nil {
 		return "", fmt.Errorf("render worktree path template: %w", err)
