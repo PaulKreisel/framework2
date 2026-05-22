@@ -18,6 +18,7 @@ import (
 	"framework2/internal/bdcli"
 	"framework2/internal/dir"
 	"framework2/internal/env"
+	"framework2/internal/project"
 )
 
 // AgentCommand is the binary execed by Run. Exported as a var so future work
@@ -472,7 +473,7 @@ func Syncback(db, beadsDir, ticketID string) error {
 	if beadsDir == "" {
 		return errors.New("BEADS_DIR not set: cannot derive env path")
 	}
-	envPath := filepath.Join(beadsDir, "envs", ticketID)
+	envPath := project.Path(beadsDir, filepath.Join("envs", ticketID))
 	descPath := filepath.Join(envPath, DescriptionFile)
 	if _, err := os.Stat(descPath); err != nil {
 		if os.IsNotExist(err) {

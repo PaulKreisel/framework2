@@ -43,12 +43,13 @@ import (
 	"path/filepath"
 	"strings"
 
+	"framework2/internal/project"
 	"framework2/internal/slug"
 	"gopkg.in/yaml.v3"
 )
 
 // Filename is the basename of the per-project config inside beadsDir.
-const Filename = "project.yaml"
+const Filename = project.ConfigFilename
 
 // Config is the parsed per-project configuration.
 type Config struct {
@@ -94,7 +95,7 @@ func Defaults() Config {
 // usable Config. An empty / unset template field falls back to its default.
 func Load(beadsDir string) (Config, error) {
 	cfg := Defaults()
-	path := filepath.Join(beadsDir, Filename)
+	path := project.Path(beadsDir, Filename)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {

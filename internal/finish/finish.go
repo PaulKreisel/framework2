@@ -31,6 +31,7 @@ import (
 	"framework2/internal/bdcli"
 	"framework2/internal/dir"
 	"framework2/internal/pipeline"
+	"framework2/internal/project"
 	"framework2/internal/ready"
 )
 
@@ -93,7 +94,7 @@ func Run(db, beadsDir, ticketID string, continueMode bool, stdout io.Writer) err
 			return err
 		}
 	}
-	envPath := filepath.Join(beadsDir, "envs", ticketID)
+	envPath := project.Path(beadsDir, filepath.Join("envs", ticketID))
 	// Look up wrapper pid / tty from the env's PIDFile BEFORE removing the
 	// env folder. The detached helper that closes the terminal needs both.
 	spawnTerminateOnFinish(envPath, stdout)

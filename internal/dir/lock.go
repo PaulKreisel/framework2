@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+
+	"framework2/internal/project"
 )
 
 // withWorktreeLock serializes Worktree operations against the same beadsDir.
@@ -23,7 +25,7 @@ func withWorktreeLock(beadsDir string, fn func() error) error {
 	if beadsDir == "" {
 		return fn()
 	}
-	lockDir := filepath.Join(beadsDir, ".locks")
+	lockDir := project.Path(beadsDir, ".locks")
 	if err := os.MkdirAll(lockDir, 0o755); err != nil {
 		return fmt.Errorf("create lock dir: %w", err)
 	}

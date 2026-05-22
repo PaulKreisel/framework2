@@ -23,6 +23,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"framework2/internal/project"
 )
 
 // Run produces a handover JSONL file for ticketID and its descendants.
@@ -68,7 +70,7 @@ func resolveOutputPath(beadsDir, ticketID, outputOverride string) (string, error
 		return outputOverride, nil
 	}
 	ts := time.Now().UTC().Format("20060102-150405")
-	return filepath.Join(beadsDir, "handovers", fmt.Sprintf("%s-%s.jsonl", ticketID, ts)), nil
+	return project.Path(beadsDir, filepath.Join("handovers", fmt.Sprintf("%s-%s.jsonl", ticketID, ts))), nil
 }
 
 // writeJSONL serialises rows to path atomically: write to a sibling .tmp,

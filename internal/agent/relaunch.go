@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+
+	"framework2/internal/project"
 )
 
 // Filenames the wrapper and the relaunch helper communicate through. Both
@@ -48,7 +50,7 @@ func Relaunch(beadsDir, ticketID string, extraArgs []string) error {
 	if ticketID == "" {
 		return errors.New("ticket id required")
 	}
-	envPath := filepath.Join(beadsDir, "envs", ticketID)
+	envPath := project.Path(beadsDir, filepath.Join("envs", ticketID))
 	pid, err := readPIDFile(filepath.Join(envPath, PIDFile))
 	if err != nil {
 		return err
@@ -75,7 +77,7 @@ func RelaunchIfActive(beadsDir, ticketID string) error {
 	if beadsDir == "" || ticketID == "" {
 		return nil
 	}
-	pidPath := filepath.Join(beadsDir, "envs", ticketID, PIDFile)
+	pidPath := project.Path(beadsDir, filepath.Join("envs", ticketID, PIDFile))
 	if _, err := readPIDFile(pidPath); err != nil {
 		return nil
 	}

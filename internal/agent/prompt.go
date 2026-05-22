@@ -4,12 +4,12 @@ import (
 	_ "embed"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"text/template"
 
 	"framework2/internal/dir"
+	"framework2/internal/project"
 )
 
 // PromptContext is the data available to operator templates and to
@@ -119,7 +119,7 @@ func LoadPromptTemplate(beadsDir string, mode Mode) (string, error) {
 	if mode == ModeSpec {
 		name = SpecPromptFile
 	}
-	path := filepath.Join(beadsDir, name)
+	path := project.Path(beadsDir, name)
 	body, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {

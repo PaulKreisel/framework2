@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"framework2/internal/bdcli"
+	"framework2/internal/project"
 )
 
 // MarkerFile is the basename of the per-env file containing the ticket id.
@@ -31,7 +32,7 @@ func Create(db, beadsDir, ticketID string) (string, error) {
 	if err := assertTicketExists(db, beadsDir, ticketID); err != nil {
 		return "", err
 	}
-	envPath := filepath.Join(beadsDir, "envs", ticketID)
+	envPath := project.Path(beadsDir, filepath.Join("envs", ticketID))
 	if err := os.MkdirAll(envPath, 0o755); err != nil {
 		return "", fmt.Errorf("create env dir: %w", err)
 	}
