@@ -228,18 +228,19 @@ subcommands:
                                           and when every attached PR is
                                           merged and no open children block,
                                           run the full ` + "`finish`" + ` flow.
-  handover [<id>] [--output <path>]       produce a portable, single-JSON
-                                          snapshot of the ticket subtree:
-                                          ` + "`{ beads: [...], code: [...] }`" + `
-                                          (host paths stripped; conversations
-                                          already live under each bead's
+  handover [<id>] [--output <path>]       produce a portable JSONL snapshot
+                                          of the ticket subtree (one bead per
+                                          line; host paths stripped;
+                                          conversations already live under
+                                          each bead's
                                           ` + "`metadata.agents[].conversation[]`" + `).
                                           Defaults to
-                                          ` + "`<beadsDir>/handovers/<id>-<UTC TS>.json`" + `.
-                                          Diffs are not shipped: the reviewer
-                                          fetches commits from the project's
-                                          remote using the SHAs, so ticket
-                                          branches must be pushed first.
+                                          ` + "`<beadsDir>/handovers/<id>-<UTC TS>.jsonl`" + `.
+                                          Code is not shipped: the reviewer
+                                          fetches PRs from each bead's
+                                          ` + "`metadata.prs`" + ` against the project's
+                                          remote, so ticket branches must be
+                                          pushed first.
                                           Non-destructive: never closes beads,
                                           removes worktrees, or touches the env
                                           folder.
