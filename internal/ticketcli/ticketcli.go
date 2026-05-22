@@ -28,6 +28,7 @@ import (
 	"framework2/internal/handover"
 	"framework2/internal/next"
 	"framework2/internal/pr"
+	"framework2/internal/project"
 	"framework2/internal/ready"
 	"framework2/internal/slug"
 )
@@ -272,14 +273,14 @@ conversation field:
   reading from any hook (including PostToolUse, which carries no entry
   but refreshes the snapshot).`
 
-// Options configures a Run invocation. The zero value uses
-// os.Getenv("BEADS_DIR") for BeadsDir, matching the production behaviour of
-// the `ticket` binary.
+// Options configures a Run invocation. The zero value resolves BeadsDir
+// through [project.Dir], matching the production behaviour of the
+// `ticket` binary.
 type Options struct {
 	// BeadsDir, when non-empty, overrides BEADS_DIR for the duration of this
 	// invocation: env folder lookups and child bd subprocess invocations use
-	// this value instead of os.Getenv("BEADS_DIR"). Tests use it to drive a
-	// per-test .beads/ directory in parallel.
+	// this value instead of [project.Dir]. Tests use it to drive a per-test
+	// .beads/ directory in parallel.
 	BeadsDir string
 }
 
@@ -294,7 +295,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 func RunWithOptions(opts Options, args []string, stdout, stderr io.Writer) int {
 	beadsDir := opts.BeadsDir
 	if beadsDir == "" {
-		beadsDir = os.Getenv("BEADS_DIR")
+		beadsDir = project.Dir()
 	}
 	if err := dispatch(beadsDir, args, stdout, stderr); err != nil {
 		fmt.Fprintln(stderr, "ticket:", err)

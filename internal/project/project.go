@@ -5,7 +5,10 @@
 // includes the `.beads/` prefix — the bug that motivated ai-vrc.71.
 package project
 
-import "path/filepath"
+import (
+	"os"
+	"path/filepath"
+)
 
 // File names of well-known project files. Defined here (rather than in
 // each consumer) so the spelling lives next to the path helper.
@@ -21,4 +24,13 @@ const (
 // usual os/io helpers — keeping the join in one place.
 func Path(beadsDir, relPath string) string {
 	return filepath.Join(beadsDir, relPath)
+}
+
+// Dir returns the resolved `.beads/` directory for the current process,
+// read from the BEADS_DIR environment variable. This is the single
+// chokepoint for that env lookup: every production caller that needs to
+// know the bead's directory should route through here (or accept a
+// pre-resolved value from a caller that did).
+func Dir() string {
+	return os.Getenv("BEADS_DIR")
 }

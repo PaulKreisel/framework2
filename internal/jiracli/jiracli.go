@@ -23,6 +23,7 @@ import (
 	"framework2/internal/bdcli"
 	"framework2/internal/dir"
 	"framework2/internal/githubcli"
+	"framework2/internal/project"
 	"framework2/internal/projectconfig"
 	"framework2/internal/slug"
 )
@@ -65,6 +66,9 @@ func Run(args []string, stdout, stderr io.Writer) int {
 // RunWithOptions is like [Run] but lets callers pin auth, BEADS_DIR, and the
 // Jira base URL. Used by tests.
 func RunWithOptions(opts Options, args []string, stdout, stderr io.Writer) int {
+	if opts.BeadsDir == "" {
+		opts.BeadsDir = project.Dir()
+	}
 	if err := dispatch(opts, args, stdout); err != nil {
 		fmt.Fprintln(stderr, "jira:", err)
 		return 1
