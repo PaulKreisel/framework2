@@ -109,13 +109,6 @@ func ensureWorktree(db, beadsDir, ticketID, bare string, cfg projectconfig.Confi
 	if err := gitWorktreeAdd(bare, wtPath, branch, base); err != nil {
 		return "", err
 	}
-	// Wire up the notes fetch refspec so a later `git fetch` syncs the
-	// agent-session attribution notes alongside branches. Best-effort: a
-	// config-set failure shouldn't tank worktree creation since the user
-	// can still push/fetch the notes ref by hand.
-	if err := ensureNotesFetchRefspec(wtPath); err != nil {
-		return "", fmt.Errorf("configure notes fetch refspec: %w", err)
-	}
 	if err := link(db, beadsDir, ticketID, wtPath, bare); err != nil {
 		return "", err
 	}

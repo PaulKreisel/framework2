@@ -34,11 +34,6 @@ import (
 	"framework2/internal/ready"
 )
 
-// NotesRef is the git notes ref where `this finish` writes per-commit
-// session/ticket attribution. Held on a dedicated ref (not the default
-// refs/notes/commits) so the namespace stays clean.
-const NotesRef = "refs/notes/agent-session"
-
 // Run executes the finish flow for ticketID. beadsDir must be set so the env
 // folder can be located; db is the optional bd database path forwarded to
 // `bd` invocations.
@@ -72,13 +67,6 @@ func Run(db, beadsDir, ticketID string, continueMode bool, stdout io.Writer) err
 	rebaseResults, err := rebaseWorktrees(db, beadsDir, ticketID, parent, worktrees, continueMode)
 	if err != nil {
 		return err
-	}
-
-	if err := writeSessionNotes(db, beadsDir, ticketID, rebaseResults); err != nil {
-		// Notes failures shouldn't tank the finish — the rebase already
-		// landed and reverting it would be more disruptive than losing
-		// attribution. Surface the error and move on.
-		fmt.Fprintf(stdout, "warn: write agent-session notes for %s: %v\n", ticketID, err)
 	}
 
 	parentTargets := make([]dir.Entry, 0, len(rebaseResults))

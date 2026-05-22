@@ -1,7 +1,6 @@
 package handover
 
 import (
-	"encoding/json"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -9,7 +8,6 @@ import (
 	"strings"
 
 	"framework2/internal/dir"
-	"framework2/internal/finish"
 )
 
 // collectCode walks every (worktree, branch) source in the subtree, groups
@@ -135,9 +133,10 @@ func defaultBranch(bare string) string {
 }
 
 // listCommits returns the commits in base..branch evaluated from the
-// worktree at wtPath. Each commit carries the full commit message and the
-// bead-id parsed from the refs/notes/agent-session note (empty when no
-// note exists).
+// worktree at wtPath. Each commit carries the full commit message; the
+// bead_id field is left empty for now — the refs/notes/agent-session
+// attribution mechanism was removed in ai-vrc.57.13, and ai-vrc.57.14
+// (handover switches to the `Subtask N` commit trailer) will repopulate it.
 func listCommits(wtPath, base, branch string) ([]Commit, error) {
 	if wtPath == "" {
 		return nil, fmt.Errorf("worktree path empty")
@@ -176,26 +175,9 @@ func listCommits(wtPath, base, branch string) ([]Commit, error) {
 		commits = append(commits, Commit{
 			SHA:     sha,
 			Message: msg,
-			BeadID:  ticketIDForCommit(wtPath, sha),
 		})
 	}
 	return commits, nil
-}
-
-func ticketIDForCommit(wtPath, sha string) string {
-	out, err := exec.Command("git", "-C", wtPath,
-		"notes", "--ref="+finish.NotesRef, "show", sha,
-	).Output()
-	if err != nil {
-		return ""
-	}
-	var payload struct {
-		TicketID string `json:"ticketId"`
-	}
-	if err := json.Unmarshal(out, &payload); err != nil {
-		return ""
-	}
-	return payload.TicketID
 }
 
 // repoLabel returns a portable name for the bare repo: basename minus the
