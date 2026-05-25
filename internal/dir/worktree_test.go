@@ -451,6 +451,129 @@ worktree:
 	}
 }
 
+// TestWorktreeForBranchDiffersFromTemplate verifies that an explicit branch
+// name is checked out as-is, even when the template would have rendered a
+// different name. The branch must pre-exist on the bare's "origin".
+func TestWorktreeForBranchDiffersFromTemplate(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBead(t, beadsDir, "wt-explicit-differs")
+	bare := bareRepo(t, "main")
+	gitInTest(t, bare, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
+	// Create the explicit branch on the "remote" (source repo).
+	source := sourceOf(bare)
+	explicit := "feature/from-github"
+	gitInTest(t, source, "checkout", "-q", "-b", explicit)
+	gitInTest(t, source, "commit", "--allow-empty", "-q", "-m", "on explicit")
+	explicitSHA := gitInTest(t, source, "rev-parse", "HEAD")
+	gitInTest(t, source, "checkout", "-q", "main")
+
+	if err := dir.WorktreeForBranch("", beadsDir, ticket, bare, explicit); err != nil {
+		t.Fatalf("WorktreeForBranch: %v", err)
+	}
+	entries := listEntries(t, beadsDir, ticket)
+	if len(entries) != 1 {
+		t.Fatalf("entries=%+v want 1", entries)
+	}
+	if entries[0].Branch != explicit {
+		t.Errorf("branch=%q want %q (must be discovered, not template)", entries[0].Branch, explicit)
+	}
+	// The template-derived branch must NOT have been created.
+	templateBranch := "todo/" + ticket
+	if _, ok := runGitTest(bare, "rev-parse", "--verify", "refs/heads/"+templateBranch); ok {
+		t.Errorf("template branch %q was created; should be skipped", templateBranch)
+	}
+	if !worktreeOnBranch(t, entries[0].Path, explicit) {
+		t.Errorf("worktree not on branch %q", explicit)
+	}
+	if sha := refSHA(t, entries[0].Path, "HEAD"); sha != explicitSHA {
+		t.Errorf("HEAD=%q want explicit branch SHA %q", sha, explicitSHA)
+	}
+}
+
+// TestWorktreeForBranchMatchesTemplate verifies the discovered branch is used
+// directly even when it happens to equal what the template would render. We
+// pre-create the branch on the remote; the worktree must reuse it rather than
+// fail with "branch already exists" from a -b create.
+func TestWorktreeForBranchMatchesTemplate(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBead(t, beadsDir, "wt-explicit-matches")
+	bare := bareRepo(t, "main")
+	gitInTest(t, bare, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
+	source := sourceOf(bare)
+	// Use whatever the template would render: "todo/<ticket>".
+	branch := "todo/" + ticket
+	gitInTest(t, source, "checkout", "-q", "-b", branch)
+	gitInTest(t, source, "commit", "--allow-empty", "-q", "-m", "on branch")
+	wantSHA := gitInTest(t, source, "rev-parse", "HEAD")
+	gitInTest(t, source, "checkout", "-q", "main")
+
+	if err := dir.WorktreeForBranch("", beadsDir, ticket, bare, branch); err != nil {
+		t.Fatalf("WorktreeForBranch: %v", err)
+	}
+	entries := listEntries(t, beadsDir, ticket)
+	if len(entries) != 1 {
+		t.Fatalf("entries=%+v want 1", entries)
+	}
+	if entries[0].Branch != branch {
+		t.Errorf("branch=%q want %q", entries[0].Branch, branch)
+	}
+	if sha := refSHA(t, entries[0].Path, "HEAD"); sha != wantSHA {
+		t.Errorf("HEAD=%q want %q (must reuse remote branch, not branch off main)", sha, wantSHA)
+	}
+}
+
+// TestWorktreeForBranchMultipleBranchesSameBare verifies a single ticket can
+// hold multiple worktrees on the same bare repo, one per discovered branch.
+func TestWorktreeForBranchMultipleBranchesSameBare(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	withProjectConfig(t, beadsDir, `
+worktree:
+  path: "{bare-repo-dir}/{bare-repo-name}-{branch}"
+`)
+	ticket := testutil.CreateBead(t, beadsDir, "wt-multi-branch")
+	bare := bareRepo(t, "main")
+	gitInTest(t, bare, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
+	source := sourceOf(bare)
+	for _, b := range []string{"topic/a", "topic/b"} {
+		gitInTest(t, source, "checkout", "-q", "-b", b)
+		gitInTest(t, source, "commit", "--allow-empty", "-q", "-m", "on "+b)
+		gitInTest(t, source, "checkout", "-q", "main")
+	}
+
+	for _, b := range []string{"topic/a", "topic/b"} {
+		if err := dir.WorktreeForBranch("", beadsDir, ticket, bare, b); err != nil {
+			t.Fatalf("WorktreeForBranch(%s): %v", b, err)
+		}
+	}
+	entries := listEntries(t, beadsDir, ticket)
+	if len(entries) != 2 {
+		t.Fatalf("entries=%+v want 2", entries)
+	}
+	got := map[string]bool{}
+	for _, e := range entries {
+		got[e.Branch] = true
+	}
+	for _, want := range []string{"topic/a", "topic/b"} {
+		if !got[want] {
+			t.Errorf("missing entry for branch %q; got %v", want, got)
+		}
+	}
+}
+
+// runGitTest is a thin runGit wrapper for tests — returns (output, ok).
+func runGitTest(repo string, args ...string) (string, bool) {
+	full := append([]string{"-C", repo}, args...)
+	out, err := exec.Command("git", full...).Output()
+	if err != nil {
+		return "", false
+	}
+	s := strings.TrimSpace(string(out))
+	return s, s != ""
+}
+
 func TestDirWorktreeTypePrefixOverride(t *testing.T) {
 	t.Parallel()
 	beadsDir := testutil.TestDB(t)

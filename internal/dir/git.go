@@ -92,3 +92,33 @@ func gitWorktreeAdd(repo, wtPath, branch, base string) error {
 	return nil
 }
 
+// gitWorktreeAddExisting creates a worktree at wtPath that checks out the
+// pre-existing branch. Fetches it from origin best-effort, then uses the
+// local branch if present, otherwise creates one tracking the remote ref.
+// Errors if the branch is found in neither place.
+func gitWorktreeAddExisting(repo, wtPath, branch string) error {
+	_ = exec.Command("git", "-C", repo, "fetch", "origin",
+		"+refs/heads/"+branch+":refs/remotes/origin/"+branch).Run()
+
+	_, hasLocal := runGit(repo, "rev-parse", "--verify", "refs/heads/"+branch)
+	_, hasRemote := runGit(repo, "rev-parse", "--verify", "refs/remotes/origin/"+branch)
+
+	var cmd *exec.Cmd
+	switch {
+	case hasLocal:
+		cmd = exec.Command("git", "-C", repo, "worktree", "add", wtPath, branch)
+	case hasRemote:
+		cmd = exec.Command("git", "-C", repo, "worktree", "add", "-b", branch, wtPath, "refs/remotes/origin/"+branch)
+	default:
+		return fmt.Errorf("branch %q not found locally or on origin in %s", branch, repo)
+	}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git worktree add: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	if !hasLocal && hasRemote {
+		_ = exec.Command("git", "-C", repo, "config", "branch."+branch+".remote", "origin").Run()
+		_ = exec.Command("git", "-C", repo, "config", "branch."+branch+".merge", "refs/heads/"+branch).Run()
+	}
+	return nil
+}
+

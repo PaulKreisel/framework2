@@ -820,9 +820,10 @@ func TestRunBlockedByExternalIgnored(t *testing.T) {
 	}
 }
 
-// bareRepoForTest creates a bare repo with one commit on main and returns its
-// absolute path. Mirrors the helper in dir/worktree_test.go.
-func bareRepoForTest(t *testing.T) string {
+// bareRepoForTest creates a bare repo with one commit on main plus the
+// given extra branches, and returns its absolute path. Mirrors the helper in
+// dir/worktree_test.go.
+func bareRepoForTest(t *testing.T, extraBranches ...string) string {
 	t.Helper()
 	parent := t.TempDir()
 	source := filepath.Join(parent, "source")
@@ -843,6 +844,11 @@ func bareRepoForTest(t *testing.T) string {
 	}
 	gitIn(source, "init", "-q", "-b", "main")
 	gitIn(source, "commit", "--allow-empty", "-q", "-m", "init")
+	for _, b := range extraBranches {
+		gitIn(source, "checkout", "-q", "-b", b)
+		gitIn(source, "commit", "--allow-empty", "-q", "-m", "on "+b)
+		gitIn(source, "checkout", "-q", "main")
+	}
 	bare := filepath.Join(parent, "my-repo.git")
 	c := exec.Command("git", "clone", "--bare", source, bare)
 	c.Env = envv
@@ -873,7 +879,7 @@ func listEntries(t *testing.T, beadsDir, ticketID string) []map[string]any {
 func TestRunDiscoverBranches(t *testing.T) {
 	t.Parallel()
 	beadsDir := testutil.TestDB(t)
-	bare := bareRepoForTest(t)
+	bare := bareRepoForTest(t, "topic/FOO-1-something")
 	// Configure project.yaml to resolve owner/repo to the test bare.
 	bareDir := filepath.Dir(bare)
 	yaml := fmt.Sprintf("bare-repo: %q\n", filepath.Join(bareDir, "{repo-name}.git"))
@@ -932,6 +938,89 @@ func TestRunDiscoverBranches(t *testing.T) {
 	}
 	if got, _ := entries[0]["bareRepo"].(string); got != bare {
 		t.Errorf("bareRepo=%q want %q", got, bare)
+	}
+	if got, _ := entries[0]["branch"].(string); got != "topic/FOO-1-something" {
+		t.Errorf("branch=%q want discovered name %q", got, "topic/FOO-1-something")
+	}
+	wtPath, _ := entries[0]["path"].(string)
+	out, err := exec.Command("git", "-C", wtPath, "rev-parse", "--abbrev-ref", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("rev-parse HEAD: %v", err)
+	}
+	if got := strings.TrimSpace(string(out)); got != "topic/FOO-1-something" {
+		t.Errorf("worktree HEAD branch=%q want %q", got, "topic/FOO-1-something")
+	}
+}
+
+// TestRunDiscoverBranchesMultiplePerRepo ensures every discovered branch on
+// the same owner/repo produces its own worktree (no per-repo dedup).
+func TestRunDiscoverBranchesMultiplePerRepo(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	bare := bareRepoForTest(t, "topic/FOO-1-a", "topic/FOO-1-b")
+	bareDir := filepath.Dir(bare)
+	// Path template must include {branch} so two branches don't collide.
+	yaml := fmt.Sprintf("bare-repo: %q\nworktree:\n  path: %q\n",
+		filepath.Join(bareDir, "{repo-name}.git"),
+		filepath.Join(bareDir, "{bare-repo-name}-{branch}"))
+	if err := os.WriteFile(filepath.Join(beadsDir, "project.yaml"), []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(filepath.Join(beadsDir, "project.yaml")) })
+
+	fj := newFakeJira(t, map[string]fakeIssue{"FOO-1": {}})
+
+	now := time.Now()
+	runner := func(_ context.Context, args []string) ([]byte, error) {
+		switch {
+		case len(args) >= 2 && args[0] == "api" && args[1] == "user/orgs":
+			return []byte("knime\n"), nil
+		case len(args) >= 2 && args[0] == "repo" && args[1] == "list":
+			return json.Marshal([]map[string]any{{
+				"name":     "my-repo",
+				"pushedAt": now.Format(time.RFC3339),
+			}})
+		case len(args) >= 2 && args[0] == "api" && args[1] == "graphql":
+			return json.Marshal(map[string]any{
+				"data": map[string]any{
+					"r0": map[string]any{
+						"name": "my-repo",
+						"refs": map[string]any{"nodes": []map[string]string{
+							{"name": "topic/FOO-1-a"},
+							{"name": "topic/FOO-1-b"},
+						}},
+					},
+				},
+			})
+		}
+		return nil, fmt.Errorf("unexpected gh args: %v", args)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := jiracli.RunWithOptions(jiracli.Options{
+		BaseURL:  fj.server.URL,
+		BeadsDir: beadsDir,
+		Email:    "me@example.com",
+		Token:    "tok",
+		GHRunner: githubcli.GHRunner(runner),
+	}, []string{"FOO-1", "--discover-branches"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
+	}
+	rootID := strings.TrimSpace(stdout.String())
+	entries := listEntries(t, beadsDir, rootID)
+	if len(entries) != 2 {
+		t.Fatalf("entries=%v want 2 (one worktree per discovered branch)", entries)
+	}
+	gotBranches := map[string]bool{}
+	for _, e := range entries {
+		b, _ := e["branch"].(string)
+		gotBranches[b] = true
+	}
+	for _, want := range []string{"topic/FOO-1-a", "topic/FOO-1-b"} {
+		if !gotBranches[want] {
+			t.Errorf("missing entry for branch %q; got %v", want, gotBranches)
+		}
 	}
 }
 

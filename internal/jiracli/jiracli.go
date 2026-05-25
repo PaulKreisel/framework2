@@ -158,13 +158,8 @@ func discoverAndAttach(ctx context.Context, opts Options, cfg projectconfig.Conf
 	if err != nil {
 		return fmt.Errorf("--discover-branches: %w", err)
 	}
-	seen := map[string]bool{}
 	for _, m := range matches {
 		ownerRepo := m.Owner + "/" + m.Repo
-		if seen[ownerRepo] {
-			continue
-		}
-		seen[ownerRepo] = true
 		bare, err := cfg.RenderBareRepo(m.Owner, m.Repo)
 		if err != nil {
 			return fmt.Errorf("--discover-branches: resolve %s: %w", ownerRepo, err)
@@ -172,8 +167,8 @@ func discoverAndAttach(ctx context.Context, opts Options, cfg projectconfig.Conf
 		if _, err := os.Stat(bare); err != nil {
 			return fmt.Errorf("--discover-branches: bare repo for %s not found at %s: %w", ownerRepo, bare, err)
 		}
-		if err := dir.Worktree(opts.DB, opts.BeadsDir, rootID, bare); err != nil {
-			return fmt.Errorf("--discover-branches: attach %s: %w", ownerRepo, err)
+		if err := dir.WorktreeForBranch(opts.DB, opts.BeadsDir, rootID, bare, m.Branch); err != nil {
+			return fmt.Errorf("--discover-branches: attach %s@%s: %w", ownerRepo, m.Branch, err)
 		}
 	}
 	return nil
