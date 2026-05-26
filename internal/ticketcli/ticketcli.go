@@ -44,7 +44,8 @@ subcommands:
   dir link [<id>] <path>             link a path to a ticket
   dir remove [<id>] <path>           unlink a path from a ticket
   dir list [<id>]                    list paths linked to a ticket
-  dir worktree [<id>] <bare-repo>    create a worktree off <bare-repo> for the
+  dir worktree [<id>] <bare-repo> [--branch <name>]
+                                     create a worktree off <bare-repo> for the
                                      ticket and link it (cascades through
                                      parents so ancestors gain the worktree too).
                                      Branch name and worktree path follow the
@@ -52,6 +53,13 @@ subcommands:
                                      present; otherwise the defaults match the
                                      pre-config behavior. See
                                      internal/projectconfig for the schema.
+                                     With --branch, the explicit branch name is
+                                     checked out instead of the template-derived
+                                     one: origin is fetched best-effort and the
+                                     worktree tracks origin/<name> if it shows
+                                     up, otherwise the local branch is reused;
+                                     errors when the branch exists in neither
+                                     place. No parent cascade in this mode.
   dir status [<id>] [<selector>] [--json]
                                      show working-tree status of one linked dir
                                      and (when the parent links the same bare
@@ -384,17 +392,7 @@ func runDir(db, beadsDir, ticket string, args []string, stdout io.Writer) error 
 		}
 		return dir.List(db, beadsDir, id, stdout)
 	case "worktree":
-		id, tail, err := resolveID(ticket, rest, 1, "usage: ticket dir worktree [<id>] <bare-repo>")
-		if err != nil {
-			return err
-		}
-		if err := dir.Worktree(db, beadsDir, id, tail[0]); err != nil {
-			return err
-		}
-		// See the comment under `link` above: cascade-created ancestor
-		// worktrees belong to tickets whose agents aren't running, so we
-		// only relaunch the explicitly addressed ticket.
-		return agent.RelaunchIfActive(beadsDir, id)
+		return runDirWorktree(db, beadsDir, ticket, rest)
 	case "slug":
 		return runSlug(db, beadsDir, ticket, rest)
 	case "status":
@@ -441,6 +439,48 @@ func runDirStatus(db, beadsDir, ticket string, args []string, stdout io.Writer) 
 		}
 	}
 	return dir.Status(db, beadsDir, id, selector, jsonOut, stdout)
+}
+
+// runDirWorktree handles `ticket dir worktree [<id>] <bare-repo> [--branch <name>]`.
+// Without --branch we delegate to [dir.Worktree] (template-derived branch,
+// parent cascade). With --branch we delegate to [dir.WorktreeForBranch]
+// (explicit name, origin fetch + remote-track detection, no cascade).
+func runDirWorktree(db, beadsDir, ticket string, args []string) error {
+	const usage = "usage: ticket dir worktree [<id>] <bare-repo> [--branch <name>]"
+	var branch string
+	positional := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--branch":
+			if i+1 >= len(args) {
+				return errors.New(usage)
+			}
+			branch = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--branch="):
+			branch = strings.TrimPrefix(a, "--branch=")
+		default:
+			positional = append(positional, a)
+		}
+	}
+	id, tail, err := resolveID(ticket, positional, 1, usage)
+	if err != nil {
+		return err
+	}
+	if branch != "" {
+		if err := dir.WorktreeForBranch(db, beadsDir, id, tail[0], branch); err != nil {
+			return err
+		}
+	} else {
+		if err := dir.Worktree(db, beadsDir, id, tail[0]); err != nil {
+			return err
+		}
+	}
+	// Only the explicitly addressed ticket may have a live wrapper to
+	// refresh; cascade-created ancestor worktrees belong to tickets whose
+	// agents aren't running.
+	return agent.RelaunchIfActive(beadsDir, id)
 }
 
 // runSlug handles `ticket dir slug [<id>] <slug>` (set the slug) and

@@ -563,6 +563,65 @@ worktree:
 	}
 }
 
+// TestDirWorktreeBranchFlagAttachesRemoteBranch drives the `--branch` CLI
+// path: an explicit branch that exists only on origin must be fetched and
+// attached as-is, bypassing the template-derived name.
+func TestDirWorktreeBranchFlagAttachesRemoteBranch(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBead(t, beadsDir, "wt-branch-flag")
+	bare := bareRepo(t, "main")
+	gitInTest(t, bare, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
+	source := sourceOf(bare)
+	explicit := "feature/from-flag"
+	gitInTest(t, source, "checkout", "-q", "-b", explicit)
+	gitInTest(t, source, "commit", "--allow-empty", "-q", "-m", "on explicit")
+	explicitSHA := gitInTest(t, source, "rev-parse", "HEAD")
+	gitInTest(t, source, "checkout", "-q", "main")
+
+	if _, stderr, code := testutil.RunTicketIn(t, beadsDir, "dir", "worktree", ticket, bare, "--branch", explicit); code != 0 {
+		t.Fatalf("worktree exit=%d stderr=%q", code, stderr)
+	}
+	entries := listEntries(t, beadsDir, ticket)
+	if len(entries) != 1 {
+		t.Fatalf("entries=%+v want 1", entries)
+	}
+	if entries[0].Branch != explicit {
+		t.Errorf("branch=%q want %q", entries[0].Branch, explicit)
+	}
+	if templateBranch := "todo/" + ticket; templateBranchExists(bare, templateBranch) {
+		t.Errorf("template branch %q was created; should be skipped under --branch", templateBranch)
+	}
+	if sha := refSHA(t, entries[0].Path, "HEAD"); sha != explicitSHA {
+		t.Errorf("HEAD=%q want explicit SHA %q", sha, explicitSHA)
+	}
+}
+
+// TestDirWorktreeBranchFlagMissingValue: `--branch` with no following token
+// is a usage error and must not mutate state.
+func TestDirWorktreeBranchFlagMissingValue(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBead(t, beadsDir, "wt-branch-missing")
+	bare := bareRepo(t, "main")
+
+	_, stderr, code := testutil.RunTicketIn(t, beadsDir, "dir", "worktree", ticket, bare, "--branch")
+	if code == 0 {
+		t.Fatalf("worktree with bare --branch succeeded; want usage error")
+	}
+	if !strings.Contains(stderr, "usage") {
+		t.Errorf("stderr=%q want 'usage'", stderr)
+	}
+	if got := listEntries(t, beadsDir, ticket); len(got) != 0 {
+		t.Errorf("entries=%+v want none", got)
+	}
+}
+
+func templateBranchExists(bare, branch string) bool {
+	_, ok := runGitTest(bare, "rev-parse", "--verify", "refs/heads/"+branch)
+	return ok
+}
+
 // runGitTest is a thin runGit wrapper for tests — returns (output, ok).
 func runGitTest(repo string, args ...string) (string, bool) {
 	full := append([]string{"-C", repo}, args...)
