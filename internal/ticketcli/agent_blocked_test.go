@@ -21,7 +21,7 @@ func TestAgentOnBlockedTicketCascades(t *testing.T) {
 	var mu sync.Mutex
 	var captured []string
 	prev := ready.SpawnAgentWindow
-	ready.SpawnAgentWindow = func(id string) error {
+	ready.SpawnAgentWindow = func(id, _ string) error {
 		mu.Lock()
 		defer mu.Unlock()
 		captured = append(captured, id)

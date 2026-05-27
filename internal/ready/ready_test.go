@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 
@@ -19,7 +20,7 @@ func stubSpawn(t *testing.T) func() []string {
 	var mu sync.Mutex
 	var captured []string
 	prev := ready.SpawnAgentWindow
-	ready.SpawnAgentWindow = func(id string) error {
+	ready.SpawnAgentWindow = func(id, _ string) error {
 		mu.Lock()
 		defer mu.Unlock()
 		captured = append(captured, id)
@@ -203,6 +204,71 @@ func TestHandleBlockedDoubleRootLaunchesBoth(t *testing.T) {
 	slices.Sort(want)
 	if !slices.Equal(got, want) {
 		t.Errorf("spawns=%v want %v", got, want)
+	}
+}
+
+func TestDefaultSpawnAgentWindowExportsBeadsDir(t *testing.T) {
+	// No t.Parallel: stubs the package-level ready.ExecOsascript var.
+	var captured string
+	prev := ready.ExecOsascript
+	ready.ExecOsascript = func(script string) (string, error) {
+		captured = script
+		return "", nil
+	}
+	t.Cleanup(func() { ready.ExecOsascript = prev })
+
+	const beadsDir = "/some/other/beads dir"
+	const ticketID = "ai-vrc.76"
+	if err := ready.DefaultSpawnAgentWindow(ticketID, beadsDir); err != nil {
+		// On non-darwin runners the function refuses to spawn. That's
+		// not the path we're testing, so skip rather than fail.
+		t.Skipf("DefaultSpawnAgentWindow: %v", err)
+	}
+	// The do-script must export BEADS_DIR before exec'ing ticket, so
+	// the new shell doesn't fall back to the user-profile default.
+	wantBeadsDir := "BEADS_DIR='/some/other/beads dir'"
+	if !strings.Contains(captured, wantBeadsDir) {
+		t.Errorf("osascript = %q\n  missing %q", captured, wantBeadsDir)
+	}
+	if !strings.Contains(captured, "agent '"+ticketID+"'") {
+		t.Errorf("osascript = %q\n  missing agent %s", captured, ticketID)
+	}
+}
+
+func TestLaunchReadyFollowupsPassesBeadsDirToSpawn(t *testing.T) {
+	// No t.Parallel: stubs the package-level ready.SpawnAgentWindow var.
+	beadsDir := testutil.TestDB(t)
+
+	var mu sync.Mutex
+	type call struct{ id, beadsDir string }
+	var calls []call
+	prev := ready.SpawnAgentWindow
+	ready.SpawnAgentWindow = func(id, bd string) error {
+		mu.Lock()
+		defer mu.Unlock()
+		calls = append(calls, call{id, bd})
+		return nil
+	}
+	t.Cleanup(func() { ready.SpawnAgentWindow = prev })
+
+	finished := testutil.CreateBead(t, beadsDir, "spawn-arg-finished")
+	follow := testutil.CreateBead(t, beadsDir, "spawn-arg-follow")
+	addBlocker(t, beadsDir, follow, finished)
+	if err := ready.Set("", beadsDir, follow); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	if out, err := testutil.BdCmd(beadsDir, "close", finished).CombinedOutput(); err != nil {
+		t.Fatalf("bd close: %v\n%s", err, out)
+	}
+
+	var buf bytes.Buffer
+	if err := ready.LaunchReadyFollowups("", beadsDir, finished, &buf); err != nil {
+		t.Fatalf("LaunchReadyFollowups: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(calls) != 1 || calls[0].id != follow || calls[0].beadsDir != beadsDir {
+		t.Errorf("spawn calls = %+v; want one call with id=%s beadsDir=%s", calls, follow, beadsDir)
 	}
 }
 

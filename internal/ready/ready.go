@@ -46,6 +46,10 @@ var ExecOsascript = func(script string) (string, error) {
 // SpawnAgentWindow is the package-level hook used to open a new agent
 // terminal. Tests override it to capture launches without driving
 // Terminal.app. Production callers go through [DefaultSpawnAgentWindow].
+// beadsDir is the BEADS_DIR the spawned `ticket agent` must resolve
+// against — without it, the new shell would fall back to whatever the
+// user's profile sets (typically ~/ai), which breaks follow-ups owned
+// by any other bead directory.
 var SpawnAgentWindow = DefaultSpawnAgentWindow
 
 // Set adds the `ready` label to ticketID. Idempotent — `bd label add` on a
@@ -200,7 +204,7 @@ func HandleBlocked(db, beadsDir, ticketID string, stdout io.Writer) (handled boo
 	fmt.Fprintf(stdout, "ticket %s is blocked; labeled %d ticket(s) `ready` and launching %d root(s): %s\n",
 		ticketID, len(ids), len(roots), strings.Join(roots, ", "))
 	for _, id := range roots {
-		if err := SpawnAgentWindow(id); err != nil {
+		if err := SpawnAgentWindow(id, beadsDir); err != nil {
 			fmt.Fprintf(stdout, "warn: could not launch %s in new terminal: %v\n", id, err)
 		}
 	}
@@ -244,7 +248,7 @@ func LaunchReadyFollowups(db, beadsDir, ticketID string, stdout io.Writer) error
 	}
 	fmt.Fprintf(stdout, "launching %d ready follow-up(s): %s\n", len(launched), strings.Join(launched, ", "))
 	for _, id := range launched {
-		if err := SpawnAgentWindow(id); err != nil {
+		if err := SpawnAgentWindow(id, beadsDir); err != nil {
 			fmt.Fprintf(stdout, "warn: could not launch %s in new terminal: %v\n", id, err)
 		}
 	}
@@ -280,8 +284,13 @@ func listDependents(db, beadsDir, ticketID string) ([]string, error) {
 }
 
 // DefaultSpawnAgentWindow opens a new macOS Terminal.app window and runs
-// `ticket agent <ticketID>` inside it. Errors on non-darwin platforms.
-func DefaultSpawnAgentWindow(ticketID string) error {
+// `ticket agent <ticketID>` inside it. beadsDir is exported as BEADS_DIR
+// for the spawned process so the follow-up resolves against the same
+// bead directory the parent finish ran in — otherwise the new shell
+// would inherit whatever the user's profile sets (typically ~/ai), and
+// `ticket agent` would fail to find ticketID in a different BEADS_DIR.
+// Errors on non-darwin platforms.
+func DefaultSpawnAgentWindow(ticketID, beadsDir string) error {
 	if runtime.GOOS != "darwin" {
 		return fmt.Errorf("launching a new agent window requires macOS (GOOS=%s)", runtime.GOOS)
 	}
@@ -289,8 +298,8 @@ func DefaultSpawnAgentWindow(ticketID string) error {
 	if err != nil {
 		return fmt.Errorf("locate ticket binary: %w", err)
 	}
-	cmd := fmt.Sprintf("exec %s agent %s",
-		shellQuote(bin), shellQuote(ticketID))
+	cmd := fmt.Sprintf("exec env BEADS_DIR=%s %s agent %s",
+		shellQuote(beadsDir), shellQuote(bin), shellQuote(ticketID))
 	script := fmt.Sprintf(`tell application "Terminal"
     do script %s
     activate
