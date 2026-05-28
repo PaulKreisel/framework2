@@ -29,6 +29,7 @@ import (
 	"framework2/internal/next"
 	"framework2/internal/pr"
 	"framework2/internal/project"
+	"framework2/internal/projectconfig"
 	"framework2/internal/ready"
 	"framework2/internal/slug"
 )
@@ -508,11 +509,39 @@ func runSlug(db, beadsDir, ticket string, args []string) error {
 	if err != nil {
 		return err
 	}
-	newSlug := slug.Derive(tail[0], slug.MaxLen)
+	budget, err := branchSlugBudget(db, beadsDir, id)
+	if err != nil {
+		return err
+	}
+	newSlug := slug.Derive(tail[0], budget)
 	if newSlug == "" {
 		return fmt.Errorf("slug %q reduces to empty after normalisation", tail[0])
 	}
 	return slug.Set(db, beadsDir, id, newSlug)
+}
+
+// branchSlugBudget computes the per-bead max slug length such that the
+// rendered branch fits in [slug.MaxBranchLen]. Loads the project config and
+// the bead's type / Jira ancestor so the branch template can be probed with
+// the actual variables that will substitute into it later.
+func branchSlugBudget(db, beadsDir, ticketID string) (int, error) {
+	cfg, err := projectconfig.Load(beadsDir)
+	if err != nil {
+		return 0, err
+	}
+	issueType, err := dir.IssueType(db, beadsDir, ticketID)
+	if err != nil {
+		return 0, err
+	}
+	jiraID, err := dir.AncestorJiraID(db, beadsDir, ticketID)
+	if err != nil {
+		return 0, err
+	}
+	return cfg.BranchSlugBudget(projectconfig.Vars{
+		BeadID: ticketID,
+		JiraID: jiraID,
+		Type:   issueType,
+	}), nil
 }
 
 // beadTitle returns the title of ticketID via `bd --json show`.
@@ -549,9 +578,13 @@ func refineSlug(db, beadsDir, ticketID string) error {
 	if err != nil || title == "" {
 		return nil
 	}
+	budget, err := branchSlugBudget(db, beadsDir, ticketID)
+	if err != nil {
+		return nil
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), slug.RefineTimeout)
 	defer cancel()
-	improved := slug.Refine(ctx, title, info.Slug)
+	improved := slug.Refine(ctx, title, info.Slug, budget)
 	if improved == "" {
 		return nil
 	}

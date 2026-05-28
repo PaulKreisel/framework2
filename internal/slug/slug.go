@@ -20,10 +20,18 @@ import (
 	"framework2/internal/bdcli"
 )
 
-// MaxLen caps the derived slug at 50 chars; chosen to keep
-// "<prefix>/<id>-<slug>" comfortably under GitHub's 70-char branch-name limit
-// while leaving room for the prefix and id segments.
-const MaxLen = 50
+// MaxLen caps the derived slug at 30 chars. This is a fallback upper bound
+// for the initial slug stored on a fresh bead, when the project config and
+// the bead id needed to compute a precise per-branch budget aren't all
+// available yet. Once those are known, callers should use
+// projectconfig.Config.BranchSlugBudget to derive a tighter limit so the
+// rendered branch stays within [MaxBranchLen].
+const MaxLen = 30
+
+// MaxBranchLen is the maximum length of a rendered branch name. GitHub
+// branch-protection rules in our repos enforce `^.{0,70}$`, so anything
+// longer is rejected at push time.
+const MaxBranchLen = 70
 
 // ErrSlugUsed is returned by [Set] when the slug is frozen (slug_is_used=true).
 var ErrSlugUsed = errors.New("slug is already used; cannot be changed")
@@ -148,11 +156,17 @@ func Branch(prefix, id, slug string) string {
 
 // Refine calls `claude -p --model haiku --effort low` to produce a polished
 // slug for title and returns it (already passed through [Derive] to enforce
-// the kebab-case shape). Returns "" on any error, on empty output, or when
-// the resulting slug equals fallback. Honors ctx for cancellation.
-func Refine(ctx context.Context, title, fallback string) string {
-	prompt := "Output ONLY a kebab-case slug of about 5 lowercase words separated by hyphens. " +
-		"No explanation, no quotes, no backticks. Just the slug for this issue title: " + title
+// the kebab-case shape and the maxLen cap). Returns "" on any error, on empty
+// output, or when the resulting slug equals fallback. maxLen <= 0 defaults to
+// [MaxLen]. Honors ctx for cancellation.
+func Refine(ctx context.Context, title, fallback string, maxLen int) string {
+	if maxLen <= 0 {
+		maxLen = MaxLen
+	}
+	prompt := fmt.Sprintf(
+		"Output ONLY a kebab-case slug of about 5 lowercase words separated by hyphens, "+
+			"no longer than %d characters total. No explanation, no quotes, no backticks. "+
+			"Just the slug for this issue title: %s", maxLen, title)
 	cmd := exec.CommandContext(ctx, "claude", "-p", "--model", "haiku", "--effort", "low", prompt)
 	out, err := cmd.Output()
 	if err != nil {
@@ -162,7 +176,7 @@ func Refine(ctx context.Context, title, fallback string) string {
 	if raw == "" {
 		return ""
 	}
-	refined := Derive(raw, MaxLen)
+	refined := Derive(raw, maxLen)
 	if refined == "" || refined == fallback {
 		return ""
 	}

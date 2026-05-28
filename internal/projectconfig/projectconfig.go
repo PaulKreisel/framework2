@@ -189,9 +189,58 @@ func (c Config) TypePrefix(issueType string) string {
 	return slug.BranchPrefix(issueType)
 }
 
-// RenderBranch renders the branch-name template.
+// RenderBranch renders the branch-name template. If v.Slug would push the
+// rendered branch past [slug.MaxBranchLen], the slug is shortened via
+// [slug.Derive] to the per-branch budget first. This is the last line of
+// defence against branches that violate GitHub's 70-char branch-name rule.
 func (c Config) RenderBranch(v Vars) (string, error) {
+	if v.Slug != "" {
+		budget := c.BranchSlugBudget(v)
+		if budget > 0 && len(v.Slug) > budget {
+			v.Slug = slug.Derive(v.Slug, budget)
+		}
+	}
 	return c.render(c.Worktree.Branch, v)
+}
+
+// BranchSlugBudget returns the maximum slug length such that rendering the
+// branch template against v stays within [slug.MaxBranchLen] characters. The
+// budget is probed by rendering the template with two short stand-in slugs
+// and comparing the resulting lengths, so it works regardless of where (or
+// how many times) `{slug}` appears in the template, and regardless of the
+// `-` drop rule on empty substitutions.
+//
+// Returns [slug.MaxLen] when the template does not reference {slug} (any
+// slug length is safe) or when the computed budget would exceed [slug.MaxLen]
+// (nothing to gain by going higher). Returns 0 when even an empty slug would
+// already overflow the budget.
+func (c Config) BranchSlugBudget(v Vars) int {
+	v1 := v
+	v1.Slug = "x"
+	r1, err := c.render(c.Worktree.Branch, v1)
+	if err != nil {
+		return slug.MaxLen
+	}
+	v2 := v
+	v2.Slug = "xx"
+	r2, err := c.render(c.Worktree.Branch, v2)
+	if err != nil {
+		return slug.MaxLen
+	}
+	slope := len(r2) - len(r1)
+	if slope <= 0 {
+		return slug.MaxLen
+	}
+	// len(r1) corresponds to a 1-char slug; each additional slug char adds
+	// `slope` to the rendered length. Solve len(r1) + (S-1)*slope <= MaxBranchLen.
+	budget := 1 + (slug.MaxBranchLen-len(r1))/slope
+	if budget < 0 {
+		return 0
+	}
+	if budget > slug.MaxLen {
+		return slug.MaxLen
+	}
+	return budget
 }
 
 // RenderPath renders the worktree-path template. The result is absolute when

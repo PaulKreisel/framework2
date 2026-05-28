@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"framework2/internal/projectconfig"
+	"framework2/internal/slug"
 )
 
 func TestLoadDefaultsWhenMissing(t *testing.T) {
@@ -284,6 +285,75 @@ func TestRenderPathWithBranchPlaceholder(t *testing.T) {
 	}
 	if got != "/repos/foo.git/branches/fix/ai-42" {
 		t.Errorf("got=%q", got)
+	}
+}
+
+func TestBranchSlugBudgetDefaultTemplate(t *testing.T) {
+	t.Parallel()
+	cfg := projectconfig.Defaults()
+	// Short bead-id leaves plenty of room — budget caps at slug.MaxLen.
+	if got := cfg.BranchSlugBudget(projectconfig.Vars{BeadID: "ai-42", Type: "task"}); got != slug.MaxLen {
+		t.Errorf("short bead-id: budget=%d want %d", got, slug.MaxLen)
+	}
+	// Even with a long jira-prefixed id ("todo/SLEEK-233-kn-2lz-" = 22 chars
+	// of overhead, leaving 70-22 = 48 chars for the slug), the budget is
+	// still bounded by slug.MaxLen.
+	v := projectconfig.Vars{BeadID: "kn-2lz", JiraID: "SLEEK-233", Type: "task"}
+	if got := cfg.BranchSlugBudget(v); got != slug.MaxLen {
+		t.Errorf("long id: budget=%d want %d", got, slug.MaxLen)
+	}
+	// When the overhead alone leaves less than MaxLen for the slug, the
+	// budget shrinks to fit MaxBranchLen exactly.
+	tight := projectconfig.Config{
+		Worktree: projectconfig.WorktreeConfig{
+			Branch: strings.Repeat("x", 50) + "-{slug}",
+			Path:   "/x",
+		},
+	}
+	if got := tight.BranchSlugBudget(projectconfig.Vars{}); got != 19 {
+		t.Errorf("tight template: budget=%d want 19", got)
+	}
+}
+
+func TestBranchSlugBudgetNoSlugInTemplate(t *testing.T) {
+	t.Parallel()
+	cfg := projectconfig.Config{Worktree: projectconfig.WorktreeConfig{Branch: "{type-prefix}/{id}", Path: "/x"}}
+	if got := cfg.BranchSlugBudget(projectconfig.Vars{BeadID: "ai-42", Type: "task"}); got != slug.MaxLen {
+		t.Errorf("no-slug template: budget=%d want %d", got, slug.MaxLen)
+	}
+}
+
+func TestRenderBranchTruncatesOversizedSlug(t *testing.T) {
+	t.Parallel()
+	cfg := projectconfig.Defaults()
+	v := projectconfig.Vars{
+		BeadID: "kn-2lz",
+		JiraID: "SLEEK-233",
+		Slug:   "remove-possibility-to-set-the-space-name-per-flow",
+		Type:   "task",
+	}
+	branch, err := cfg.RenderBranch(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(branch) > slug.MaxBranchLen {
+		t.Errorf("branch=%q len=%d exceeds %d", branch, len(branch), slug.MaxBranchLen)
+	}
+	if !strings.HasPrefix(branch, "todo/SLEEK-233-kn-2lz-") {
+		t.Errorf("branch=%q missing expected prefix", branch)
+	}
+}
+
+func TestRenderBranchLeavesShortSlugAlone(t *testing.T) {
+	t.Parallel()
+	cfg := projectconfig.Defaults()
+	v := projectconfig.Vars{BeadID: "ai-42", Slug: "short-slug", Type: "task"}
+	branch, err := cfg.RenderBranch(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if branch != "todo/ai-42-short-slug" {
+		t.Errorf("branch=%q want todo/ai-42-short-slug", branch)
 	}
 }
 
