@@ -2,12 +2,20 @@ package handover_test
 
 import (
 	"encoding/json"
+	"io"
+	"mime"
+	"mime/multipart"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	"framework2/internal/agent"
+	"framework2/internal/handover"
 	"framework2/internal/testutil"
 )
 
@@ -163,7 +171,210 @@ func TestHandoverRejectsNoArchive(t *testing.T) {
 	}
 }
 
+// TestHandoverUploadsToJira covers the happy path: when the ticket carries a
+// Jira external_ref, the JSONL plus the three embedded review aids land on
+// /rest/api/3/issue/<KEY>/attachments as a single multipart POST.
+func TestHandoverUploadsToJira(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	root := testutil.CreateBead(t, beadsDir, "handover-jira-upload")
+	if out, err := testutil.BdCmd(beadsDir, "update", root,
+		"--external-ref", "https://jira.example.com/browse/UIEXT-9000").CombinedOutput(); err != nil {
+		t.Fatalf("bd update --external-ref: %v: %s", err, out)
+	}
+
+	srv := newFakeJiraAttach(t, "UIEXT-9000")
+	defer srv.Close()
+
+	custom := filepath.Join(t.TempDir(), "handover-jira.jsonl")
+	var stdout strings.Builder
+	opts := handover.Options{Jira: handover.JiraOptions{
+		BaseURL: srv.URL(),
+		Email:   "tester@example.com",
+		Token:   "secret",
+	}}
+	if err := handover.RunWithOptions(opts, "", beadsDir, root, custom, &stdout); err != nil {
+		t.Fatalf("RunWithOptions: %v", err)
+	}
+
+	if got := srv.Count(); got != 1 {
+		t.Fatalf("expected exactly 1 attach POST, got %d", got)
+	}
+	gotNames := srv.Filenames()
+	sort.Strings(gotNames)
+	wantNames := []string{
+		filepath.Base(custom),
+		"conversation.py",
+		"handover_instructions.md",
+		"overview.py",
+	}
+	sort.Strings(wantNames)
+	if !equalStrings(gotNames, wantNames) {
+		t.Errorf("attached files = %v, want %v", gotNames, wantNames)
+	}
+	if !strings.Contains(stdout.String(), "Jira upload OK") {
+		t.Errorf("expected upload OK status line, got: %s", stdout.String())
+	}
+}
+
+// TestHandoverSkipsUploadWhenNoJiraAncestor ensures we don't reach for Jira
+// credentials (and therefore don't fail) when the ticket has no Jira ref.
+func TestHandoverSkipsUploadWhenNoJiraAncestor(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	root := testutil.CreateBead(t, beadsDir, "handover-no-jira")
+
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	custom := filepath.Join(t.TempDir(), "handover-no-jira.jsonl")
+	var stdout strings.Builder
+	opts := handover.Options{Jira: handover.JiraOptions{BaseURL: srv.URL}}
+	if err := handover.RunWithOptions(opts, "", beadsDir, root, custom, &stdout); err != nil {
+		t.Fatalf("RunWithOptions: %v", err)
+	}
+	if called {
+		t.Errorf("did not expect any Jira request, but server was hit")
+	}
+	if !strings.Contains(stdout.String(), "no Jira external_ref") {
+		t.Errorf("expected skip status line, got: %s", stdout.String())
+	}
+}
+
+// TestHandoverDoesNotInheritJiraFromAncestor confirms the upload is gated on
+// the bead's own external_ref, not on its ancestors.
+func TestHandoverDoesNotInheritJiraFromAncestor(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	root := testutil.CreateBead(t, beadsDir, "handover-jira-root")
+	if out, err := testutil.BdCmd(beadsDir, "update", root,
+		"--external-ref", "https://jira.example.com/browse/UIEXT-9001").CombinedOutput(); err != nil {
+		t.Fatalf("bd update --external-ref: %v: %s", err, out)
+	}
+	child := testutil.CreateChildBead(t, beadsDir, "handover-jira-child", root)
+
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	custom := filepath.Join(t.TempDir(), "handover-child.jsonl")
+	var stdout strings.Builder
+	opts := handover.Options{Jira: handover.JiraOptions{BaseURL: srv.URL}}
+	if err := handover.RunWithOptions(opts, "", beadsDir, child, custom, &stdout); err != nil {
+		t.Fatalf("RunWithOptions: %v", err)
+	}
+	if called {
+		t.Errorf("did not expect any Jira request — child bead has no own external_ref")
+	}
+	if !strings.Contains(stdout.String(), "no Jira external_ref") {
+		t.Errorf("expected skip status line, got: %s", stdout.String())
+	}
+}
+
 // --- helpers ---
+
+// fakeJiraAttach captures multipart attachments POSTed to
+// /rest/api/3/issue/<KEY>/attachments so the test can assert on filenames
+// and request count.
+type fakeJiraAttach struct {
+	t   *testing.T
+	srv *httptest.Server
+
+	mu        sync.Mutex
+	count     int
+	filenames []string
+}
+
+func newFakeJiraAttach(t *testing.T, wantKey string) *fakeJiraAttach {
+	t.Helper()
+	f := &fakeJiraAttach{t: t}
+	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		wantPath := "/rest/api/3/issue/" + wantKey + "/attachments"
+		if r.URL.Path != wantPath {
+			t.Errorf("unexpected path %q (want %q)", r.URL.Path, wantPath)
+			http.Error(w, "bad path", 404)
+			return
+		}
+		if r.Method != http.MethodPost {
+			t.Errorf("expected POST, got %s", r.Method)
+			http.Error(w, "method", 405)
+			return
+		}
+		if r.Header.Get("X-Atlassian-Token") != "no-check" {
+			t.Errorf("missing X-Atlassian-Token: no-check header")
+		}
+		ct := r.Header.Get("Content-Type")
+		if !strings.HasPrefix(ct, "multipart/form-data") {
+			t.Errorf("expected multipart/form-data, got %q", ct)
+			http.Error(w, "bad ct", 400)
+			return
+		}
+		_, params, err := mime.ParseMediaType(ct)
+		if err != nil {
+			t.Errorf("parse Content-Type: %v", err)
+			http.Error(w, "bad ct", 400)
+			return
+		}
+		mr := multipart.NewReader(r.Body, params["boundary"])
+		var names []string
+		for {
+			part, err := mr.NextPart()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				t.Errorf("read part: %v", err)
+				break
+			}
+			if part.FormName() != "file" {
+				t.Errorf("expected form name 'file', got %q", part.FormName())
+			}
+			names = append(names, part.FileName())
+			_, _ = io.Copy(io.Discard, part)
+		}
+		f.mu.Lock()
+		f.count++
+		f.filenames = append(f.filenames, names...)
+		f.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	return f
+}
+
+func (f *fakeJiraAttach) URL() string { return f.srv.URL }
+func (f *fakeJiraAttach) Close()      { f.srv.Close() }
+func (f *fakeJiraAttach) Count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.count
+}
+func (f *fakeJiraAttach) Filenames() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.filenames))
+	copy(out, f.filenames)
+	return out
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
 
 func parseJSONL(t *testing.T, raw []byte) []map[string]any {
 	t.Helper()

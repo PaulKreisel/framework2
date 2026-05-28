@@ -70,6 +70,17 @@ func parentID(db, beadsDir, ticketID string) (string, error) {
 	return row.Parent, nil
 }
 
+// JiraID returns the Jira issue key extracted from ticketID's own
+// external_ref, or "" if the bead has no Jira ref. Unlike [AncestorJiraID],
+// it does not walk the parent chain.
+func JiraID(db, beadsDir, ticketID string) (string, error) {
+	row, err := showTicket(db, beadsDir, ticketID)
+	if err != nil {
+		return "", err
+	}
+	return projectconfig.JiraIDFromExternalRef(row.ExternalRef), nil
+}
+
 // AncestorJiraID walks the chain starting at ticketID (inclusive) toward the
 // root and returns the first non-empty Jira issue key extracted from the
 // bead's external_ref. Returns "" when no ancestor carries a Jira id.

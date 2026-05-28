@@ -251,6 +251,14 @@ subcommands:
                                           ` + "`metadata.prs`" + ` against the project's
                                           remote, so ticket branches must be
                                           pushed first.
+                                          When the ticket itself carries a
+                                          Jira external_ref, the JSONL plus
+                                          three embedded review aids
+                                          (` + "`handover_instructions.md`" + `,
+                                          ` + "`conversation.py`" + `, ` + "`overview.py`" + `) are
+                                          attached to the Jira issue. Auth via
+                                          ` + "`KNIME_ATLASSIAN_EMAIL`" + ` /
+                                          ` + "`KNIME_ATLASSIAN_API_TOKEN`" + `.
                                           Non-destructive: never closes beads,
                                           removes worktrees, or touches the env
                                           folder.
