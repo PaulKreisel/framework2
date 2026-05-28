@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 
 	"framework2/internal/projectconfig"
+	"framework2/internal/repoclone"
 	"framework2/internal/slug"
 )
 
@@ -37,12 +38,15 @@ func Worktree(db, beadsDir, ticketID, bareRepo string) error {
 	if err != nil {
 		return err
 	}
-	if !gitIsRepo(bare) {
-		return fmt.Errorf("not a git repository: %s", bare)
-	}
 	cfg, err := projectconfig.Load(beadsDir)
 	if err != nil {
 		return err
+	}
+	if err := repoclone.EnsureBareFromPath(bare, cfg.SetupScript); err != nil {
+		return err
+	}
+	if !gitIsRepo(bare) {
+		return fmt.Errorf("not a git repository: %s", bare)
 	}
 	return withWorktreeLock(beadsDir, func() error {
 		_, err := ensureWorktree(db, beadsDir, ticketID, bare, cfg)
@@ -134,12 +138,15 @@ func WorktreeForBranch(db, beadsDir, ticketID, bareRepo, branch string) error {
 	if err != nil {
 		return err
 	}
-	if !gitIsRepo(bare) {
-		return fmt.Errorf("not a git repository: %s", bare)
-	}
 	cfg, err := projectconfig.Load(beadsDir)
 	if err != nil {
 		return err
+	}
+	if err := repoclone.EnsureBareFromPath(bare, cfg.SetupScript); err != nil {
+		return err
+	}
+	if !gitIsRepo(bare) {
+		return fmt.Errorf("not a git repository: %s", bare)
 	}
 	return withWorktreeLock(beadsDir, func() error {
 		entries, err := load(db, beadsDir, ticketID)

@@ -1048,6 +1048,11 @@ func TestRunDiscoverBranchesMissingBareRepoTemplate(t *testing.T) {
 	}
 }
 
+// TestRunDiscoverBranchesBarePathMissing verifies the auto-clone fallback:
+// when the bare repo for a discovered branch is missing, jira tries to clone
+// it. Here we point bare-repo at an unwritable parent so the clone fails;
+// pre-ai-vrc.79 this test asserted the "bare repo not found" error path,
+// which no longer exists.
 func TestRunDiscoverBranchesBarePathMissing(t *testing.T) {
 	t.Parallel()
 	beadsDir := testutil.TestDB(t)
@@ -1088,8 +1093,8 @@ func TestRunDiscoverBranchesBarePathMissing(t *testing.T) {
 	if code == 0 {
 		t.Fatalf("expected nonzero exit; stderr=%q", stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "not found") {
-		t.Errorf("stderr=%q missing 'not found'", stderr.String())
+	if !strings.Contains(stderr.String(), "create parent dir") {
+		t.Errorf("stderr=%q missing 'create parent dir' (expected auto-clone mkdir failure)", stderr.String())
 	}
 }
 

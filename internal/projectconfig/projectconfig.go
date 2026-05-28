@@ -62,6 +62,12 @@ type Config struct {
 	// JiraTypes maps Jira issue type names (case-insensitive) to bead types,
 	// layered on top of the hardcoded jiracli.MapType defaults.
 	JiraTypes map[string]string `yaml:"jira-type"`
+	// SetupScript is the path to an executable invoked once, immediately
+	// after a bare repo is freshly cloned by the auto-clone path. Passed
+	// the new bare repo's path as its sole argument. A leading `~/` is
+	// expanded to the user's home directory. Empty means: no post-clone
+	// step.
+	SetupScript string `yaml:"setup-script"`
 }
 
 // WorktreeConfig holds the two templates that control `ticket dir worktree`.
@@ -121,6 +127,9 @@ func Load(beadsDir string) (Config, error) {
 	}
 	if len(loaded.JiraTypes) > 0 {
 		cfg.JiraTypes = loaded.JiraTypes
+	}
+	if loaded.SetupScript != "" {
+		cfg.SetupScript = loaded.SetupScript
 	}
 	return cfg, nil
 }

@@ -25,6 +25,7 @@ import (
 	"framework2/internal/githubcli"
 	"framework2/internal/project"
 	"framework2/internal/projectconfig"
+	"framework2/internal/repoclone"
 	"framework2/internal/slug"
 )
 
@@ -164,8 +165,8 @@ func discoverAndAttach(ctx context.Context, opts Options, cfg projectconfig.Conf
 		if err != nil {
 			return fmt.Errorf("--discover-branches: resolve %s: %w", ownerRepo, err)
 		}
-		if _, err := os.Stat(bare); err != nil {
-			return fmt.Errorf("--discover-branches: bare repo for %s not found at %s: %w", ownerRepo, bare, err)
+		if err := repoclone.EnsureBare(bare, m.Owner, m.Repo, cfg.SetupScript); err != nil {
+			return fmt.Errorf("--discover-branches: %s: %w", ownerRepo, err)
 		}
 		if err := dir.WorktreeForBranch(opts.DB, opts.BeadsDir, rootID, bare, m.Branch); err != nil {
 			return fmt.Errorf("--discover-branches: attach %s@%s: %w", ownerRepo, m.Branch, err)

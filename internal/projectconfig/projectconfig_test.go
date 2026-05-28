@@ -270,6 +270,22 @@ jira-type:
 	}
 }
 
+func TestLoadSetupScript(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	yaml := `setup-script: ~/knime/.beads/setup-repo.sh`
+	if err := os.WriteFile(filepath.Join(dir, "project.yaml"), []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := projectconfig.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SetupScript != "~/knime/.beads/setup-repo.sh" {
+		t.Errorf("setup-script=%q", cfg.SetupScript)
+	}
+}
+
 func TestRenderPathWithBranchPlaceholder(t *testing.T) {
 	t.Parallel()
 	cfg := projectconfig.Config{
