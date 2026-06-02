@@ -31,6 +31,12 @@ import (
 // events. Both agent-mode and spec-mode sessions accumulate entries here;
 // the display layer derives the waiting-reason summary from the tail of
 // this array for every session record.
+//
+// Unlike the scalar fields, Conversation is NOT persisted in the bead's
+// metadata.agents blob — it is stored in a per-session JSONL log (see
+// conversation_store.go) and hydrated back onto this field by [LoadAgents].
+// Keeping the (unbounded) transcript out of the bead is what stops bd's
+// per-event bead snapshot from overflowing its store; see ai-vrc.80.
 type AgentEntry struct {
 	SessionID              string      `json:"sessionId"`
 	PID                    int         `json:"pid"`
@@ -128,6 +134,9 @@ func RegisterAgent(db, beadsDir, ticketID string, entry AgentEntry) error {
 		return err
 	}
 	entries = append(entries, entry)
+	if err := appendConversation(beadsDir, ticketID, entry.SessionID, entry.Conversation); err != nil {
+		return err
+	}
 	return saveAgents(db, beadsDir, ticketID, entries)
 }
 
@@ -141,6 +150,11 @@ func UpsertAgent(db, beadsDir, ticketID string, entry AgentEntry) error {
 	}
 	entries, err := LoadAgents(db, beadsDir, ticketID)
 	if err != nil {
+		return err
+	}
+	// Conversation logs are append-only; the resume path passes an entry with
+	// no Conversation, so this is a no-op there and the prior log is preserved.
+	if err := appendConversation(beadsDir, ticketID, entry.SessionID, entry.Conversation); err != nil {
 		return err
 	}
 	for i, e := range entries {
@@ -169,6 +183,17 @@ func LoadAgents(db, beadsDir, ticketID string) ([]AgentEntry, error) {
 	if err := json.Unmarshal(raw, &entries); err != nil {
 		return nil, fmt.Errorf("parse agents entries: %w", err)
 	}
+	// Conversation history lives in per-session JSONL logs, not in the bead
+	// metadata (see conversation_store.go). Hydrate each record from its log
+	// so callers see the full Conversation as before; the metadata itself
+	// never carries it.
+	for i := range entries {
+		conv, err := loadConversation(beadsDir, ticketID, entries[i].SessionID)
+		if err != nil {
+			return nil, err
+		}
+		entries[i].Conversation = conv
+	}
 	return entries, nil
 }
 
@@ -176,7 +201,17 @@ func saveAgents(db, beadsDir, ticketID string, entries []AgentEntry) error {
 	if entries == nil {
 		entries = []AgentEntry{}
 	}
-	payload, err := json.Marshal(map[string]any{"agents": entries})
+	// Persist only the scalar record into the bead. Conversation history is
+	// stored separately in per-session JSONL logs (see conversation_store.go)
+	// and must never enter the metadata blob: bd snapshots the whole bead on
+	// every event, so an in-metadata transcript eventually overflows its event
+	// store. Strip it from a copy so the caller's in-memory entries keep theirs.
+	meta := make([]AgentEntry, len(entries))
+	copy(meta, entries)
+	for i := range meta {
+		meta[i].Conversation = nil
+	}
+	payload, err := json.Marshal(map[string]any{"agents": meta})
 	if err != nil {
 		return err
 	}
@@ -352,36 +387,37 @@ func AppendConversation(db, beadsDir, sessionID, ticketID string, transcriptAssi
 				continue
 			}
 			updated := records[i]
-			changed := false
 			// Reconcile assistant text segments observed in the transcript
-			// against the entries already stored at the tail of Conversation.
+			// against the entries already captured (hydrated from the JSONL
+			// log into updated.Conversation by LoadAgents). The newly observed
+			// segments and any per-source header entries are appended to the
+			// log — not the bead metadata.
 			newSegs := newAssistantSegments(updated.Conversation, transcriptAssistantText)
+			toAppend := make([]ConvEntry, 0, len(newSegs)+len(entries))
 			for idx, seg := range newSegs {
 				entryType := ConvTypeAssistantComment
 				if finalAsReply && idx == len(newSegs)-1 {
 					entryType = ConvTypeAssistantReply
 				}
-				updated.Conversation = append(updated.Conversation, ConvEntry{
+				toAppend = append(toAppend, ConvEntry{
 					Type:          entryType,
 					Text:          seg.Text,
 					ContextTokens: seg.ContextTokens,
 				})
-				changed = true
 			}
-			for _, ent := range entries {
-				updated.Conversation = append(updated.Conversation, ent)
-				changed = true
+			toAppend = append(toAppend, entries...)
+			if err := appendConversation(beadsDir, tid, sessionID, toAppend); err != nil {
+				return err
 			}
+			// The context-token reading is the only scalar that lives in the
+			// bead; persist it (and its timestamp) when it actually changed.
 			if contextTokens > 0 && contextTokens != updated.ContextTokens {
 				updated.ContextTokens = contextTokens
 				updated.ContextTokensUpdatedAt = now
-				changed = true
+				records[i] = updated
+				return saveAgents(db, beadsDir, tid, records)
 			}
-			if !changed {
-				return nil
-			}
-			records[i] = updated
-			return saveAgents(db, beadsDir, tid, records)
+			return nil
 		}
 	}
 	return fmt.Errorf("%w %s", ErrSessionNotFound, sessionID)

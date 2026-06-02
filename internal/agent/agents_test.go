@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"strings"
@@ -69,6 +70,58 @@ func TestRegisterAgentAppendsAndLoadsBack(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got[0], e1) || !reflect.DeepEqual(got[1], e2) {
 		t.Errorf("entries = %+v, want [%+v %+v]", got, e1, e2)
+	}
+}
+
+// TestConversationStoredOutsideMetadata is the regression guard for ai-vrc.80:
+// conversation history must never land in the bead's metadata.agents blob (bd
+// snapshots the whole bead per event, so an in-metadata transcript eventually
+// overflows that store). It must live in the per-session JSONL log instead,
+// and still round-trip back through LoadAgents.
+func TestConversationStoredOutsideMetadata(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBeadFull(t, beadsDir, "conv-outside-metadata", "x", "")
+
+	sid := "00000000-0000-4000-8000-0000000000aa"
+	if err := agent.RegisterAgent("", beadsDir, ticket, agent.AgentEntry{
+		SessionID: sid, PID: 1, Mode: "agent",
+		StartedAt: "2026-05-15T14:56:00Z", Env: "/env",
+		Status: agent.StatusRunning,
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	// A distinctive marker we can grep for in the raw metadata.
+	const marker = "UNIQUE_CONVERSATION_MARKER_ZZZ"
+	if err := agent.AppendConversation("", beadsDir, sid, ticket, nil, false,
+		[]agent.ConvEntry{{Type: agent.ConvTypeUser, Prompt: marker}}, 0); err != nil {
+		t.Fatalf("AppendConversation: %v", err)
+	}
+
+	// The marker must NOT appear in the bead's stored metadata.
+	out, err := testutil.BdCmd(beadsDir, "--json", "show", ticket).Output()
+	if err != nil {
+		t.Fatalf("bd show: %v", err)
+	}
+	if strings.Contains(string(out), marker) {
+		t.Errorf("conversation text leaked into bead metadata:\n%s", out)
+	}
+
+	// It MUST be in the per-session JSONL log on disk.
+	logPath := filepath.Join(beadsDir, "conversations", ticket, sid+".jsonl")
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read conversation log %s: %v", logPath, err)
+	}
+	if !strings.Contains(string(logBytes), marker) {
+		t.Errorf("conversation log %s missing the entry:\n%s", logPath, logBytes)
+	}
+
+	// And it must still hydrate back through LoadAgents.
+	got := loadOne(t, beadsDir, ticket)
+	if len(got.Conversation) != 1 || got.Conversation[0].Prompt != marker {
+		t.Errorf("hydrated Conversation = %+v, want one entry with prompt %q", got.Conversation, marker)
 	}
 }
 
