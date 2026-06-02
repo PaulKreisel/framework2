@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"framework2/internal/projectconfig"
 	"framework2/internal/repoclone"
@@ -60,7 +61,11 @@ func ensureWorktree(db, beadsDir, ticketID, bare string, cfg projectconfig.Confi
 	if err != nil {
 		return "", err
 	}
-	if e, ok := findEntryForBare(entries, bare); ok {
+	e, ok, err := findEntryForBare(entries, bare)
+	if err != nil {
+		return "", err
+	}
+	if ok {
 		return e.Branch, nil
 	}
 
@@ -200,11 +205,31 @@ func WorktreeForBranch(db, beadsDir, ticketID, bareRepo, branch string) error {
 	})
 }
 
-func findEntryForBare(entries []Entry, bare string) (Entry, bool) {
+// findEntryForBare returns the single worktree entry created off bare. It
+// reports ok=false when there is no such worktree. If more than one worktree
+// is linked to the same bare (e.g. several branches attached via
+// `jira --discover-branches`), the base branch is ambiguous, so it returns an
+// error rather than silently picking one — mirrors the "two branches" rule in
+// finish.
+func findEntryForBare(entries []Entry, bare string) (Entry, bool, error) {
+	var matches []Entry
 	for _, e := range entries {
 		if e.BareRepo == bare {
-			return e, true
+			matches = append(matches, e)
 		}
 	}
-	return Entry{}, false
+	switch len(matches) {
+	case 0:
+		return Entry{}, false, nil
+	case 1:
+		return matches[0], true, nil
+	default:
+		branches := make([]string, len(matches))
+		for i, m := range matches {
+			branches[i] = m.Branch
+		}
+		return Entry{}, false, fmt.Errorf(
+			"%d worktrees linked to %s (branches: %s); cannot determine which to base on",
+			len(matches), bare, strings.Join(branches, ", "))
+	}
 }

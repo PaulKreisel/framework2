@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"framework2/internal/dir"
 	"framework2/internal/env"
 	"framework2/internal/testutil"
 )
@@ -260,6 +261,51 @@ func TestFinishContinueWithoutPausedRebase(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "no rebase in progress") {
 		t.Errorf("stderr=%q want to mention 'no rebase in progress'", stderr)
+	}
+}
+
+// TestFinishErrorsOnMultipleParentWorktreesSameBare regresses the "two
+// branches" rule: when the parent bead has more than one worktree linked to
+// the same bare, the branch to fast-forward is ambiguous, so finish must
+// abort (without closing the bead) rather than silently pick one.
+func TestFinishErrorsOnMultipleParentWorktreesSameBare(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	// Branch-keyed path template so the parent can hold several worktrees on
+	// one bare without path collisions. Removed on cleanup so it does not leak
+	// into other tests sharing the same pooled beadsDir.
+	cfgPath := filepath.Join(beadsDir, "project.yaml")
+	if err := os.WriteFile(cfgPath,
+		[]byte("worktree:\n  path: \"{bare-repo-dir}/{bare-repo-name}-{branch}\"\n"), 0o644); err != nil {
+		t.Fatalf("write project.yaml: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(cfgPath) })
+	parent := testutil.CreateBead(t, beadsDir, "finish-multi-parent")
+	child := testutil.CreateChildBead(t, beadsDir, "finish-multi-child", parent)
+	bare := bareRepo(t, "main")
+	gitDo(t, bare, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
+
+	// Cascade creates the parent's first worktree (todo/parent) + the child's.
+	mustRunTicket(t, beadsDir, "dir", "worktree", child, bare)
+
+	// Attach a SECOND parent worktree on the same bare.
+	source := filepath.Join(filepath.Dir(bare), "source")
+	gitDo(t, source, "checkout", "-q", "-b", "extra/branch")
+	gitDo(t, source, "commit", "--allow-empty", "-q", "-m", "extra")
+	gitDo(t, source, "checkout", "-q", "main")
+	if err := dir.WorktreeForBranch("", beadsDir, parent, bare, "extra/branch"); err != nil {
+		t.Fatalf("WorktreeForBranch: %v", err)
+	}
+
+	_, stderr, code := testutil.RunTicketIn(t, beadsDir, "finish", child)
+	if code == 0 {
+		t.Fatal("finish succeeded despite ambiguous parent, want error")
+	}
+	if !strings.Contains(stderr, "worktrees linked to") {
+		t.Errorf("stderr=%q want to mention multiple worktrees", stderr)
+	}
+	if status := beadStatus(t, beadsDir, child); status == "closed" {
+		t.Errorf("child bead was closed despite aborted finish (status=%q)", status)
 	}
 }
 

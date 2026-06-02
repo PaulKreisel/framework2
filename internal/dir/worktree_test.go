@@ -298,6 +298,43 @@ func TestDirWorktreeParallelChildrenSameParent(t *testing.T) {
 	}
 }
 
+// TestDirWorktreeCascadeMultipleParentBranchesErrors regresses the "two
+// branches" rule on the cascade side: when an ancestor has more than one
+// worktree linked to the same bare, the base branch is ambiguous, so creating
+// a descendant's worktree must abort rather than silently pick one.
+func TestDirWorktreeCascadeMultipleParentBranchesErrors(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	withProjectConfig(t, beadsDir, `
+worktree:
+  path: "{bare-repo-dir}/{bare-repo-name}-{branch}"
+`)
+	parent := testutil.CreateBead(t, beadsDir, "wt-multi-parent")
+	child := testutil.CreateChildBead(t, beadsDir, "wt-multi-child", parent)
+	bare := bareRepo(t, "main")
+	gitInTest(t, bare, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
+	source := sourceOf(bare)
+	for _, b := range []string{"topic/a", "topic/b"} {
+		gitInTest(t, source, "checkout", "-q", "-b", b)
+		gitInTest(t, source, "commit", "--allow-empty", "-q", "-m", "on "+b)
+		gitInTest(t, source, "checkout", "-q", "main")
+		if err := dir.WorktreeForBranch("", beadsDir, parent, bare, b); err != nil {
+			t.Fatalf("WorktreeForBranch(%s): %v", b, err)
+		}
+	}
+
+	_, stderr, code := testutil.RunTicketIn(t, beadsDir, "dir", "worktree", child, bare)
+	if code == 0 {
+		t.Fatal("dir worktree succeeded despite ambiguous parent, want error")
+	}
+	if !strings.Contains(stderr, "worktrees linked to") {
+		t.Errorf("stderr=%q want to mention multiple worktrees", stderr)
+	}
+	if entries := listEntries(t, beadsDir, child); len(entries) != 0 {
+		t.Errorf("child entries=%+v want none (cascade aborted before linking)", entries)
+	}
+}
+
 func TestDirWorktreeNotAGitRepo(t *testing.T) {
 	t.Parallel()
 	beadsDir := testutil.TestDB(t)

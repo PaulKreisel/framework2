@@ -218,7 +218,10 @@ func rebaseWorktrees(db, beadsDir, ticketID, parent string, worktrees []dir.Entr
 	var pendings []pending
 	anyCommits := false
 	for _, e := range worktrees {
-		pe, ok := findEntryForBare(parentEntries, e.BareRepo)
+		pe, ok, err := findEntryForBare(parentEntries, e.BareRepo)
+		if err != nil {
+			return nil, err
+		}
 		if !ok {
 			// Parent doesn't have a worktree off this bare — nothing to
 			// rebase onto. Treat as a no-op for this bare.
@@ -372,13 +375,33 @@ func ffRebase(wt, upstream string, continueMode bool) error {
 	return nil
 }
 
-func findEntryForBare(entries []dir.Entry, bare string) (dir.Entry, bool) {
+// findEntryForBare returns the parent's single worktree entry created off
+// bare. It reports ok=false when the parent has no worktree on this bare. If
+// the parent has more than one worktree linked to the same bare (e.g. several
+// branches attached via `jira --discover-branches`), the branch to
+// fast-forward is ambiguous, so it returns an error rather than silently
+// picking one — see the "two branches" rule in the ticket description.
+func findEntryForBare(entries []dir.Entry, bare string) (dir.Entry, bool, error) {
+	var matches []dir.Entry
 	for _, e := range entries {
 		if e.BareRepo == bare {
-			return e, true
+			matches = append(matches, e)
 		}
 	}
-	return dir.Entry{}, false
+	switch len(matches) {
+	case 0:
+		return dir.Entry{}, false, nil
+	case 1:
+		return matches[0], true, nil
+	default:
+		branches := make([]string, len(matches))
+		for i, m := range matches {
+			branches[i] = m.Branch
+		}
+		return dir.Entry{}, false, fmt.Errorf(
+			"parent has %d worktrees linked to %s (branches: %s); cannot determine which to fast-forward",
+			len(matches), bare, strings.Join(branches, ", "))
+	}
 }
 
 func bdClose(db, beadsDir, ticketID string) error {
