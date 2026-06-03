@@ -208,13 +208,19 @@ subcommands:
                                           Pushes the current branch upstream
                                           (force-with-lease) before calling
                                           ` + "`gh pr create`" + `. The PR is opened as a
-                                          draft unless --ready is passed.
+                                          draft unless --ready is passed. If
+                                          exactly one open PR already exists
+                                          for the branch it is linked instead;
+                                          two or more is an error.
   pr create [<id>] --all [--ready]        run ` + "`pr create`" + ` for every "eligible"
                                           linked dir (≥1 commit ahead of base).
                                           Dirs already having a PR attached
                                           for their repo are skipped with a
-                                          notice; per-dir failures are
-                                          reported but do not abort the rest.
+                                          notice; a dir whose branch already
+                                          has one open PR is linked, two or
+                                          more is skipped with a notice;
+                                          per-dir failures are reported but do
+                                          not abort the rest.
   pr show [<id>] [<path>]                 open the attached PR for the dir at
                                           <path> in the default browser. With
                                           a single linked dir, <path> may be
@@ -223,9 +229,20 @@ subcommands:
                                           "eligible" linked dir (≥1 commit
                                           ahead of base). Dirs with no PR
                                           attached are skipped with a notice.
-  pr link [<id>] [<path>] <pr-url>        attach an existing PR (identified by
-                                          URL) to the bead, associating it
-                                          with the dir at <path>. No push.
+  pr link [<id>] [<path>] [<pr-url>]      attach an existing PR to the bead,
+                                          associating it with the dir at
+                                          <path>. No push. With <pr-url> the
+                                          PR is taken as given; without it,
+                                          the dir's unique open PR (the single
+                                          open PR for its current branch) is
+                                          auto-detected — zero or two-or-more
+                                          is an error.
+  pr link [<id>] --all                    auto-link the unique open PR for
+                                          every "eligible" linked dir (≥1
+                                          commit ahead of base) not already
+                                          PR-attached. Dirs whose branch has
+                                          zero or two-or-more open PRs are
+                                          skipped with a notice.
   pr create-bead [<id>] <pr-url>          create a new bead as a child of the
                                           currently-active ticket whose
                                           description is the PR URL and whose
@@ -1469,14 +1486,42 @@ func runPR(db, beadsDir, ticket string, args []string, stdout io.Writer) error {
 		}
 		return pr.Show(db, beadsDir, id, selector, stdout)
 	case "link":
-		// link needs <pr-url> as the last positional. Optional <path> sits
-		// between id and url when present.
-		usage := "usage: ticket pr link [<id>] [<path>] <pr-url>"
-		id, selector, last, err := resolveIDOptionalSelectorWithTail(ticket, rest, usage)
+		// <pr-url> is optional. When present it is the last positional and an
+		// optional <path> sits before it. When absent, the unique open PR for
+		// the dir's branch is auto-detected (single dir or, with --all, every
+		// eligible dir).
+		var all bool
+		var positional []string
+		for _, a := range rest {
+			if a == "--all" {
+				all = true
+				continue
+			}
+			positional = append(positional, a)
+		}
+		if all {
+			usage := "usage: ticket pr link [<id>] --all"
+			id, _, err := resolveID(ticket, positional, 0, usage)
+			if err != nil {
+				return err
+			}
+			return pr.LinkAll(db, beadsDir, id, stdout)
+		}
+		usage := "usage: ticket pr link [<id>] [<path>] [<pr-url>]"
+		// A trailing positional that parses as a GitHub PR URL is the explicit
+		// link target; anything else is a <path>/<id>.
+		if n := len(positional); n > 0 && looksLikePRURL(positional[n-1]) {
+			id, selector, err := resolveIDOptionalSelector(ticket, positional[:n-1], usage)
+			if err != nil {
+				return err
+			}
+			return pr.Link(db, beadsDir, id, selector, positional[n-1])
+		}
+		id, selector, err := resolveIDOptionalSelector(ticket, positional, usage)
 		if err != nil {
 			return err
 		}
-		return pr.Link(db, beadsDir, id, selector, last)
+		return pr.LinkAuto(db, beadsDir, id, selector, stdout)
 	case "create-bead":
 		id, tail, err := resolveID(ticket, rest, 1, "usage: ticket pr create-bead [<id>] <pr-url>")
 		if err != nil {
@@ -1519,28 +1564,11 @@ func resolveIDOptionalSelector(ticket string, args []string, usage string) (id, 
 	}
 }
 
-// resolveIDOptionalSelectorWithTail handles `ticket <cmd> [<id>] [<selector>]
-// <tail>` shapes where the last positional is mandatory and the selector
-// before it is optional.
-func resolveIDOptionalSelectorWithTail(ticket string, args []string, usage string) (id, selector, tail string, err error) {
-	if ticket != "" {
-		switch len(args) {
-		case 1:
-			return ticket, "", args[0], nil
-		case 2:
-			return ticket, args[0], args[1], nil
-		default:
-			return "", "", "", errors.New(usage)
-		}
-	}
-	switch len(args) {
-	case 2:
-		return args[0], "", args[1], nil
-	case 3:
-		return args[0], args[1], args[2], nil
-	default:
-		return "", "", "", errors.New(usage)
-	}
+// looksLikePRURL reports whether s parses as a GitHub PR URL. Used by `pr
+// link` to tell an explicit <pr-url> from a <path>/<id> positional.
+func looksLikePRURL(s string) bool {
+	_, _, err := pr.ParseURL(s)
+	return err == nil
 }
 
 func extractGlobal(args []string) (db, ticket string, rest []string, err error) {

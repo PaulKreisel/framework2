@@ -778,6 +778,420 @@ func TestCreateAllErrorsWhenNoEligibleDirs(t *testing.T) {
 	}
 }
 
+// --- LinkAuto (no url) ----------------------------------------------------
+
+func TestLinkAutoLinksUniqueOpenPR(t *testing.T) {
+	beadsDir := testutil.TestDB(t)
+	id := testutil.CreateBead(t, beadsDir, "pr-link-auto-one")
+	mustLinkDir(t, beadsDir, id, t.TempDir())
+
+	ghMap := map[string]ghResp{
+		"repo view": ghResp{Out: ghJSON(t, struct {
+			NameWithOwner string `json:"nameWithOwner"`
+		}{"o/r"})},
+		"pr list": ghResp{Out: ghJSON(t, []struct {
+			Number int `json:"number"`
+		}{{42}})},
+	}
+	gitMap := map[string]ghResp{
+		"rev-parse": ghResp{Out: []byte("feat/foo\n")},
+	}
+	installStubs(t, ghMap, gitMap)
+
+	var buf bytes.Buffer
+	if err := pr.LinkAuto("", beadsDir, id, "", &buf); err != nil {
+		t.Fatalf("LinkAuto: %v", err)
+	}
+	recs, err := pr.Load("", beadsDir, id)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(recs) != 1 || recs[0].Repo != "o/r" || recs[0].Number != 42 || recs[0].Branch != "feat/foo" {
+		t.Errorf("recs = %+v, want one PR o/r#42 branch feat/foo", recs)
+	}
+	if !strings.Contains(buf.String(), "https://github.com/o/r/pull/42") {
+		t.Errorf("stdout = %q, want linked PR url", buf.String())
+	}
+}
+
+func TestLinkAutoErrorsWhenNoOpenPR(t *testing.T) {
+	beadsDir := testutil.TestDB(t)
+	id := testutil.CreateBead(t, beadsDir, "pr-link-auto-zero")
+	mustLinkDir(t, beadsDir, id, t.TempDir())
+
+	ghMap := map[string]ghResp{
+		"repo view": ghResp{Out: ghJSON(t, struct {
+			NameWithOwner string `json:"nameWithOwner"`
+		}{"o/r"})},
+		"pr list": ghResp{Out: ghJSON(t, []struct {
+			Number int `json:"number"`
+		}{})},
+	}
+	gitMap := map[string]ghResp{
+		"rev-parse": ghResp{Out: []byte("feat/foo\n")},
+	}
+	installStubs(t, ghMap, gitMap)
+
+	var buf bytes.Buffer
+	err := pr.LinkAuto("", beadsDir, id, "", &buf)
+	if err == nil {
+		t.Fatal("LinkAuto succeeded with no open PR, want error")
+	}
+	if !strings.Contains(err.Error(), "no open PR") {
+		t.Errorf("error = %v, want 'no open PR'", err)
+	}
+}
+
+func TestLinkAutoErrorsWhenMultipleOpenPRs(t *testing.T) {
+	beadsDir := testutil.TestDB(t)
+	id := testutil.CreateBead(t, beadsDir, "pr-link-auto-many")
+	mustLinkDir(t, beadsDir, id, t.TempDir())
+
+	ghMap := map[string]ghResp{
+		"repo view": ghResp{Out: ghJSON(t, struct {
+			NameWithOwner string `json:"nameWithOwner"`
+		}{"o/r"})},
+		"pr list": ghResp{Out: ghJSON(t, []struct {
+			Number int `json:"number"`
+		}{{1}, {2}})},
+	}
+	gitMap := map[string]ghResp{
+		"rev-parse": ghResp{Out: []byte("feat/foo\n")},
+	}
+	installStubs(t, ghMap, gitMap)
+
+	var buf bytes.Buffer
+	err := pr.LinkAuto("", beadsDir, id, "", &buf)
+	if err == nil {
+		t.Fatal("LinkAuto succeeded with two open PRs, want error")
+	}
+	if !strings.Contains(err.Error(), "multiple open PRs") {
+		t.Errorf("error = %v, want 'multiple open PRs'", err)
+	}
+}
+
+func TestLinkAutoRefusesDuplicateRepo(t *testing.T) {
+	beadsDir := testutil.TestDB(t)
+	id := testutil.CreateBead(t, beadsDir, "pr-link-auto-dup")
+	mustLinkDir(t, beadsDir, id, t.TempDir())
+	mustSavePRs(t, beadsDir, id, []pr.Record{{Repo: "o/r", Number: 1, Branch: "x"}})
+
+	ghMap := map[string]ghResp{
+		"repo view": ghResp{Out: ghJSON(t, struct {
+			NameWithOwner string `json:"nameWithOwner"`
+		}{"o/r"})},
+		"pr list": ghResp{Out: ghJSON(t, []struct {
+			Number int `json:"number"`
+		}{{2}})},
+	}
+	gitMap := map[string]ghResp{
+		"rev-parse": ghResp{Out: []byte("feat/foo\n")},
+	}
+	installStubs(t, ghMap, gitMap)
+
+	var buf bytes.Buffer
+	err := pr.LinkAuto("", beadsDir, id, "", &buf)
+	if err == nil {
+		t.Fatal("LinkAuto succeeded on already-attached repo, want error")
+	}
+	if !strings.Contains(err.Error(), "already has a PR") {
+		t.Errorf("error = %v, want 'already has a PR'", err)
+	}
+}
+
+// --- LinkAll (--all, no url) ----------------------------------------------
+
+// flagVal returns the value following flag in args ("" when absent).
+func flagVal(args []string, flag string) string {
+	for i, a := range args {
+		if a == flag && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
+func TestLinkAllLinksUniqueAndSkipsAmbiguous(t *testing.T) {
+	beadsDir := testutil.TestDB(t)
+	id := testutil.CreateBead(t, beadsDir, "pr-link-all")
+	dirLink := t.TempDir()  // unique open PR -> linked
+	dirZero := t.TempDir()  // no open PR -> skip
+	dirMany := t.TempDir()  // two open PRs -> skip
+	dirAttd := t.TempDir()  // already attached -> skip
+	mustLinkDir(t, beadsDir, id, dirLink)
+	mustLinkDir(t, beadsDir, id, dirZero)
+	mustLinkDir(t, beadsDir, id, dirMany)
+	mustLinkDir(t, beadsDir, id, dirAttd)
+	mustSavePRs(t, beadsDir, id, []pr.Record{{Repo: "o/attd", Number: 5, Branch: "b-attd"}})
+
+	repoByDir := map[string]string{
+		dirLink: "o/link", dirZero: "o/zero", dirMany: "o/many", dirAttd: "o/attd",
+	}
+	prsByRepo := map[string][]int{
+		"o/link": {7}, "o/zero": {}, "o/many": {1, 2}, "o/attd": {9},
+	}
+
+	stubMutex.Lock()
+	prevGH, prevGit := pr.ExecGH, pr.ExecGit
+	t.Cleanup(func() {
+		pr.ExecGH = prevGH
+		pr.ExecGit = prevGit
+		stubMutex.Unlock()
+	})
+	pr.ExecGH = func(d string, args ...string) ([]byte, error) {
+		if len(args) >= 2 && args[0] == "repo" && args[1] == "view" {
+			for _, a := range args {
+				if a == "nameWithOwner" {
+					return ghJSON(t, struct {
+						NameWithOwner string `json:"nameWithOwner"`
+					}{repoByDir[d]}), nil
+				}
+				if a == "defaultBranchRef" {
+					return ghJSON(t, struct {
+						DefaultBranchRef struct {
+							Name string `json:"name"`
+						} `json:"defaultBranchRef"`
+					}{struct {
+						Name string `json:"name"`
+					}{"main"}}), nil
+				}
+			}
+		}
+		if len(args) >= 2 && args[0] == "pr" && args[1] == "list" {
+			repo := flagVal(args, "--repo")
+			nums := prsByRepo[repo]
+			rows := make([]struct {
+				Number int `json:"number"`
+			}, len(nums))
+			for i, n := range nums {
+				rows[i].Number = n
+			}
+			return ghJSON(t, rows), nil
+		}
+		return nil, fmt.Errorf("test stub: unhandled gh call %v", args)
+	}
+	pr.ExecGit = func(d string, args ...string) ([]byte, error) {
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--abbrev-ref" {
+			return []byte("b-" + strings.TrimPrefix(repoByDir[d], "o/") + "\n"), nil
+		}
+		if len(args) >= 2 && args[0] == "rev-list" && args[1] == "--count" {
+			return []byte("3\n"), nil
+		}
+		return nil, fmt.Errorf("test stub: unhandled git call %v", args)
+	}
+
+	var buf bytes.Buffer
+	if err := pr.LinkAll("", beadsDir, id, &buf); err != nil {
+		t.Fatalf("LinkAll: %v", err)
+	}
+	out := buf.String()
+	recs, err := pr.Load("", beadsDir, id)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	// o/attd was pre-existing; o/link gets newly linked. o/zero and o/many do not.
+	byRepo := map[string]pr.Record{}
+	for _, r := range recs {
+		byRepo[r.Repo] = r
+	}
+	if r, ok := byRepo["o/link"]; !ok || r.Number != 7 || r.Branch != "b-link" {
+		t.Errorf("o/link record = %+v (ok=%v), want #7 branch b-link", r, ok)
+	}
+	if _, ok := byRepo["o/zero"]; ok {
+		t.Errorf("o/zero should not be linked: %+v", recs)
+	}
+	if _, ok := byRepo["o/many"]; ok {
+		t.Errorf("o/many should not be linked: %+v", recs)
+	}
+	if !strings.Contains(out, "no open PR for o/zero") {
+		t.Errorf("stdout missing o/zero skip notice:\n%s", out)
+	}
+	if !strings.Contains(out, "multiple open PRs for o/many") {
+		t.Errorf("stdout missing o/many skip notice:\n%s", out)
+	}
+	if !strings.Contains(out, "PR already attached for o/attd") {
+		t.Errorf("stdout missing o/attd skip notice:\n%s", out)
+	}
+	if !strings.Contains(out, "https://github.com/o/link/pull/7") {
+		t.Errorf("stdout missing o/link link line:\n%s", out)
+	}
+}
+
+// --- Create: link-vs-create-vs-skip ---------------------------------------
+
+func TestCreateLinksExistingUniquePR(t *testing.T) {
+	beadsDir := testutil.TestDB(t)
+	id := testutil.CreateBead(t, beadsDir, "pr-create-link")
+	mustLinkDir(t, beadsDir, id, t.TempDir())
+
+	ghMap := map[string]ghResp{
+		"repo view": ghResp{Out: ghJSON(t, struct {
+			NameWithOwner string `json:"nameWithOwner"`
+		}{"o/r"})},
+		"pr list": ghResp{Out: ghJSON(t, []struct {
+			Number int `json:"number"`
+		}{{55}})},
+		// gh pr create must NOT be reached; make it explode if it is.
+		"pr create": ghResp{Err: makeExitErr("unexpected gh pr create")},
+	}
+	gitMap := map[string]ghResp{
+		"rev-parse": ghResp{Out: []byte("feat\n")},
+	}
+	installStubs(t, ghMap, gitMap)
+
+	var buf bytes.Buffer
+	if err := pr.Create("", beadsDir, id, "", false, &buf); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	recs, err := pr.Load("", beadsDir, id)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(recs) != 1 || recs[0].Repo != "o/r" || recs[0].Number != 55 || recs[0].Branch != "feat" {
+		t.Errorf("recs = %+v, want linked o/r#55 branch feat", recs)
+	}
+	if !strings.Contains(buf.String(), "linked existing PR") {
+		t.Errorf("stdout = %q, want 'linked existing PR'", buf.String())
+	}
+}
+
+func TestCreateErrorsWhenMultipleOpenPRs(t *testing.T) {
+	beadsDir := testutil.TestDB(t)
+	id := testutil.CreateBead(t, beadsDir, "pr-create-many")
+	mustLinkDir(t, beadsDir, id, t.TempDir())
+
+	ghMap := map[string]ghResp{
+		"repo view": ghResp{Out: ghJSON(t, struct {
+			NameWithOwner string `json:"nameWithOwner"`
+		}{"o/r"})},
+		"pr list": ghResp{Out: ghJSON(t, []struct {
+			Number int `json:"number"`
+		}{{1}, {2}})},
+	}
+	gitMap := map[string]ghResp{
+		"rev-parse": ghResp{Out: []byte("feat\n")},
+	}
+	installStubs(t, ghMap, gitMap)
+
+	var buf bytes.Buffer
+	err := pr.Create("", beadsDir, id, "", false, &buf)
+	if err == nil {
+		t.Fatal("Create succeeded with two open PRs, want error")
+	}
+	if !strings.Contains(err.Error(), "multiple open PRs") {
+		t.Errorf("error = %v, want 'multiple open PRs'", err)
+	}
+}
+
+func TestCreateAllLinkCreateSkip(t *testing.T) {
+	beadsDir := testutil.TestDB(t)
+	id := testutil.CreateBead(t, beadsDir, "pr-create-all-mix")
+	dirLink := t.TempDir() // one open PR -> link
+	dirNew := t.TempDir()  // zero open PRs -> create
+	dirMany := t.TempDir() // two open PRs -> skip
+	mustLinkDir(t, beadsDir, id, dirLink)
+	mustLinkDir(t, beadsDir, id, dirNew)
+	mustLinkDir(t, beadsDir, id, dirMany)
+
+	repoByDir := map[string]string{
+		dirLink: "o/link", dirNew: "o/new", dirMany: "o/many",
+	}
+	prsByRepo := map[string][]int{
+		"o/link": {7}, "o/new": {}, "o/many": {1, 2},
+	}
+
+	stubMutex.Lock()
+	prevGH, prevGit := pr.ExecGH, pr.ExecGit
+	t.Cleanup(func() {
+		pr.ExecGH = prevGH
+		pr.ExecGit = prevGit
+		stubMutex.Unlock()
+	})
+	pr.ExecGH = func(d string, args ...string) ([]byte, error) {
+		if len(args) >= 2 && args[0] == "repo" && args[1] == "view" {
+			for _, a := range args {
+				if a == "nameWithOwner" {
+					return ghJSON(t, struct {
+						NameWithOwner string `json:"nameWithOwner"`
+					}{repoByDir[d]}), nil
+				}
+				if a == "defaultBranchRef" {
+					return ghJSON(t, struct {
+						DefaultBranchRef struct {
+							Name string `json:"name"`
+						} `json:"defaultBranchRef"`
+					}{struct {
+						Name string `json:"name"`
+					}{"main"}}), nil
+				}
+			}
+		}
+		if len(args) >= 2 && args[0] == "pr" && args[1] == "list" {
+			repo := flagVal(args, "--repo")
+			nums := prsByRepo[repo]
+			rows := make([]struct {
+				Number int `json:"number"`
+			}, len(nums))
+			for i, n := range nums {
+				rows[i].Number = n
+			}
+			return ghJSON(t, rows), nil
+		}
+		if len(args) >= 2 && args[0] == "pr" && args[1] == "create" {
+			// Only o/new should reach create.
+			if repoByDir[d] != "o/new" {
+				return nil, fmt.Errorf("unexpected gh pr create for %s", repoByDir[d])
+			}
+			return []byte("https://github.com/o/new/pull/99\n"), nil
+		}
+		return nil, fmt.Errorf("test stub: unhandled gh call %v", args)
+	}
+	pr.ExecGit = func(d string, args ...string) ([]byte, error) {
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--abbrev-ref" {
+			return []byte("b-" + strings.TrimPrefix(repoByDir[d], "o/") + "\n"), nil
+		}
+		if len(args) >= 2 && args[0] == "rev-list" && args[1] == "--count" {
+			return []byte("3\n"), nil
+		}
+		if len(args) >= 1 && args[0] == "push" {
+			return []byte(""), nil
+		}
+		return nil, fmt.Errorf("test stub: unhandled git call %v", args)
+	}
+
+	var buf bytes.Buffer
+	if err := pr.CreateAll("", beadsDir, id, false, &buf); err != nil {
+		t.Fatalf("CreateAll: %v", err)
+	}
+	out := buf.String()
+	recs, err := pr.Load("", beadsDir, id)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	byRepo := map[string]pr.Record{}
+	for _, r := range recs {
+		byRepo[r.Repo] = r
+	}
+	if r, ok := byRepo["o/link"]; !ok || r.Number != 7 {
+		t.Errorf("o/link record = %+v (ok=%v), want #7 (linked)", r, ok)
+	}
+	if r, ok := byRepo["o/new"]; !ok || r.Number != 99 {
+		t.Errorf("o/new record = %+v (ok=%v), want #99 (created)", r, ok)
+	}
+	if _, ok := byRepo["o/many"]; ok {
+		t.Errorf("o/many should be skipped, not attached: %+v", recs)
+	}
+	if !strings.Contains(out, "linked existing PR https://github.com/o/link/pull/7") {
+		t.Errorf("stdout missing o/link link line:\n%s", out)
+	}
+	if !strings.Contains(out, "https://github.com/o/new/pull/99") {
+		t.Errorf("stdout missing o/new create line:\n%s", out)
+	}
+	if !strings.Contains(out, "multiple open PRs for o/many") {
+		t.Errorf("stdout missing o/many skip notice:\n%s", out)
+	}
+}
+
 // --- helpers --------------------------------------------------------------
 
 // mustSavePRs writes recs to ticketID's metadata.prs via bd update. Mirrors

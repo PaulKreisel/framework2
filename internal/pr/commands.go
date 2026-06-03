@@ -108,7 +108,11 @@ func Create(db, beadsDir, ticketID, selector string, ready bool, stdout io.Write
 	if err != nil {
 		return err
 	}
-	return createForEntry(db, beadsDir, ticketID, *entry, existing, ready, stdout)
+	repo, branch, nums, err := entryOpenPRs(*entry)
+	if err != nil {
+		return err
+	}
+	return createForEntry(db, beadsDir, ticketID, *entry, repo, branch, nums, existing, ready, stdout)
 }
 
 // CreateAll runs `pr create` for every "eligible" linked dir on ticketID. A
@@ -143,12 +147,30 @@ func CreateAll(db, beadsDir, ticketID string, ready bool, stdout io.Writer) erro
 			return err
 		}
 		repo, err := nameWithOwner(entry.Path)
-		if err == nil && hasRepoRecord(existing, repo) {
+		if err != nil {
+			fmt.Fprintf(stdout, "%s: error: %v\n", entry.Path, err)
+			failures = append(failures, entry.Path)
+			continue
+		}
+		if hasRepoRecord(existing, repo) {
 			fmt.Fprintf(stdout, "%s: PR already attached for %s, skipping\n", entry.Path, repo)
 			continue
 		}
+		branch, nums, err := branchOpenPRs(entry, repo)
+		if err != nil {
+			fmt.Fprintf(stdout, "%s: error: %v\n", entry.Path, err)
+			failures = append(failures, entry.Path)
+			continue
+		}
+		// More than one open PR on the branch: ambiguous, skip with a notice
+		// (a bulk run has nothing to fall back to).
+		if len(nums) >= 2 {
+			fmt.Fprintf(stdout, "%s: multiple open PRs for %s on branch %s (%s), skipping\n",
+				entry.Path, repo, branch, prNumberList(nums))
+			continue
+		}
 		fmt.Fprintf(stdout, "%s:\n", entry.Path)
-		if err := createForEntry(db, beadsDir, ticketID, entry, existing, ready, stdout); err != nil {
+		if err := createForEntry(db, beadsDir, ticketID, entry, repo, branch, nums, existing, ready, stdout); err != nil {
 			fmt.Fprintf(stdout, "%s: error: %v\n", entry.Path, err)
 			failures = append(failures, entry.Path)
 		}
@@ -160,27 +182,22 @@ func CreateAll(db, beadsDir, ticketID string, ready bool, stdout io.Writer) erro
 	return nil
 }
 
-// createForEntry performs the create-PR work for a single, already-resolved
-// linked dir entry. It is the shared body used by Create and CreateAll.
-// existing is the bead's current PR records; the same-repo duplicate check
-// runs against it.
-func createForEntry(db, beadsDir, ticketID string, entry dir.Entry, existing []Record, ready bool, stdout io.Writer) error {
-	repo, err := nameWithOwner(entry.Path)
-	if err != nil {
-		return err
+// createForEntry attaches a PR for a single, already-resolved linked dir
+// entry, given its repo, current branch, and the open PRs on that branch. It
+// is the shared body used by Create and CreateAll. existing is the bead's
+// current PR records; the same-repo duplicate check runs against it.
+//
+// When exactly one open PR already exists for the branch, it is linked
+// instead of creating a new one. Two or more is ambiguous and hard-errors
+// (callers that can skip — e.g. CreateAll — decide that before calling here).
+// Zero open PRs creates a new PR as before.
+func createForEntry(db, beadsDir, ticketID string, entry dir.Entry, repo, branch string, nums []int, existing []Record, ready bool, stdout io.Writer) error {
+	if len(nums) >= 2 {
+		return fmt.Errorf("multiple open PRs for %s on branch %s (%s); link one explicitly with `ticket pr link <pr-url>`",
+			repo, branch, prNumberList(nums))
 	}
-	branch, err := gitCurrentBranch(entry.Path)
-	if err != nil {
-		return err
-	}
-	if branch == "" || branch == "HEAD" {
-		return fmt.Errorf("dir %s is on a detached HEAD; check out a branch before creating a PR", entry.Path)
-	}
-	if existingNum, err := openPRForBranch(repo, branch); err != nil {
-		return err
-	} else if existingNum != 0 {
-		return fmt.Errorf("an open PR for %s on branch %s already exists (#%d); use `ticket pr link` to attach it",
-			repo, branch, existingNum)
+	if len(nums) == 1 {
+		return autoLinkPR(db, beadsDir, ticketID, repo, branch, nums[0], existing, stdout)
 	}
 	// Refuse a second PR for the same (bead, dir) pair. Identity is by repo
 	// because storage doesn't track the originating dir directly.
@@ -481,6 +498,111 @@ func Link(db, beadsDir, ticketID, selector, rawURL string) error {
 	})
 }
 
+// LinkAuto attaches the dir's unique open PR to ticketID without an explicit
+// URL. The PR is the single open PR whose head is the dir's current branch.
+// Zero or two-or-more open PRs is an error (a targeted command on one dir has
+// nothing to skip to).
+func LinkAuto(db, beadsDir, ticketID, selector string, stdout io.Writer) error {
+	entries, err := dir.Load(db, beadsDir, ticketID)
+	if err != nil {
+		return err
+	}
+	if len(entries) == 0 {
+		return fmt.Errorf("ticket %s has no linked dirs", ticketID)
+	}
+	entry, err := dir.PickEntry(ticketID, entries, selector)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(entry.Path); err != nil {
+		return fmt.Errorf("linked dir is gone: %s: %w", entry.Path, err)
+	}
+	existing, err := Load(db, beadsDir, ticketID)
+	if err != nil {
+		return err
+	}
+	repo, branch, nums, err := entryOpenPRs(*entry)
+	if err != nil {
+		return err
+	}
+	switch len(nums) {
+	case 0:
+		return fmt.Errorf("no open PR for %s on branch %s; pass a <pr-url> or create one with `ticket pr create`",
+			repo, branch)
+	case 1:
+		return autoLinkPR(db, beadsDir, ticketID, repo, branch, nums[0], existing, stdout)
+	default:
+		return fmt.Errorf("multiple open PRs for %s on branch %s (%s); pass an explicit <pr-url>",
+			repo, branch, prNumberList(nums))
+	}
+}
+
+// LinkAll attaches the unique open PR for every "eligible" linked dir (≥1
+// commit ahead of the resolved base, the same eligibility as CreateAll) that
+// is not already PR-attached on the bead. Dirs whose branch has zero or two-
+// or-more open PRs are skipped with a per-dir notice; already-attached dirs
+// are likewise skipped. Per-dir failures are aggregated and returned, but
+// every eligible dir is still attempted.
+func LinkAll(db, beadsDir, ticketID string, stdout io.Writer) error {
+	entries, err := dir.Load(db, beadsDir, ticketID)
+	if err != nil {
+		return err
+	}
+	if len(entries) == 0 {
+		return fmt.Errorf("ticket %s has no linked dirs", ticketID)
+	}
+	eligible, err := eligibleDirs(db, beadsDir, ticketID, entries)
+	if err != nil {
+		return err
+	}
+	if len(eligible) == 0 {
+		return errors.New("no linked dirs are ahead of their base branch")
+	}
+	var failures []string
+	for _, entry := range eligible {
+		// Reload each iteration so earlier links are reflected in the
+		// duplicate check (consistent with CreateAll).
+		existing, err := Load(db, beadsDir, ticketID)
+		if err != nil {
+			return err
+		}
+		repo, err := nameWithOwner(entry.Path)
+		if err != nil {
+			fmt.Fprintf(stdout, "%s: error: %v\n", entry.Path, err)
+			failures = append(failures, entry.Path)
+			continue
+		}
+		if hasRepoRecord(existing, repo) {
+			fmt.Fprintf(stdout, "%s: PR already attached for %s, skipping\n", entry.Path, repo)
+			continue
+		}
+		branch, nums, err := branchOpenPRs(entry, repo)
+		if err != nil {
+			fmt.Fprintf(stdout, "%s: error: %v\n", entry.Path, err)
+			failures = append(failures, entry.Path)
+			continue
+		}
+		switch len(nums) {
+		case 0:
+			fmt.Fprintf(stdout, "%s: no open PR for %s on branch %s, skipping\n", entry.Path, repo, branch)
+		case 1:
+			fmt.Fprintf(stdout, "%s:\n", entry.Path)
+			if err := autoLinkPR(db, beadsDir, ticketID, repo, branch, nums[0], existing, stdout); err != nil {
+				fmt.Fprintf(stdout, "%s: error: %v\n", entry.Path, err)
+				failures = append(failures, entry.Path)
+			}
+		default:
+			fmt.Fprintf(stdout, "%s: multiple open PRs for %s on branch %s (%s), skipping\n",
+				entry.Path, repo, branch, prNumberList(nums))
+		}
+	}
+	if len(failures) > 0 {
+		return fmt.Errorf("pr link --all: %d dir(s) failed: %s",
+			len(failures), strings.Join(failures, ", "))
+	}
+	return nil
+}
+
 // CreateBead creates a new bead from a PR URL as a child of currentID.
 // currentID is the bead the operator is acting from (auto-detected by
 // `this`, or passed positionally). No dir is linked on the new bead.
@@ -743,27 +865,88 @@ func branchOnRemote(dir, branch string) (bool, error) {
 	return strings.TrimSpace(string(out)) != "", nil
 }
 
-// openPRForBranch returns the number of an open PR for headBranch on repo,
-// or 0 if none exists.
-func openPRForBranch(repo, headBranch string) (int, error) {
+// openPRsForBranch returns the numbers of every open PR whose head is
+// headBranch on repo. An empty slice means no open PR exists; a length of 2
+// or more means the branch is not uniquely associated with a single open PR.
+func openPRsForBranch(repo, headBranch string) ([]int, error) {
 	out, err := ExecGH("", "pr", "list",
 		"--repo", repo,
 		"--head", headBranch,
 		"--state", "open",
 		"--json", "number")
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	var rows []struct {
 		Number int `json:"number"`
 	}
 	if err := json.Unmarshal(out, &rows); err != nil {
-		return 0, fmt.Errorf("parse gh pr list: %w", err)
+		return nil, fmt.Errorf("parse gh pr list: %w", err)
 	}
-	if len(rows) == 0 {
-		return 0, nil
+	nums := make([]int, len(rows))
+	for i, r := range rows {
+		nums[i] = r.Number
 	}
-	return rows[0].Number, nil
+	return nums, nil
+}
+
+// prNumberList formats PR numbers as "#1, #2" for diagnostics.
+func prNumberList(nums []int) string {
+	parts := make([]string, len(nums))
+	for i, n := range nums {
+		parts[i] = "#" + strconv.Itoa(n)
+	}
+	return strings.Join(parts, ", ")
+}
+
+// entryOpenPRs resolves entry's repo identity, current branch, and the open
+// PRs whose head is that branch. It is the shared front half of the
+// single-dir create and auto-link flows. Bulk callers resolve the repo first
+// (to skip already-attached dirs before any PR lookup) and call branchOpenPRs.
+func entryOpenPRs(entry dir.Entry) (repo, branch string, nums []int, err error) {
+	repo, err = nameWithOwner(entry.Path)
+	if err != nil {
+		return "", "", nil, err
+	}
+	branch, nums, err = branchOpenPRs(entry, repo)
+	if err != nil {
+		return "", "", nil, err
+	}
+	return repo, branch, nums, nil
+}
+
+// branchOpenPRs resolves entry's current branch and the open PRs whose head
+// is that branch on repo.
+func branchOpenPRs(entry dir.Entry, repo string) (branch string, nums []int, err error) {
+	branch, err = gitCurrentBranch(entry.Path)
+	if err != nil {
+		return "", nil, err
+	}
+	if branch == "" || branch == "HEAD" {
+		return "", nil, fmt.Errorf("dir %s is on a detached HEAD; check out a branch before creating or linking a PR", entry.Path)
+	}
+	nums, err = openPRsForBranch(repo, branch)
+	if err != nil {
+		return "", nil, err
+	}
+	return branch, nums, nil
+}
+
+// autoLinkPR appends a Record for the open PR num on repo/branch to the bead,
+// after the same-repo duplicate guard. Shared by the no-url `pr link` paths
+// and the `pr create` path that finds a pre-existing open PR.
+func autoLinkPR(db, beadsDir, ticketID, repo, branch string, num int, existing []Record, stdout io.Writer) error {
+	for _, r := range existing {
+		if r.Repo == repo {
+			return fmt.Errorf("bead %s already has a PR attached for %s (#%d)", ticketID, repo, r.Number)
+		}
+	}
+	rec := Record{Repo: repo, Number: num, Branch: branch}
+	if err := appendRecord(db, beadsDir, ticketID, rec); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "linked existing PR %s\n", rec.URL())
+	return nil
 }
 
 // beadTitle returns the bead's title via `bd --json show`. "" when missing.
