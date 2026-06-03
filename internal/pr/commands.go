@@ -753,6 +753,91 @@ func Refresh(db, beadsDir, ticketID string, stdout io.Writer) error {
 	return finish.Run(db, beadsDir, ticketID, false, stdout)
 }
 
+// Check is a read-only verification that every linked dir on ticketID has an
+// attached PR. With merged=true it additionally requires each dir's attached
+// PR to have landed — MERGED on GitHub, or gone (a deleted PR is treated as
+// merged-then-cleaned-up). It has no side effects (no push, no metadata
+// write, no finish) and is meant to back a finish-step `check`.
+//
+// On failure it returns a non-nil error listing the offending dirs, which the
+// CLI maps to a non-zero exit. As with Refresh, a ticket with zero linked dirs
+// passes vacuously.
+func Check(db, beadsDir, ticketID string, merged bool, stdout io.Writer) error {
+	entries, err := dir.Load(db, beadsDir, ticketID)
+	if err != nil {
+		return err
+	}
+	recs, err := Load(db, beadsDir, ticketID)
+	if err != nil {
+		return err
+	}
+
+	if err := validateDirsHavePRs(entries, recs); err != nil {
+		return err
+	}
+	if !merged {
+		fmt.Fprintln(stdout, "every linked dir has an attached PR")
+		return nil
+	}
+
+	notMerged, err := dirsWithoutMergedPR(entries, recs)
+	if err != nil {
+		return err
+	}
+	if len(notMerged) > 0 {
+		return fmt.Errorf("dirs without a merged PR: %s", strings.Join(notMerged, ", "))
+	}
+	fmt.Fprintln(stdout, "every linked dir has a merged PR")
+	return nil
+}
+
+// dirsWithoutMergedPR returns the paths of the linked dirs whose attached PR
+// has not landed. A PR counts as landed when it is MERGED on GitHub, or when
+// it no longer exists (deleted on GitHub is treated as merged-then-cleaned-up
+// rather than as a failure). CLOSED-unmerged and still-OPEN PRs are offenders.
+// It assumes validateDirsHavePRs has already confirmed every dir has a record;
+// a dir whose record can't be resolved is still reported as an offender rather
+// than silently passing. gh/network errors propagate.
+func dirsWithoutMergedPR(entries []dir.Entry, recs []Record) ([]string, error) {
+	dirByRepo, err := mapDirsByRepo(entries)
+	if err != nil {
+		return nil, err
+	}
+	recByRepo := make(map[string]Record, len(recs))
+	for _, r := range recs {
+		if _, ok := recByRepo[r.Repo]; !ok {
+			recByRepo[r.Repo] = r
+		}
+	}
+	var notMerged []string
+	seen := map[string]bool{}
+	// Walk entries (not the map) so the order is deterministic.
+	for _, e := range entries {
+		if seen[e.Path] {
+			continue
+		}
+		seen[e.Path] = true
+		rec, ok := recByRepo[repoFromMap(dirByRepo, e.Path)]
+		if !ok {
+			notMerged = append(notMerged, e.Path)
+			continue
+		}
+		v, exists, err := prView(rec.Repo, rec.Number)
+		if err != nil {
+			return nil, err
+		}
+		// Deleted-on-GitHub: the PR is gone, which in practice means it was
+		// merged and the branch cleaned up. Treat as landed.
+		if !exists {
+			continue
+		}
+		if strings.ToUpper(v.State) != "MERGED" {
+			notMerged = append(notMerged, e.Path)
+		}
+	}
+	return notMerged, nil
+}
+
 // validateDirsHavePRs verifies that every linked dir has at least one PR
 // record whose repo matches it. Zero PRs across N dirs counts as N dirs
 // without a PR — the error lists every offender.

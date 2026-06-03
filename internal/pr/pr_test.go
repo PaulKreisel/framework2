@@ -403,6 +403,176 @@ func TestRefreshOpenChildrenBlockAutoClose(t *testing.T) {
 	}
 }
 
+// --- Check -----------------------------------------------------------------
+
+func TestCheckPassesWhenAllDirsHavePR(t *testing.T) {
+	beadsDir := testutil.TestDB(t)
+	id := testutil.CreateBead(t, beadsDir, "pr-check-ok")
+	mustLinkDir(t, beadsDir, id, t.TempDir())
+	mustSavePRs(t, beadsDir, id, []pr.Record{{Repo: "o/r", Number: 1, Branch: "x"}})
+
+	// Single dir → single repo, so the repo-view stub can be keyed by args.
+	installStubs(t, map[string]ghResp{
+		"repo view": ghResp{Out: ghJSON(t, struct {
+			NameWithOwner string `json:"nameWithOwner"`
+		}{"o/r"})},
+	}, nil)
+
+	var buf bytes.Buffer
+	if err := pr.Check("", beadsDir, id, false, &buf); err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if !strings.Contains(buf.String(), "every linked dir has an attached PR") {
+		t.Errorf("stdout = %q, want pass message", buf.String())
+	}
+}
+
+func TestCheckFailsWhenDirHasNoPR(t *testing.T) {
+	beadsDir := testutil.TestDB(t)
+	id := testutil.CreateBead(t, beadsDir, "pr-check-missing")
+	missing := t.TempDir()
+	mustLinkDir(t, beadsDir, id, missing)
+	// No PR records at all.
+
+	installStubs(t, map[string]ghResp{
+		"repo view": ghResp{Out: ghJSON(t, struct {
+			NameWithOwner string `json:"nameWithOwner"`
+		}{"o/r"})},
+	}, nil)
+
+	var buf bytes.Buffer
+	err := pr.Check("", beadsDir, id, false, &buf)
+	if err == nil {
+		t.Fatal("Check succeeded with a dir missing a PR, want error")
+	}
+	if !strings.Contains(err.Error(), "without an attached PR") {
+		t.Errorf("error = %v, want 'without an attached PR'", err)
+	}
+	if !strings.Contains(err.Error(), missing) {
+		t.Errorf("error = %v, want offending dir %q listed", err, missing)
+	}
+}
+
+func TestCheckMergedPassesWhenMerged(t *testing.T) {
+	beadsDir := testutil.TestDB(t)
+	id := testutil.CreateBead(t, beadsDir, "pr-check-merged-ok")
+	mustLinkDir(t, beadsDir, id, t.TempDir())
+	mustSavePRs(t, beadsDir, id, []pr.Record{{Repo: "o/r", Number: 1, Branch: "x"}})
+
+	installStubs(t, map[string]ghResp{
+		"repo view": ghResp{Out: ghJSON(t, struct {
+			NameWithOwner string `json:"nameWithOwner"`
+		}{"o/r"})},
+		"pr view": ghResp{Out: ghJSON(t, pr.PRView{Number: 1, State: "MERGED", HeadRefName: "x"})},
+	}, nil)
+
+	var buf bytes.Buffer
+	if err := pr.Check("", beadsDir, id, true, &buf); err != nil {
+		t.Fatalf("Check --merged: %v", err)
+	}
+	if !strings.Contains(buf.String(), "every linked dir has a merged PR") {
+		t.Errorf("stdout = %q, want merged pass message", buf.String())
+	}
+}
+
+func TestCheckMergedPassesWhenDeleted(t *testing.T) {
+	beadsDir := testutil.TestDB(t)
+	id := testutil.CreateBead(t, beadsDir, "pr-check-merged-deleted")
+	mustLinkDir(t, beadsDir, id, t.TempDir())
+	mustSavePRs(t, beadsDir, id, []pr.Record{{Repo: "o/r", Number: 1, Branch: "x"}})
+
+	// A deleted-on-GitHub PR is treated as merged-then-cleaned-up.
+	installStubs(t, map[string]ghResp{
+		"repo view": ghResp{Out: ghJSON(t, struct {
+			NameWithOwner string `json:"nameWithOwner"`
+		}{"o/r"})},
+		"pr view": ghResp{Err: makeExitErr("no pull requests found")},
+	}, nil)
+
+	var buf bytes.Buffer
+	if err := pr.Check("", beadsDir, id, true, &buf); err != nil {
+		t.Fatalf("Check --merged on deleted PR: %v", err)
+	}
+	if !strings.Contains(buf.String(), "every linked dir has a merged PR") {
+		t.Errorf("stdout = %q, want merged pass message", buf.String())
+	}
+}
+
+func TestCheckMergedFailsWhenOpen(t *testing.T) {
+	beadsDir := testutil.TestDB(t)
+	id := testutil.CreateBead(t, beadsDir, "pr-check-merged-open")
+	open := t.TempDir()
+	mustLinkDir(t, beadsDir, id, open)
+	mustSavePRs(t, beadsDir, id, []pr.Record{{Repo: "o/r", Number: 1, Branch: "x"}})
+
+	installStubs(t, map[string]ghResp{
+		"repo view": ghResp{Out: ghJSON(t, struct {
+			NameWithOwner string `json:"nameWithOwner"`
+		}{"o/r"})},
+		"pr view": ghResp{Out: ghJSON(t, pr.PRView{Number: 1, State: "OPEN", HeadRefName: "x"})},
+	}, nil)
+
+	var buf bytes.Buffer
+	err := pr.Check("", beadsDir, id, true, &buf)
+	if err == nil {
+		t.Fatal("Check --merged succeeded with an open PR, want error")
+	}
+	if !strings.Contains(err.Error(), "without a merged PR") {
+		t.Errorf("error = %v, want 'without a merged PR'", err)
+	}
+	if !strings.Contains(err.Error(), open) {
+		t.Errorf("error = %v, want offending dir %q listed", err, open)
+	}
+}
+
+func TestCheckMergedFailsWhenClosedUnmerged(t *testing.T) {
+	beadsDir := testutil.TestDB(t)
+	id := testutil.CreateBead(t, beadsDir, "pr-check-merged-closed")
+	mustLinkDir(t, beadsDir, id, t.TempDir())
+	mustSavePRs(t, beadsDir, id, []pr.Record{{Repo: "o/r", Number: 1, Branch: "x"}})
+
+	installStubs(t, map[string]ghResp{
+		"repo view": ghResp{Out: ghJSON(t, struct {
+			NameWithOwner string `json:"nameWithOwner"`
+		}{"o/r"})},
+		"pr view": ghResp{Out: ghJSON(t, pr.PRView{Number: 1, State: "CLOSED", HeadRefName: "x"})},
+	}, nil)
+
+	var buf bytes.Buffer
+	err := pr.Check("", beadsDir, id, true, &buf)
+	if err == nil {
+		t.Fatal("Check --merged succeeded with a closed-unmerged PR, want error")
+	}
+	if !strings.Contains(err.Error(), "without a merged PR") {
+		t.Errorf("error = %v, want 'without a merged PR'", err)
+	}
+}
+
+// TestCheckCLIExitCodes drives the check through the CLI dispatcher to confirm
+// the exit code (0 on pass, non-zero on failure) and --merged flag parsing.
+func TestCheckCLIExitCodes(t *testing.T) {
+	beadsDir := testutil.TestDB(t)
+	id := testutil.CreateBead(t, beadsDir, "pr-check-cli")
+	mustLinkDir(t, beadsDir, id, t.TempDir())
+	mustSavePRs(t, beadsDir, id, []pr.Record{{Repo: "o/r", Number: 1, Branch: "x"}})
+
+	installStubs(t, map[string]ghResp{
+		"repo view": ghResp{Out: ghJSON(t, struct {
+			NameWithOwner string `json:"nameWithOwner"`
+		}{"o/r"})},
+		"pr view": ghResp{Out: ghJSON(t, pr.PRView{Number: 1, State: "OPEN", HeadRefName: "x"})},
+	}, nil)
+
+	// Default mode: dir has a PR → exit 0.
+	if _, stderr, code := testutil.RunTicketIn(t, beadsDir, "pr", "check", id); code != 0 {
+		t.Errorf("pr check: exit=%d stderr=%q, want 0", code, stderr)
+	}
+	// --merged: PR is open → non-zero exit.
+	if _, _, code := testutil.RunTicketIn(t, beadsDir, "pr", "check", id, "--merged"); code == 0 {
+		t.Error("pr check --merged: exit=0, want non-zero (PR is open)")
+	}
+}
+
 // --- Show / ShowAll --------------------------------------------------------
 
 // stubOpenURL replaces pr.OpenURL with a recorder for the duration of the

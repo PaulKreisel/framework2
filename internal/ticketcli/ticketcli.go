@@ -253,6 +253,13 @@ subcommands:
                                           description is the PR URL and whose
                                           title is ` + "`PR <pr-title>`" + `. No dir is
                                           linked.
+  pr check [<id>] [--merged]              read-only: exit 0 iff every linked
+                                          dir has an attached PR, else exit
+                                          non-zero listing the offending dirs.
+                                          With --merged, additionally require
+                                          each dir's PR to be merged on GitHub.
+                                          No side effects; usable as a
+                                          finish-step ` + "`check`" + `.
   pr refresh [<id>]                       reconcile bead state with GitHub:
                                           validate that every linked dir has
                                           a PR, surface closed-unmerged or
@@ -1472,7 +1479,7 @@ func resolveOptionalID(ticket string, args []string, extra int, usage string) (s
 // runPR dispatches `ticket pr <sub> ...`.
 func runPR(db, beadsDir, ticket string, args []string, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: ticket pr <list|create|show|link|create-bead|refresh> ...")
+		return errors.New("usage: ticket pr <list|create|show|link|create-bead|check|refresh> ...")
 	}
 	sub, rest := args[0], args[1:]
 	switch sub {
@@ -1576,6 +1583,21 @@ func runPR(db, beadsDir, ticket string, args []string, stdout io.Writer) error {
 			return err
 		}
 		return pr.CreateBead(db, beadsDir, id, tail[0], stdout)
+	case "check":
+		var merged bool
+		var positional []string
+		for _, a := range rest {
+			if a == "--merged" {
+				merged = true
+				continue
+			}
+			positional = append(positional, a)
+		}
+		id, _, err := resolveID(ticket, positional, 0, "usage: ticket pr check [<id>] [--merged]")
+		if err != nil {
+			return err
+		}
+		return pr.Check(db, beadsDir, id, merged, stdout)
 	case "refresh":
 		id, _, err := resolveID(ticket, rest, 0, "usage: ticket pr refresh [<id>]")
 		if err != nil {
