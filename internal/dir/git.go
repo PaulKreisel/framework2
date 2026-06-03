@@ -97,6 +97,25 @@ func gitWorktreeAdd(repo, wtPath, branch, base string) error {
 	return nil
 }
 
+// gitFastForwardOnto attempts to advance the worktree at wtPath's current
+// branch onto parentBranch using --ff-only. Returns:
+//
+//	advanced=true, skipped=false  — branch moved to parentBranch's tip
+//	advanced=false, skipped=false — already up to date, nothing to do
+//	advanced=false, skipped=true  — FF not possible (child diverged, dirty
+//	                                working tree, or other git error); caller
+//	                                should log a "rebase manually" hint
+func gitFastForwardOnto(wtPath, parentBranch string) (advanced, skipped bool) {
+	out, err := exec.Command("git", "-C", wtPath, "merge", "--ff-only", parentBranch).CombinedOutput()
+	if err != nil {
+		return false, true
+	}
+	if strings.Contains(string(out), "Already up to date") {
+		return false, false
+	}
+	return true, false
+}
+
 // gitWorktreeAddExisting creates a worktree at wtPath that checks out the
 // pre-existing branch. Fetches it from origin best-effort, then uses the
 // local branch if present, otherwise creates one tracking the remote ref.

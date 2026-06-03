@@ -853,3 +853,191 @@ worktree:
 		t.Errorf("entries=%+v want none", entries)
 	}
 }
+
+// TestFastForwardWorktreesAdvances is the main regression: parent branch
+// advances after the child worktree is cut; FastForwardWorktrees brings
+// the child up to the parent's new tip via --ff-only.
+func TestFastForwardWorktreesAdvances(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	parent := testutil.CreateBead(t, beadsDir, "ff-advance-parent")
+	child := testutil.CreateChildBead(t, beadsDir, "ff-advance-child", parent)
+	bare := bareRepo(t, "main")
+
+	if err := dir.Worktree("", beadsDir, child, bare); err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+	parentEntries := listEntries(t, beadsDir, parent)
+	childEntries := listEntries(t, beadsDir, child)
+	if len(parentEntries) != 1 || len(childEntries) != 1 {
+		t.Fatalf("parent entries=%+v child entries=%+v want 1 each", parentEntries, childEntries)
+	}
+
+	initialSHA := refSHA(t, childEntries[0].Path, "HEAD")
+	advanceBranch(t, parentEntries[0].Path)
+	parentAdvancedSHA := refSHA(t, parentEntries[0].Path, "HEAD")
+	if parentAdvancedSHA == initialSHA {
+		t.Fatal("test setup: parent did not advance")
+	}
+
+	results, err := dir.FastForwardWorktrees("", beadsDir, child)
+	if err != nil {
+		t.Fatalf("FastForwardWorktrees: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("results=%+v want 1", results)
+	}
+	if !results[0].Advanced {
+		t.Errorf("Advanced=false, want true")
+	}
+	if results[0].Skipped {
+		t.Errorf("Skipped=true, want false")
+	}
+	if sha := refSHA(t, childEntries[0].Path, "HEAD"); sha != parentAdvancedSHA {
+		t.Errorf("child HEAD %q != parent HEAD %q after FF", sha, parentAdvancedSHA)
+	}
+}
+
+// TestFastForwardWorktreesDiverged verifies that a child branch with its own
+// commits is left untouched.
+func TestFastForwardWorktreesDiverged(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	parent := testutil.CreateBead(t, beadsDir, "ff-diverged-parent")
+	child := testutil.CreateChildBead(t, beadsDir, "ff-diverged-child", parent)
+	bare := bareRepo(t, "main")
+
+	if err := dir.Worktree("", beadsDir, child, bare); err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+	parentEntries := listEntries(t, beadsDir, parent)
+	childEntries := listEntries(t, beadsDir, child)
+
+	// Both advance independently with different files so they produce distinct
+	// commit hashes and the branches genuinely diverge.
+	advanceBranchWithFile(t, parentEntries[0].Path, "parent-work.txt", "parent\n")
+	advanceBranchWithFile(t, childEntries[0].Path, "child-work.txt", "child\n")
+	childSHABefore := refSHA(t, childEntries[0].Path, "HEAD")
+
+	results, err := dir.FastForwardWorktrees("", beadsDir, child)
+	if err != nil {
+		t.Fatalf("FastForwardWorktrees: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("results=%+v want 1", results)
+	}
+	if results[0].Advanced {
+		t.Errorf("Advanced=true on diverged child, want false")
+	}
+	if !results[0].Skipped {
+		t.Errorf("Skipped=false on diverged child, want true")
+	}
+	if sha := refSHA(t, childEntries[0].Path, "HEAD"); sha != childSHABefore {
+		t.Errorf("child HEAD changed %q → %q; diverged branch must not be touched", childSHABefore, sha)
+	}
+}
+
+// advanceBranchWithFile commits a new/modified tracked file so that the
+// resulting commit changes the working tree (unlike --allow-empty).
+func advanceBranchWithFile(t *testing.T, wt, filename, content string) {
+	t.Helper()
+	envv := append(os.Environ(),
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com",
+	)
+	if err := os.WriteFile(filepath.Join(wt, filename), []byte(content), 0o644); err != nil {
+		t.Fatalf("write %s: %v", filename, err)
+	}
+	for _, args := range [][]string{{"add", filename}, {"commit", "-q", "-m", "advance with file"}} {
+		cmd := exec.Command("git", append([]string{"-C", wt}, args...)...)
+		cmd.Env = envv
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+}
+
+// TestFastForwardWorktreesDirty verifies that a worktree with an untracked
+// file that would be overwritten by the FF is left untouched.
+func TestFastForwardWorktreesDirty(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	parent := testutil.CreateBead(t, beadsDir, "ff-dirty-parent")
+	child := testutil.CreateChildBead(t, beadsDir, "ff-dirty-child", parent)
+	bare := bareRepo(t, "main")
+
+	if err := dir.Worktree("", beadsDir, child, bare); err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+	parentEntries := listEntries(t, beadsDir, parent)
+	childEntries := listEntries(t, beadsDir, child)
+
+	// Parent advances by adding shared.txt so the FF would create that file
+	// in the child's working tree.
+	advanceBranchWithFile(t, parentEntries[0].Path, "shared.txt", "parent version\n")
+
+	// Dirty the child with an untracked file at the same path — FF must be
+	// refused by git ("would be overwritten by merge").
+	if err := os.WriteFile(filepath.Join(childEntries[0].Path, "shared.txt"), []byte("local work\n"), 0o644); err != nil {
+		t.Fatalf("write dirty file: %v", err)
+	}
+	childSHABefore := refSHA(t, childEntries[0].Path, "HEAD")
+
+	results, err := dir.FastForwardWorktrees("", beadsDir, child)
+	if err != nil {
+		t.Fatalf("FastForwardWorktrees: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("results=%+v want 1", results)
+	}
+	if results[0].Advanced {
+		t.Errorf("Advanced=true on dirty worktree, want false")
+	}
+	if !results[0].Skipped {
+		t.Errorf("Skipped=false on dirty worktree, want true")
+	}
+	if sha := refSHA(t, childEntries[0].Path, "HEAD"); sha != childSHABefore {
+		t.Errorf("child HEAD changed; dirty worktree must not be touched")
+	}
+}
+
+// TestFastForwardWorktreesNoParentEntry verifies that when the parent bead has
+// no worktree for a given bare (e.g. the child was linked via WorktreeForBranch
+// without cascade), FastForwardWorktrees silently no-ops for that bare.
+func TestFastForwardWorktreesNoParentEntry(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	parent := testutil.CreateBead(t, beadsDir, "ff-noentry-parent")
+	child := testutil.CreateChildBead(t, beadsDir, "ff-noentry-child", parent)
+
+	// bare2: child is linked via WorktreeForBranch (no cascade), so parent
+	// gets no entry for bare2.
+	bare2 := bareRepo(t, "main")
+	gitInTest(t, bare2, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
+	source2 := sourceOf(bare2)
+	childBranch := "todo/" + child
+	gitInTest(t, source2, "checkout", "-q", "-b", childBranch)
+	gitInTest(t, source2, "commit", "--allow-empty", "-q", "-m", "branch on bare2")
+	gitInTest(t, source2, "checkout", "-q", "main")
+	if err := dir.WorktreeForBranch("", beadsDir, child, bare2, childBranch); err != nil {
+		t.Fatalf("WorktreeForBranch: %v", err)
+	}
+
+	childEntries := listEntries(t, beadsDir, child)
+	if len(childEntries) != 1 {
+		t.Fatalf("child entries=%+v want 1", childEntries)
+	}
+	childSHABefore := refSHA(t, childEntries[0].Path, "HEAD")
+
+	// Parent has no entry for bare2 → child worktree is silently skipped.
+	results, err := dir.FastForwardWorktrees("", beadsDir, child)
+	if err != nil {
+		t.Fatalf("FastForwardWorktrees: %v", err)
+	}
+	if len(results) != 0 {
+		t.Errorf("results=%+v want none (parent has no entry for bare2)", results)
+	}
+	if sha := refSHA(t, childEntries[0].Path, "HEAD"); sha != childSHABefore {
+		t.Errorf("child HEAD changed; must not be touched when parent has no entry")
+	}
+}

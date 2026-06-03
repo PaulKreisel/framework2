@@ -205,6 +205,58 @@ func WorktreeForBranch(db, beadsDir, ticketID, bareRepo, branch string) error {
 	})
 }
 
+// FFResult records the outcome of one fast-forward attempt for a worktree.
+type FFResult struct {
+	Path         string // absolute worktree path
+	ParentBranch string // parent bead's branch we tried to merge
+	Advanced     bool   // branch was moved to parent's tip
+	Skipped      bool   // FF not clean; caller should suggest manual rebase
+}
+
+// FastForwardWorktrees attempts a fast-forward-only merge of each of the
+// bead's worktrees onto the parent bead's branch tip in the same bare repo.
+// It is a no-op when the bead has no parent, when the parent has no worktree
+// for a given bare, or when the ambiguity rule (findEntryForBare) applies.
+// Only FFResults with Advanced=true or Skipped=true are returned; up-to-date
+// worktrees are omitted. The caller is responsible for logging.
+func FastForwardWorktrees(db, beadsDir, ticketID string) ([]FFResult, error) {
+	row, err := showTicket(db, beadsDir, ticketID)
+	if err != nil {
+		return nil, err
+	}
+	if row.Parent == "" {
+		return nil, nil
+	}
+	childEntries, err := load(db, beadsDir, ticketID)
+	if err != nil {
+		return nil, err
+	}
+	parentEntries, err := load(db, beadsDir, row.Parent)
+	if err != nil {
+		return nil, err
+	}
+	var results []FFResult
+	for _, ce := range childEntries {
+		if ce.BareRepo == "" {
+			continue
+		}
+		pe, ok, err := findEntryForBare(parentEntries, ce.BareRepo)
+		if err != nil || !ok {
+			continue
+		}
+		advanced, skipped := gitFastForwardOnto(ce.Path, pe.Branch)
+		if advanced || skipped {
+			results = append(results, FFResult{
+				Path:         ce.Path,
+				ParentBranch: pe.Branch,
+				Advanced:     advanced,
+				Skipped:      skipped,
+			})
+		}
+	}
+	return results, nil
+}
+
 // findEntryForBare returns the single worktree entry created off bare. It
 // reports ok=false when there is no such worktree. If more than one worktree
 // is linked to the same bare (e.g. several branches attached via

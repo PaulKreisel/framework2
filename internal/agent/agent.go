@@ -145,6 +145,22 @@ func RunWithOptions(db, beadsDir, ticketID string, mode Mode, opts RunOptions) e
 		}
 	}
 
+	// Fast-forward each worktree onto its parent bead's branch tip. Runs on
+	// both fresh starts and resumes; skipped for spec mode and root beads.
+	if mode != ModeSpec {
+		ffResults, ffErr := dir.FastForwardWorktrees(db, beadsDir, ticketID)
+		if ffErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: fast-forward worktrees: %v\n", ffErr)
+		}
+		for _, r := range ffResults {
+			if r.Advanced {
+				fmt.Fprintf(os.Stderr, "fast-forwarded %s to %s\n", r.Path, r.ParentBranch)
+			} else if r.Skipped {
+				fmt.Fprintf(os.Stderr, "note: %s not fast-forwarded onto %s — rebase manually\n", r.Path, r.ParentBranch)
+			}
+		}
+	}
+
 	sigPath := filepath.Join(envPath, SignalFile)
 	pidPath := filepath.Join(envPath, PIDFile)
 	// Drop any stale signal/pid file before starting; otherwise the very
