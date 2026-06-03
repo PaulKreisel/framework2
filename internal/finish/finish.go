@@ -5,7 +5,14 @@
 // (closes the bead, removes worktrees, deletes the env folder) and must
 // only fire on explicit user action.
 //
-// The flow is:
+// There are two paths. When a linked bare repo carries a finish-steps.yaml
+// whose selector matches, the step-driven path in steps.go takes over: it
+// creates a single `finish-step` child bead, runs that step's complete/check
+// commands, closes the step, and then runs the shared [cleanup] tail. When no
+// finish-steps.yaml is found, no selector matches, or `--continue` is passed,
+// the monolithic Go flow below runs unchanged.
+//
+// The Go flow is:
 //
 //  1. Pre-flight every worktree this ticket has linked. Refuse if any has
 //     uncommitted changes (the user should commit first with plain git)
@@ -57,6 +64,21 @@ func Run(db, beadsDir, ticketID string, continueMode bool, stdout io.Writer) err
 	}
 	worktrees := worktreeEntries(entries)
 
+	// Step-driven path: when a linked bare repo carries a finish-steps.yaml
+	// whose selector matches, a single step-bead drives the finish and the
+	// monolithic rebase/FF logic below is skipped. `--continue` always takes
+	// the Go path: it exists only to resume a rebase a prior Go finish paused,
+	// which the step path never produces. See internal/finish/steps.go.
+	if !continueMode {
+		handled, err := runStepBead(db, beadsDir, ticketID, worktrees, stdout)
+		if err != nil {
+			return err
+		}
+		if handled {
+			return nil
+		}
+	}
+
 	if err := preflight(worktrees, continueMode); err != nil {
 		return err
 	}
@@ -78,6 +100,15 @@ func Run(db, beadsDir, ticketID string, continueMode bool, stdout io.Writer) err
 		return err
 	}
 
+	return cleanup(db, beadsDir, ticketID, worktrees, stdout)
+}
+
+// cleanup runs the shared wrap-up tail that every finish path ends with,
+// regardless of how the merge was performed: close the bead, launch ready
+// follow-ups, remove each linked worktree, close the hosting terminal, and
+// delete the env folder. Both the Go fallback (after rebase/FF) and the
+// step-driven path (after the step-bead closes) funnel through here.
+func cleanup(db, beadsDir, ticketID string, worktrees []dir.Entry, stdout io.Writer) error {
 	if err := bdClose(db, beadsDir, ticketID); err != nil {
 		return err
 	}
