@@ -1150,6 +1150,9 @@ func TestCreateAllLinkCreateSkip(t *testing.T) {
 		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--abbrev-ref" {
 			return []byte("b-" + strings.TrimPrefix(repoByDir[d], "o/") + "\n"), nil
 		}
+		if len(args) >= 1 && args[0] == "fetch" {
+			return []byte(""), nil
+		}
 		if len(args) >= 2 && args[0] == "rev-list" && args[1] == "--count" {
 			return []byte("3\n"), nil
 		}
@@ -1189,6 +1192,131 @@ func TestCreateAllLinkCreateSkip(t *testing.T) {
 	}
 	if !strings.Contains(out, "multiple open PRs for o/many") {
 		t.Errorf("stdout missing o/many skip notice:\n%s", out)
+	}
+}
+
+func TestCreateErrorsWhenNoCommits(t *testing.T) {
+	beadsDir := testutil.TestDB(t)
+	id := testutil.CreateBead(t, beadsDir, "pr-create-no-commits")
+	mustLinkDir(t, beadsDir, id, t.TempDir())
+
+	ghMap := map[string]ghResp{
+		"repo view --json nameWithOwner": ghResp{Out: ghJSON(t, struct {
+			NameWithOwner string `json:"nameWithOwner"`
+		}{"o/r"})},
+		"repo view --json defaultBranchRef": ghResp{Out: ghJSON(t, struct {
+			DefaultBranchRef struct {
+				Name string `json:"name"`
+			} `json:"defaultBranchRef"`
+		}{struct {
+			Name string `json:"name"`
+		}{"main"}})},
+		// No open PR on the branch, so Create takes the create path…
+		"pr list": ghResp{Out: ghJSON(t, []struct {
+			Number int `json:"number"`
+		}{})},
+		// …but gh pr create must never be reached.
+		"pr create": ghResp{Err: makeExitErr("unexpected gh pr create")},
+	}
+	gitMap := map[string]ghResp{
+		"rev-parse": ghResp{Out: []byte("feat\n")},
+		"fetch":     ghResp{Out: []byte("")},
+		// Zero commits between the (default) base and HEAD.
+		"rev-list": ghResp{Out: []byte("0\n")},
+	}
+	installStubs(t, ghMap, gitMap)
+
+	var buf bytes.Buffer
+	err := pr.Create("", beadsDir, id, "", false, &buf)
+	if err == nil {
+		t.Fatal("Create succeeded with no commits, want error")
+	}
+	if !strings.Contains(err.Error(), "no commits") {
+		t.Errorf("error = %v, want 'no commits' substring", err)
+	}
+	recs, err := pr.Load("", beadsDir, id)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(recs) != 0 {
+		t.Errorf("recs = %+v, want none attached", recs)
+	}
+}
+
+// TestCreateAllSkipsDirsWithNoRemoteCommits reproduces the reported bug: the
+// dir looks ahead of its base locally (stale default branch) so eligibleDirs
+// keeps it, but the remote base already contains every commit. CreateAll must
+// skip it cleanly instead of letting gh pr create fail the whole run.
+func TestCreateAllSkipsDirsWithNoRemoteCommits(t *testing.T) {
+	beadsDir := testutil.TestDB(t)
+	id := testutil.CreateBead(t, beadsDir, "pr-create-all-no-commits")
+	mustLinkDir(t, beadsDir, id, t.TempDir())
+
+	stubMutex.Lock()
+	prevGH, prevGit := pr.ExecGH, pr.ExecGit
+	t.Cleanup(func() {
+		pr.ExecGH = prevGH
+		pr.ExecGit = prevGit
+		stubMutex.Unlock()
+	})
+	pr.ExecGH = func(d string, args ...string) ([]byte, error) {
+		if len(args) >= 2 && args[0] == "repo" && args[1] == "view" {
+			for _, a := range args {
+				if a == "nameWithOwner" {
+					return ghJSON(t, struct {
+						NameWithOwner string `json:"nameWithOwner"`
+					}{"o/r"}), nil
+				}
+				if a == "defaultBranchRef" {
+					return ghJSON(t, struct {
+						DefaultBranchRef struct {
+							Name string `json:"name"`
+						} `json:"defaultBranchRef"`
+					}{struct {
+						Name string `json:"name"`
+					}{"main"}}), nil
+				}
+			}
+		}
+		if len(args) >= 2 && args[0] == "pr" && args[1] == "list" {
+			return ghJSON(t, []struct {
+				Number int `json:"number"`
+			}{}), nil
+		}
+		// gh pr create must never be reached.
+		return nil, fmt.Errorf("test stub: unexpected gh call %v", args)
+	}
+	pr.ExecGit = func(d string, args ...string) ([]byte, error) {
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--abbrev-ref" {
+			return []byte("feat\n"), nil
+		}
+		if len(args) >= 1 && args[0] == "fetch" {
+			return []byte(""), nil
+		}
+		if len(args) >= 3 && args[0] == "rev-list" && args[1] == "--count" {
+			// Local base ref looks ahead (eligibility passes); the fetched
+			// remote base (FETCH_HEAD) has nothing new — the bug's condition.
+			if strings.Contains(args[2], "FETCH_HEAD") {
+				return []byte("0\n"), nil
+			}
+			return []byte("3\n"), nil
+		}
+		return nil, fmt.Errorf("test stub: unhandled git call %v", args)
+	}
+
+	var buf bytes.Buffer
+	if err := pr.CreateAll("", beadsDir, id, false, &buf); err != nil {
+		t.Fatalf("CreateAll: %v", err)
+	}
+	if !strings.Contains(buf.String(), "no commits to create a PR for, skipping") {
+		t.Errorf("stdout = %q, want no-commits skip notice", buf.String())
+	}
+	recs, err := pr.Load("", beadsDir, id)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(recs) != 0 {
+		t.Errorf("recs = %+v, want none attached", recs)
 	}
 }
 

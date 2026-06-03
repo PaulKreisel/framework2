@@ -171,6 +171,12 @@ func CreateAll(db, beadsDir, ticketID string, ready bool, stdout io.Writer) erro
 		}
 		fmt.Fprintf(stdout, "%s:\n", entry.Path)
 		if err := createForEntry(db, beadsDir, ticketID, entry, repo, branch, nums, existing, ready, stdout); err != nil {
+			// No commits ahead of base is an expected, non-fatal state for a
+			// bulk run (the dir simply isn't ready) — skip without failing.
+			if errors.Is(err, errNoCommits) {
+				fmt.Fprintf(stdout, "%s: no commits to create a PR for, skipping\n", entry.Path)
+				continue
+			}
 			fmt.Fprintf(stdout, "%s: error: %v\n", entry.Path, err)
 			failures = append(failures, entry.Path)
 		}
@@ -210,6 +216,17 @@ func createForEntry(db, beadsDir, ticketID string, entry dir.Entry, repo, branch
 	base, baseDir, isDefault, err := resolveBase(db, beadsDir, ticketID, entry)
 	if err != nil {
 		return err
+	}
+
+	// Refuse to create a PR with no commits — GitHub rejects "No commits
+	// between <base> and <head>" and we'd rather surface that cleanly than
+	// let the gh error leak through (and, for --all, abort the whole run).
+	ahead, err := commitsAheadOfBase(entry.Path, base, isDefault)
+	if err != nil {
+		return err
+	}
+	if ahead == 0 {
+		return fmt.Errorf("%w (%s..%s)", errNoCommits, base, branch)
 	}
 
 	// Push the current branch upstream (force-with-lease handles both the
@@ -412,6 +429,28 @@ func eligibleDirs(db, beadsDir, ticketID string, entries []dir.Entry) ([]dir.Ent
 		}
 	}
 	return out, nil
+}
+
+// errNoCommits marks the "PR base already contains every commit on HEAD" case.
+// createForEntry returns it (wrapped with the base/branch) so callers can tell
+// it apart: CreateAll skips the dir, single Create surfaces a clean message.
+var errNoCommits = errors.New("no commits to create a PR for")
+
+// commitsAheadOfBase counts the commits on dirPath's HEAD that the PR's base
+// does not already contain — the same emptiness GitHub checks before allowing
+// a PR. For the repo's default branch the authoritative base is the remote
+// tip, which can be ahead of a stale local ref, so we fetch it first. For an
+// ancestor (non-default) base the local branch ref is authoritative:
+// createForEntry force-pushes it as-is, so the remote ends up matching it.
+func commitsAheadOfBase(dirPath, base string, isDefault bool) (int, error) {
+	ref := base
+	if isDefault {
+		if _, err := ExecGit(dirPath, "fetch", "origin", base); err != nil {
+			return 0, err
+		}
+		ref = "FETCH_HEAD"
+	}
+	return commitsAhead(dirPath, ref)
 }
 
 // commitsAhead returns the number of commits in dirPath's HEAD that are not
