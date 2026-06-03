@@ -29,9 +29,10 @@ func TestFinishStepBeadHappyPath(t *testing.T) {
 	childWT := worktreePath(bare, child)
 	envPath := filepath.Join(beadsDir, "envs", child)
 
-	// complete records its cwd to a marker OUTSIDE the worktree (so the tree
-	// stays clean and removable); check fails unless that marker exists,
-	// proving complete ran first. We assert the recorded cwd is the worktree.
+	// The check (`test -f marker`) fails on its first run because the marker is
+	// absent, so `complete` runs and records its cwd into a marker OUTSIDE the
+	// worktree (so the tree stays clean and removable); the second check then
+	// finds the marker and passes. We assert the recorded cwd is the worktree.
 	marker := filepath.Join(t.TempDir(), "where.txt")
 	writeStepsYAML(t, bare, ""+
 		"- condition: \"true\"\n"+
@@ -427,8 +428,11 @@ func TestFinishStepResumeNoDuplicateBeads(t *testing.T) {
 	}
 }
 
-// TestFinishStepCompleteFailureSkipsCheck: a failing complete leaves the step
-// in-progress and does NOT run check; the ticket stays open.
+// TestFinishStepCompleteFailureSkipsCheck: when the first check fails, `complete`
+// runs; a failing `complete` then leaves the step in-progress and must NOT run a
+// second check. The check counts its invocations and always fails, so we can
+// assert it ran exactly once (the first check only — no second after the failed
+// complete). The ticket stays open.
 func TestFinishStepCompleteFailureSkipsCheck(t *testing.T) {
 	t.Parallel()
 	beadsDir := testutil.TestDB(t)
@@ -436,13 +440,13 @@ func TestFinishStepCompleteFailureSkipsCheck(t *testing.T) {
 	bare := bareRepo(t, "main")
 
 	mustRunTicket(t, beadsDir, "dir", "worktree", child, bare)
-	checkRan := filepath.Join(t.TempDir(), "check-ran.txt")
+	checkCount := filepath.Join(t.TempDir(), "check-count.txt")
 	writeStepsYAML(t, bare, ""+
 		"- condition: \"true\"\n"+
 		"  steps:\n"+
 		"    - title: bad complete\n"+
 		"      complete: \"echo boom-complete; exit 4\"\n"+
-		"      check: \"echo ran > "+checkRan+"\"\n")
+		"      check: \"echo x >> "+checkCount+"; exit 1\"\n")
 
 	_, stderr, code := testutil.RunTicketIn(t, beadsDir, "finish", child)
 	if code == 0 {
@@ -451,8 +455,8 @@ func TestFinishStepCompleteFailureSkipsCheck(t *testing.T) {
 	if !strings.Contains(stderr, "complete failed") || !strings.Contains(stderr, "boom-complete") {
 		t.Errorf("stderr=%q want to mention the failed complete and its output", stderr)
 	}
-	if _, err := os.Stat(checkRan); !os.IsNotExist(err) {
-		t.Errorf("check ran despite failed complete (%s exists)", checkRan)
+	if got := countLines(t, checkCount); got != 1 {
+		t.Errorf("check ran %d times, want 1 (first check only; no second check after failed complete)", got)
 	}
 	steps := childrenWithLabel(t, beadsDir, child, finish.StepLabel)
 	if len(steps) != 1 {
@@ -464,6 +468,169 @@ func TestFinishStepCompleteFailureSkipsCheck(t *testing.T) {
 	if got := beadStatus(t, beadsDir, child); got != "open" {
 		t.Errorf("ticket status=%q want still open after failed complete", got)
 	}
+}
+
+// TestFinishStepFirstCheckPassesSkipsComplete: when the first check passes on
+// launch the work is already done, so `complete` never runs and the step closes
+// immediately.
+func TestFinishStepFirstCheckPassesSkipsComplete(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	child := testutil.CreateBead(t, beadsDir, "step-firstpass-child")
+	bare := bareRepo(t, "main")
+
+	mustRunTicket(t, beadsDir, "dir", "worktree", child, bare)
+	completeRan := filepath.Join(t.TempDir(), "complete-ran.txt")
+	writeStepsYAML(t, bare, ""+
+		"- condition: \"true\"\n"+
+		"  steps:\n"+
+		"    - title: already done\n"+
+		"      complete: \"touch "+completeRan+"\"\n"+
+		"      check: \"true\"\n")
+
+	if _, stderr, code := testutil.RunTicketIn(t, beadsDir, "finish", child); code != 0 {
+		t.Fatalf("finish exit=%d stderr=%q (first check passes, should close)", code, stderr)
+	}
+	if _, err := os.Stat(completeRan); !os.IsNotExist(err) {
+		t.Errorf("complete ran even though the first check passed (%s exists)", completeRan)
+	}
+	steps := childrenWithLabel(t, beadsDir, child, finish.StepLabel)
+	if len(steps) != 1 {
+		t.Fatalf("expected one step-bead, got %v", steps)
+	}
+	if got := beadStatus(t, beadsDir, steps[0]); got != "closed" {
+		t.Errorf("step status=%q want closed", got)
+	}
+	if got := beadStatus(t, beadsDir, child); got != "closed" {
+		t.Errorf("ticket status=%q want closed", got)
+	}
+}
+
+// TestFinishStepCompleteThenSecondCheckPasses: the first check fails, so
+// `complete` runs and satisfies the goal, and the SECOND check passes — the step
+// closes within the same launch wave.
+func TestFinishStepCompleteThenSecondCheckPasses(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	child := testutil.CreateBead(t, beadsDir, "step-secondpass-child")
+	bare := bareRepo(t, "main")
+
+	mustRunTicket(t, beadsDir, "dir", "worktree", child, bare)
+	// The check passes only once `complete` has created the marker: the first
+	// check fails (marker absent) → complete touches it → second check passes.
+	marker := filepath.Join(t.TempDir(), "done.txt")
+	writeStepsYAML(t, bare, ""+
+		"- condition: \"true\"\n"+
+		"  steps:\n"+
+		"    - title: do work\n"+
+		"      complete: \"touch "+marker+"\"\n"+
+		"      check: \"test -f "+marker+"\"\n")
+
+	if _, stderr, code := testutil.RunTicketIn(t, beadsDir, "finish", child); code != 0 {
+		t.Fatalf("finish exit=%d stderr=%q (complete + second check should close)", code, stderr)
+	}
+	steps := childrenWithLabel(t, beadsDir, child, finish.StepLabel)
+	if len(steps) != 1 {
+		t.Fatalf("expected one step-bead, got %v", steps)
+	}
+	if got := beadStatus(t, beadsDir, steps[0]); got != "closed" {
+		t.Errorf("step status=%q want closed after complete + second check", got)
+	}
+	if got := beadStatus(t, beadsDir, child); got != "closed" {
+		t.Errorf("ticket status=%q want closed", got)
+	}
+}
+
+// TestFinishStepCompleteThenSecondCheckFails: the first check fails, `complete`
+// succeeds, but the SECOND check still fails — the step stays in-progress.
+// `complete` runs exactly once (only after the first failed check) and the check
+// runs exactly twice (before and after complete).
+func TestFinishStepCompleteThenSecondCheckFails(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	child := testutil.CreateBead(t, beadsDir, "step-secondfail-child")
+	bare := bareRepo(t, "main")
+
+	mustRunTicket(t, beadsDir, "dir", "worktree", child, bare)
+	completeCount := filepath.Join(t.TempDir(), "complete-count.txt")
+	checkCount := filepath.Join(t.TempDir(), "check-count.txt")
+	writeStepsYAML(t, bare, ""+
+		"- condition: \"true\"\n"+
+		"  steps:\n"+
+		"    - title: never satisfied\n"+
+		"      complete: \"echo x >> "+completeCount+"\"\n"+
+		"      check: \"echo x >> "+checkCount+"; exit 1\"\n")
+
+	_, stderr, code := testutil.RunTicketIn(t, beadsDir, "finish", child)
+	if code == 0 {
+		t.Fatal("finish succeeded despite a check that never passes, want error")
+	}
+	if !strings.Contains(stderr, "check failed") {
+		t.Errorf("stderr=%q want to mention the failed check", stderr)
+	}
+	if got := countLines(t, completeCount); got != 1 {
+		t.Errorf("complete ran %d times, want 1 (only after the first failed check)", got)
+	}
+	if got := countLines(t, checkCount); got != 2 {
+		t.Errorf("check ran %d times, want 2 (before and after complete)", got)
+	}
+	steps := childrenWithLabel(t, beadsDir, child, finish.StepLabel)
+	if len(steps) != 1 {
+		t.Fatalf("expected one step-bead, got %v", steps)
+	}
+	if got := beadStatus(t, beadsDir, steps[0]); got != "in_progress" {
+		t.Errorf("step status=%q want in_progress", got)
+	}
+	if got := beadStatus(t, beadsDir, child); got != "open" {
+		t.Errorf("ticket status=%q want open", got)
+	}
+}
+
+// TestFinishStepCompleteRerunsOnNextCall: `complete` runs at most once per
+// `this finish` call, but a later call repeats the full check → complete → check
+// flow — so `complete` runs AGAIN whenever that call's first check still fails.
+// Here the check passes only once `complete` has run twice (once per call), so
+// the step needs two finish calls and `complete` must fire on both.
+func TestFinishStepCompleteRerunsOnNextCall(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	child := testutil.CreateBead(t, beadsDir, "step-recomplete-child")
+	bare := bareRepo(t, "main")
+
+	mustRunTicket(t, beadsDir, "dir", "worktree", child, bare)
+	completeCount := filepath.Join(t.TempDir(), "complete-count.txt")
+	// complete appends a line each run; check passes only once it has ≥2 lines.
+	check := fmt.Sprintf("'[ -f %s ] && [ $(wc -l < %s) -ge 2 ]'", completeCount, completeCount)
+	writeStepsYAML(t, bare, ""+
+		"- condition: \"true\"\n"+
+		"  steps:\n"+
+		"    - title: needs two completes\n"+
+		"      complete: \"echo x >> "+completeCount+"\"\n"+
+		"      check: "+check+"\n")
+
+	// --- Call 1: check fails → complete (count=1) → check still fails → in-progress.
+	_, stderr, code := testutil.RunTicketIn(t, beadsDir, "finish", child)
+	if code == 0 {
+		t.Fatalf("first finish should exit non-zero (check not yet satisfied); stderr=%q", stderr)
+	}
+	if got := countLines(t, completeCount); got != 1 {
+		t.Fatalf("complete ran %d times in the first call, want 1", got)
+	}
+	steps := childrenWithLabel(t, beadsDir, child, finish.StepLabel)
+	if len(steps) != 1 {
+		t.Fatalf("expected one step-bead, got %v", steps)
+	}
+	assertStatus(t, beadsDir, steps[0], "in_progress")
+
+	// --- Call 2: complete runs AGAIN (count=2) → second check passes → closes.
+	if _, stderr, code := testutil.RunTicketIn(t, beadsDir, "finish", child); code != 0 {
+		t.Fatalf("second finish exit=%d stderr=%q (should close)", code, stderr)
+	}
+	if got := countLines(t, completeCount); got != 2 {
+		t.Errorf("complete ran %d times total, want 2 (it must re-run on the second call)", got)
+	}
+	assertStatus(t, beadsDir, steps[0], "closed")
+	assertStatus(t, beadsDir, child, "closed")
 }
 
 // TestFinishStepInvalidYAMLAborts: a malformed finish-steps.yaml (a step
@@ -853,6 +1020,25 @@ func resolve(t *testing.T, p string) string {
 		rest = filepath.Join(filepath.Base(d), rest)
 		d = parent
 	}
+}
+
+// countLines returns the number of lines a counting command appended to path,
+// or 0 if the file does not exist. Used to assert how many times a check or
+// complete command ran across a finish wave.
+func countLines(t *testing.T, path string) int {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0
+		}
+		t.Fatalf("read %s: %v", path, err)
+	}
+	s := strings.TrimSpace(string(raw))
+	if s == "" {
+		return 0
+	}
+	return len(strings.Split(s, "\n"))
 }
 
 func writeStepsYAML(t *testing.T, bare, body string) {

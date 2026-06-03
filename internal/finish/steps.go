@@ -56,7 +56,7 @@ const (
 //	        - title: tests
 //	          check: gh pr checks ... | grep tests
 //	    - title: PR 2                            # leaf step
-//	      complete: gh pr create ...             # optional; run on launch
+//	      complete: gh pr create ...             # optional; run only if check not already satisfied
 //	      check: gh pr view ... | grep -q MERGED # required on a leaf
 //	      blocked_by: [PR 1]                     # optional; sibling titles
 //	- condition: "true"                          # fallback set
@@ -79,8 +79,10 @@ type StepSet struct {
 // as the key its siblings reference in their `blocked_by`. A step is one of two
 // kinds:
 //
-//   - leaf: carries `check` (required) and optional `complete`. These commands
-//     run during the finish; a passing `check` closes the step.
+//   - leaf: carries `check` (required) and optional `complete`. During the
+//     finish `check` runs first; a passing `check` closes the step. `complete`
+//     runs only if that first check fails — i.e. only when the step's goal is
+//     not already satisfied — so it need not re-check that work itself.
 //   - parent: carries a nested `steps` list and no `check`/`complete` of its
 //     own. It closes automatically once all of its children close.
 //
@@ -221,9 +223,11 @@ func detectCycle(steps []Step) error {
 //     blocked_by edges recorded as bd `blocks` dependencies. No match anywhere
 //     means handled=false and the caller runs the Go fallback.
 //  3. Advance the graph: launch every not-yet-started leaf step whose blockers
-//     are all closed and whose parent group has started (set in-progress, run
-//     `complete`, then `check`); re-run `check` for every in-progress leaf. A
-//     passing check closes the step and cascades to any step it just unblocked.
+//     are all closed and whose parent group has started, and run the
+//     check → (complete) → check flow for every runnable leaf — just-launched
+//     and already in-progress alike: `check` runs, and only if it fails does
+//     `complete` then a second `check` run. A passing check closes the step and
+//     cascades to any step it just unblocked.
 //     A parent (group) step launches like a leaf but runs no commands; it
 //     closes automatically once all of its children close, which can cascade
 //     further up the tree within the same call.
@@ -358,16 +362,14 @@ func advanceSteps(db, beadsDir, ticketID string, beads []*stepBead, stdout io.Wr
 
 		// Launch phase (serialised bd writes): flip every open step in the wave to
 		// in_progress before any check is awaited, so siblings unblocked at the
-		// same time all start together. Only steps launched this wave run
-		// `complete`; previously in_progress steps just re-check.
-		justLaunched := make([]bool, len(wave))
-		for i, b := range wave {
+		// same time all start together. Both just-launched and already-in_progress
+		// leaves then run the same check → (complete) → check flow below.
+		for _, b := range wave {
 			if b.Status == "open" {
 				if err := bdUpdateStatus(db, beadsDir, b.ID, "in_progress"); err != nil {
 					return err
 				}
 				b.Status = "in_progress"
-				justLaunched[i] = true
 				fmt.Fprintf(stdout, "finish-step %s (%s): launched\n", b.ID, b.Title)
 			}
 		}
@@ -383,7 +385,7 @@ func advanceSteps(db, beadsDir, ticketID string, beads []*stepBead, stdout io.Wr
 				defer wg.Done()
 				sem <- struct{}{}
 				defer func() { <-sem }()
-				outcomes[i] = runStepShell(b, justLaunched[i], ticketID)
+				outcomes[i] = runStepShell(b, ticketID)
 			}(i, b)
 		}
 		wg.Wait()
@@ -457,23 +459,38 @@ func advanceGroups(db, beadsDir string, all []*stepBead, byID map[string]*stepBe
 // wave, gathered off the bd-write path so advanceSteps' serialised apply phase
 // can act on it.
 type stepOutcome struct {
-	completeFailed bool        // `complete` ran and exited non-zero (check skipped)
+	completeFailed bool        // `complete` ran (after a failed first check) and exited non-zero (second check skipped)
 	completeRes    shellResult // valid when completeFailed
-	checkRes       shellResult // valid unless completeFailed
+	checkRes       shellResult // the check the apply phase acts on (the first check, or the second when complete ran); ignored when completeFailed
 }
 
-// runStepShell runs one step's shell work for a wave: a just-launched step with
-// a `complete` command runs it first and, on failure, skips the check (so a
-// launched-but-unfulfilled step is re-checked next call); otherwise it runs the
-// check. It performs no bd writes, so it is safe to call concurrently.
-func runStepShell(b *stepBead, justLaunched bool, ticketID string) stepOutcome {
+// runStepShell runs one step's shell work for a wave as check → (complete) →
+// check: it always runs `check` first. If that passes the step is done and
+// `complete` never runs (so `complete` need not self-guard — it is only ever
+// invoked because the check just proved the desired state does not yet hold).
+// If the first check fails and the leaf carries a `complete` command, it runs
+// `complete`; on failure it skips the second check (the step stays in-progress),
+// and on success it runs `check` a single second time. A leaf with no `complete`
+// runs only the single first check.
+//
+// This same check → (complete) → check flow runs afresh on every `this finish`
+// call, so `complete` runs at most once per call but is re-attempted on a later
+// call whenever that call's first check still fails — the desired state may have
+// regressed since, so each call independently re-establishes it. It performs no
+// bd writes, so it is safe to call concurrently.
+func runStepShell(b *stepBead, ticketID string) stepOutcome {
 	var o stepOutcome
-	if justLaunched && b.Complete != "" {
-		o.completeRes = runShell(b.Complete, b.Workdir, stepEnv(ticketID, b.ID)...)
-		if o.completeRes.exit != 0 {
-			o.completeFailed = true
-			return o
-		}
+	o.checkRes = runShell(b.Check, b.Workdir, stepEnv(ticketID, b.ID)...)
+	if o.checkRes.exit == 0 {
+		return o // first check passed — work already done, `complete` not needed
+	}
+	if b.Complete == "" {
+		return o // re-check only (leaf without `complete`)
+	}
+	o.completeRes = runShell(b.Complete, b.Workdir, stepEnv(ticketID, b.ID)...)
+	if o.completeRes.exit != 0 {
+		o.completeFailed = true
+		return o
 	}
 	o.checkRes = runShell(b.Check, b.Workdir, stepEnv(ticketID, b.ID)...)
 	return o
