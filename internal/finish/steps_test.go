@@ -387,6 +387,46 @@ func TestFinishStepCheckFailureLeavesStepInProgress(t *testing.T) {
 	}
 }
 
+// TestFinishStepResumeNoDuplicateBeads: a step whose check keeps failing leaves
+// the step-bead in-progress; a second `this finish` must resume the existing
+// step rather than create a fresh set of step-beads. Guards the resume path
+// (runStepBead reads existing finish-step children before materialising any).
+func TestFinishStepResumeNoDuplicateBeads(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	child := testutil.CreateBead(t, beadsDir, "step-resume-child")
+	bare := bareRepo(t, "main")
+
+	mustRunTicket(t, beadsDir, "dir", "worktree", child, bare)
+	writeStepsYAML(t, bare, ""+
+		"- condition: \"true\"\n"+
+		"  steps:\n"+
+		"    - title: failing check\n"+
+		"      check: \"exit 7\"\n")
+
+	if _, _, code := testutil.RunTicketIn(t, beadsDir, "finish", child); code == 0 {
+		t.Fatal("first finish succeeded despite failing check, want error")
+	}
+	first := childrenWithLabel(t, beadsDir, child, finish.StepLabel)
+	if len(first) != 1 {
+		t.Fatalf("expected one finish-step child after first call, got %v", first)
+	}
+
+	if _, _, code := testutil.RunTicketIn(t, beadsDir, "finish", child); code == 0 {
+		t.Fatal("second finish succeeded despite failing check, want error")
+	}
+	second := childrenWithLabel(t, beadsDir, child, finish.StepLabel)
+	if len(second) != 1 {
+		t.Fatalf("second finish created duplicate step-beads: %v (want the same single bead %v)", second, first)
+	}
+	if second[0] != first[0] {
+		t.Errorf("resumed step-bead id changed: first=%s second=%s", first[0], second[0])
+	}
+	if got := beadStatus(t, beadsDir, second[0]); got != "in_progress" {
+		t.Errorf("resumed step-bead status=%q want in_progress", got)
+	}
+}
+
 // TestFinishStepCompleteFailureSkipsCheck: a failing complete leaves the step
 // in-progress and does NOT run check; the ticket stays open.
 func TestFinishStepCompleteFailureSkipsCheck(t *testing.T) {

@@ -119,6 +119,29 @@ func TestEnvConflictingIDForms(t *testing.T) {
 	}
 }
 
+// TestCreateRefusesFinishStepBead: a bead carrying the finish-step label is
+// step-bead bookkeeping, not a ticket; Create must refuse it and leave no
+// env folder behind.
+func TestCreateRefusesFinishStepBead(t *testing.T) {
+	beadsDir := testutil.SharedBdDB(t)
+	ticket := createBead(t, "env-step-bead")
+	if out, err := exec.Command("bd", "label", "add", ticket, "finish-step").CombinedOutput(); err != nil {
+		t.Fatalf("bd label add: %v: %s", err, out)
+	}
+
+	_, err := env.Create("", beadsDir, ticket)
+	if err == nil {
+		t.Fatal("Create succeeded on a finish-step bead, want refusal")
+	}
+	if !strings.Contains(err.Error(), "finish-step") {
+		t.Errorf("error = %v, want it to mention finish-step", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(beadsDir, "envs", ticket)); statErr == nil {
+		t.Error("env directory created despite finish-step refusal")
+		t.Cleanup(func() { _ = os.RemoveAll(filepath.Join(beadsDir, "envs", ticket)) })
+	}
+}
+
 func assertMarker(t *testing.T, envPath, ticket string) {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join(envPath, env.MarkerFile))
