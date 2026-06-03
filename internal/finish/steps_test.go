@@ -616,6 +616,199 @@ func TestFinishStepGlobalNoWorktree(t *testing.T) {
 	assertRanIn(t, marker, envPath)
 }
 
+// TestFinishStepNestedParentClosesAfterChildren is the headline acceptance test
+// for this ticket: a parent (group) step with two leaf children only closes
+// once BOTH children close, and the ticket only closes once the top-level group
+// closes. The children fail their check the first time and pass the second, so
+// the run spans two `this finish` calls — proving the parent stays open while
+// any child is still open.
+func TestFinishStepNestedParentClosesAfterChildren(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	child := testutil.CreateBead(t, beadsDir, "step-nested-child")
+	bare := bareRepo(t, "main")
+
+	mustRunTicket(t, beadsDir, "dir", "worktree", child, bare)
+	childWT := worktreePath(bare, child)
+	envPath := filepath.Join(beadsDir, "envs", child)
+
+	m1 := filepath.Join(t.TempDir(), "c1")
+	m2 := filepath.Join(t.TempDir(), "c2")
+	writeStepsYAML(t, bare, ""+
+		"- condition: \"true\"\n"+
+		"  steps:\n"+
+		"    - title: PR\n"+
+		"      steps:\n"+
+		"        - title: lint\n"+
+		"          check: "+failFirst(m1)+"\n"+
+		"        - title: tests\n"+
+		"          check: "+failFirst(m2)+"\n")
+
+	// --- First call: the group launches, both children launch and their checks
+	// fail → in-progress. The group must NOT close (children still open).
+	_, stderr, code := testutil.RunTicketIn(t, beadsDir, "finish", child)
+	if code == 0 {
+		t.Fatalf("first finish should exit non-zero (children pending); stderr=%q", stderr)
+	}
+	top := childrenWithLabel(t, beadsDir, child, finish.StepLabel)
+	if len(top) != 1 {
+		t.Fatalf("expected exactly one top-level step (the group), got %v", top)
+	}
+	parentID := top[0]
+	assertStatus(t, beadsDir, parentID, "in_progress")
+	kids := stepsByTitle(t, beadsDir, parentID)
+	if len(kids) != 2 {
+		t.Fatalf("expected two child steps under the group, got %v", kids)
+	}
+	assertStatus(t, beadsDir, kids["lint"], "in_progress")
+	assertStatus(t, beadsDir, kids["tests"], "in_progress")
+	assertStatus(t, beadsDir, child, "open")
+	if _, err := os.Stat(childWT); err != nil {
+		t.Errorf("worktree removed before the group closed: %v", err)
+	}
+
+	// --- Second call: both children pass → close, which closes the group, which
+	// closes the ticket, then cleanup runs.
+	if _, stderr, code := testutil.RunTicketIn(t, beadsDir, "finish", child); code != 0 {
+		t.Fatalf("second finish exit=%d stderr=%q (expected success)", code, stderr)
+	}
+	assertStatus(t, beadsDir, kids["lint"], "closed")
+	assertStatus(t, beadsDir, kids["tests"], "closed")
+	assertStatus(t, beadsDir, parentID, "closed")
+	assertStatus(t, beadsDir, child, "closed")
+	if _, err := os.Stat(childWT); !os.IsNotExist(err) {
+		t.Errorf("worktree %s still present after full cleanup (err=%v)", childWT, err)
+	}
+	if _, err := os.Stat(envPath); !os.IsNotExist(err) {
+		t.Errorf("env folder %s still present after full cleanup (err=%v)", envPath, err)
+	}
+}
+
+// TestFinishStepNestedSiblingBlocking verifies blocked_by is honoured between
+// siblings INSIDE a group: under one parent, step `b` is blocked_by `a`. `a`
+// fails its first check, so `b` must stay blocked (open) — it only launches
+// after `a` closes on the next call. Mirrors the flat three-step graph, nested.
+func TestFinishStepNestedSiblingBlocking(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	child := testutil.CreateBead(t, beadsDir, "step-nested-block-child")
+	bare := bareRepo(t, "main")
+
+	mustRunTicket(t, beadsDir, "dir", "worktree", child, bare)
+	mA := filepath.Join(t.TempDir(), "a")
+	mB := filepath.Join(t.TempDir(), "b")
+	writeStepsYAML(t, bare, ""+
+		"- condition: \"true\"\n"+
+		"  steps:\n"+
+		"    - title: group\n"+
+		"      steps:\n"+
+		"        - title: a\n"+
+		"          check: "+failFirst(mA)+"\n"+
+		"        - title: b\n"+
+		"          check: "+failFirst(mB)+"\n"+
+		"          blocked_by: [a]\n")
+
+	// --- Call 1: a launches and fails (in-progress); b stays blocked (open).
+	_, stderr, code := testutil.RunTicketIn(t, beadsDir, "finish", child)
+	if code == 0 {
+		t.Fatalf("first finish should exit non-zero; stderr=%q", stderr)
+	}
+	parentID := childrenWithLabel(t, beadsDir, child, finish.StepLabel)[0]
+	kids := stepsByTitle(t, beadsDir, parentID)
+	assertStatus(t, beadsDir, kids["a"], "in_progress")
+	assertStatus(t, beadsDir, kids["b"], "open") // blocked: a not closed yet
+	assertStatus(t, beadsDir, parentID, "in_progress")
+
+	// --- Call 2: a passes → closes, which unblocks b; b launches and fails.
+	_, stderr, code = testutil.RunTicketIn(t, beadsDir, "finish", child)
+	if code == 0 {
+		t.Fatalf("second finish should exit non-zero (b pending); stderr=%q", stderr)
+	}
+	assertStatus(t, beadsDir, kids["a"], "closed")
+	assertStatus(t, beadsDir, kids["b"], "in_progress")
+	assertStatus(t, beadsDir, parentID, "in_progress")
+
+	// --- Call 3: b passes → group closes → ticket closes.
+	if _, stderr, code := testutil.RunTicketIn(t, beadsDir, "finish", child); code != 0 {
+		t.Fatalf("third finish exit=%d stderr=%q", code, stderr)
+	}
+	assertStatus(t, beadsDir, kids["b"], "closed")
+	assertStatus(t, beadsDir, parentID, "closed")
+	assertStatus(t, beadsDir, child, "closed")
+}
+
+// TestFinishStepDeepNestingCascades exercises unbounded depth: a three-level
+// chain (L1 → L2 → L3) whose single leaf check passes immediately closes the
+// whole tree — and the ticket — in one call.
+func TestFinishStepDeepNestingCascades(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	child := testutil.CreateBead(t, beadsDir, "step-deep-child")
+	bare := bareRepo(t, "main")
+
+	mustRunTicket(t, beadsDir, "dir", "worktree", child, bare)
+	writeStepsYAML(t, bare, ""+
+		"- condition: \"true\"\n"+
+		"  steps:\n"+
+		"    - title: L1\n"+
+		"      steps:\n"+
+		"        - title: L2\n"+
+		"          steps:\n"+
+		"            - title: L3\n"+
+		"              check: \"true\"\n")
+
+	if _, stderr, code := testutil.RunTicketIn(t, beadsDir, "finish", child); code != 0 {
+		t.Fatalf("finish exit=%d stderr=%q (deep chain should complete in one call)", code, stderr)
+	}
+	l1 := childrenWithLabel(t, beadsDir, child, finish.StepLabel)
+	if len(l1) != 1 {
+		t.Fatalf("expected one top-level step, got %v", l1)
+	}
+	l2 := childrenWithLabel(t, beadsDir, l1[0], finish.StepLabel)
+	if len(l2) != 1 {
+		t.Fatalf("expected one L2 step, got %v", l2)
+	}
+	l3 := childrenWithLabel(t, beadsDir, l2[0], finish.StepLabel)
+	if len(l3) != 1 {
+		t.Fatalf("expected one L3 step, got %v", l3)
+	}
+	assertStatus(t, beadsDir, l3[0], "closed")
+	assertStatus(t, beadsDir, l2[0], "closed")
+	assertStatus(t, beadsDir, l1[0], "closed")
+	assertStatus(t, beadsDir, child, "closed")
+}
+
+// TestFinishStepParentWithCheckAborts: a parent step (one carrying nested
+// `steps`) must not also declare its own `check`/`complete` — that's a config
+// error caught at load time.
+func TestFinishStepParentWithCheckAborts(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	child := testutil.CreateBead(t, beadsDir, "step-parentcheck-child")
+	bare := bareRepo(t, "main")
+
+	mustRunTicket(t, beadsDir, "dir", "worktree", child, bare)
+	writeStepsYAML(t, bare, ""+
+		"- condition: \"true\"\n"+
+		"  steps:\n"+
+		"    - title: group\n"+
+		"      check: \"true\"\n"+
+		"      steps:\n"+
+		"        - title: leaf\n"+
+		"          check: \"true\"\n")
+
+	_, stderr, code := testutil.RunTicketIn(t, beadsDir, "finish", child)
+	if code == 0 {
+		t.Fatal("finish succeeded with a parent step that has its own check, want error")
+	}
+	if !strings.Contains(stderr, "nested") || !strings.Contains(stderr, "check") {
+		t.Errorf("stderr=%q want to flag the parent step carrying its own check", stderr)
+	}
+	if steps := childrenWithLabel(t, beadsDir, child, finish.StepLabel); len(steps) != 0 {
+		t.Errorf("expected no step-beads created on config error, got %v", steps)
+	}
+}
+
 // --- helpers ---
 
 // failFirst is a check command that fails (exit 1) the first time it runs —

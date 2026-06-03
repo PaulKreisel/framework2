@@ -41,40 +41,57 @@ const (
 )
 
 // StepSet is one selectable group of steps in finish-steps.yaml. The whole
-// file is YAML: a list of step-sets, each gating a list of steps. For example:
+// file is YAML: a list of step-sets, each gating a list of steps. Steps may
+// nest: a step that carries a `steps:` list is a parent (a group) that closes
+// once all its children close, rather than running commands of its own. For
+// example:
 //
 //	# finish-steps.yaml
 //	- condition: acli jira is-linked $BEAD_ID    # gate; first exit-0 wins
 //	  steps:
-//	    - title: Create PR                       # required; blocked_by key
+//	    - title: PR 1                            # parent step (a group)
+//	      steps:
+//	        - title: lint                        # leaf; runs check
+//	          check: gh pr checks ... | grep lint
+//	        - title: tests
+//	          check: gh pr checks ... | grep tests
+//	    - title: PR 2                            # leaf step
 //	      complete: gh pr create ...             # optional; run on launch
-//	      check: gh pr view ... | grep -q OPEN   # required; exit 0 closes
-//	    - title: Merge PR
-//	      complete: gh pr merge ...
-//	      check: gh pr view ... | grep -q MERGED
-//	      blocked_by: [Create PR]                # optional; titles in this set
+//	      check: gh pr view ... | grep -q MERGED # required on a leaf
+//	      blocked_by: [PR 1]                     # optional; sibling titles
 //	- condition: "true"                          # fallback set
 //	  steps:
 //	    - title: ...
 //	      check: ...
 //
 // Conditions are evaluated top to bottom; the first whose `condition` command
-// exits 0 selects that set. Every step in the selected set becomes a
-// `finish-step` child bead of the ticket; `blocked_by` edges become bd
-// `blocks` dependencies between those beads.
+// exits 0 selects that set. Every step (parent or leaf) in the selected set
+// becomes a `finish-step` bead: top-level steps are children of the ticket,
+// nested steps are children of their parent step-bead, so the bead tree mirrors
+// the YAML. `blocked_by` edges become bd `blocks` dependencies between sibling
+// beads. Nesting is unbounded.
 type StepSet struct {
 	Condition string `yaml:"condition"`
 	Steps     []Step `yaml:"steps"`
 }
 
-// Step is one entry in a [StepSet]. `title` and `check` are required;
-// `complete` and `blocked_by` are optional. `title` doubles as the key other
-// steps reference in their `blocked_by`.
+// Step is one entry in a [StepSet]. Every step needs a `title`, which doubles
+// as the key its siblings reference in their `blocked_by`. A step is one of two
+// kinds:
+//
+//   - leaf: carries `check` (required) and optional `complete`. These commands
+//     run during the finish; a passing `check` closes the step.
+//   - parent: carries a nested `steps` list and no `check`/`complete` of its
+//     own. It closes automatically once all of its children close.
+//
+// `blocked_by` (optional, both kinds) lists sibling titles — steps in the same
+// group that must close before this one starts.
 type Step struct {
 	Title     string   `yaml:"title"`
 	Complete  string   `yaml:"complete"`
 	Check     string   `yaml:"check"`
 	BlockedBy []string `yaml:"blocked_by"`
+	Steps     []Step   `yaml:"steps"`
 }
 
 // LoadStepSets reads <dir>/finish-steps.yaml and returns its step-sets. A
@@ -104,10 +121,8 @@ func LoadStepSets(configDir string) ([]StepSet, error) {
 }
 
 // validateStepSet enforces the per-set invariants the engine relies on: a
-// non-empty condition, at least one step, required title/check on every step,
-// unique titles, blocked_by edges that reference titles in the same set, and
-// no cycle in the blocking graph (a cycle would deadlock the advance — no step
-// would ever become unblocked).
+// non-empty condition, at least one step, and a valid step tree (see
+// [validateSteps]).
 func validateStepSet(set StepSet) error {
 	if set.Condition == "" {
 		return errors.New("missing `condition`")
@@ -115,27 +130,47 @@ func validateStepSet(set StepSet) error {
 	if len(set.Steps) == 0 {
 		return errors.New("has no `steps`")
 	}
-	titles := make(map[string]bool, len(set.Steps))
-	for i, s := range set.Steps {
+	return validateSteps(set.Steps)
+}
+
+// validateSteps validates one sibling group and recurses into every nested
+// group, enforcing: a `title` on each step; the leaf-vs-parent rule (a step
+// with nested `steps` is a parent and must carry no `check`/`complete` of its
+// own, while a leaf must carry a `check`); titles unique within the group;
+// blocked_by edges that reference titles in the SAME group (sibling-scoped); and
+// no cycle in that group's blocking graph (a cycle would deadlock the advance —
+// no step would ever become unblocked). Nesting is unbounded.
+func validateSteps(steps []Step) error {
+	titles := make(map[string]bool, len(steps))
+	for i, s := range steps {
 		if s.Title == "" {
 			return fmt.Errorf("step %d is missing `title`", i)
-		}
-		if s.Check == "" {
-			return fmt.Errorf("step %q is missing `check`", s.Title)
 		}
 		if titles[s.Title] {
 			return fmt.Errorf("duplicate step title %q", s.Title)
 		}
 		titles[s.Title] = true
+		if len(s.Steps) > 0 {
+			// Parent step: it closes when its children close, so it must not
+			// carry commands of its own.
+			if s.Check != "" || s.Complete != "" {
+				return fmt.Errorf("step %q has nested `steps` and so must not have its own `check`/`complete`", s.Title)
+			}
+			if err := validateSteps(s.Steps); err != nil {
+				return err
+			}
+		} else if s.Check == "" {
+			return fmt.Errorf("step %q is missing `check`", s.Title)
+		}
 	}
-	for _, s := range set.Steps {
+	for _, s := range steps {
 		for _, b := range s.BlockedBy {
 			if !titles[b] {
-				return fmt.Errorf("step %q is blocked_by %q, which is not a step in this set", s.Title, b)
+				return fmt.Errorf("step %q is blocked_by %q, which is not a step in this group", s.Title, b)
 			}
 		}
 	}
-	return detectCycle(set.Steps)
+	return detectCycle(steps)
 }
 
 // detectCycle reports an error if the blocked_by graph contains a cycle.
@@ -185,11 +220,14 @@ func detectCycle(steps []Step) error {
 //     is materialised into one `finish-step` child bead per step, with
 //     blocked_by edges recorded as bd `blocks` dependencies. No match anywhere
 //     means handled=false and the caller runs the Go fallback.
-//  3. Advance the graph: launch every not-yet-started step whose blockers are
-//     all closed (set in-progress, run `complete`, then `check`); re-run
-//     `check` for every in-progress step. A passing check closes the step and
-//     cascades to any step it just unblocked.
-//  4. When every step is closed, run the shared cleanup tail.
+//  3. Advance the graph: launch every not-yet-started leaf step whose blockers
+//     are all closed and whose parent group has started (set in-progress, run
+//     `complete`, then `check`); re-run `check` for every in-progress leaf. A
+//     passing check closes the step and cascades to any step it just unblocked.
+//     A parent (group) step launches like a leaf but runs no commands; it
+//     closes automatically once all of its children close, which can cascade
+//     further up the tree within the same call.
+//  4. When every top-level step is closed, run the shared cleanup tail.
 //
 // While steps remain open, runStepBead returns handled=true with a non-nil
 // error summarising what is still pending, so `this finish` exits non-zero —
@@ -227,11 +265,13 @@ func runStepBead(db, beadsDir, ticketID string, worktrees []dir.Entry, stdout io
 	return true, nil
 }
 
-// stepBead is the in-memory view of one finish-step child bead: its id/title,
+// stepBead is the in-memory view of one finish-step bead: its id/title,
 // current status (open | in_progress | closed), the commands it was created
-// with, the directory they run in, and its blockers (the bd `blocks`
-// dependencies pointing at the steps that must close first). note records the
-// most recent failure during this finish call, for the pending-summary error.
+// with, the directory they run in, its blockers (the bd `blocks` dependencies
+// pointing at the sibling steps that must close first), its nested child steps,
+// and a back-pointer to its parent step (nil at the top level). A bead with
+// children is a parent (group) and carries no commands of its own. note records
+// the most recent failure during this finish call, for the pending summary.
 type stepBead struct {
 	ID       string
 	Title    string
@@ -240,7 +280,9 @@ type stepBead struct {
 	Complete string
 	Workdir  string
 	Order    int
-	Blockers []string // ids of sibling step-beads that must close first
+	Blockers []string    // ids of sibling step-beads that must close first
+	Children []*stepBead // nested step-beads (non-empty ⇒ this is a parent)
+	parent   *stepBead   // enclosing group, nil at the top level
 	note     string
 }
 
@@ -250,43 +292,57 @@ type stepBead struct {
 // spawning an unbounded number of subprocesses simultaneously.
 const maxStepConcurrency = 8
 
-// advanceSteps drives the blocking graph forward by one `this finish` call.
-// Each non-closed step is processed at most once: an unblocked `open` step is
-// launched (in-progress → complete → check), an `in_progress` step has its
-// `check` re-run.
+// isParent reports whether b is a group step (has nested children) rather than
+// a leaf that runs commands.
+func (b *stepBead) isParent() bool { return len(b.Children) > 0 }
+
+// advanceSteps drives the blocking graph forward by one `this finish` call,
+// walking the whole step tree. Leaf steps run shell commands; parent (group)
+// steps run none and merely close once all their children close.
 //
-// The advance proceeds in waves. Each wave gathers every step runnable right
-// now — every in_progress step plus every open step whose blockers have all
-// closed — flips the open ones to in_progress up front, then runs all of their
+// Each iteration first settles parent-group state (see [advanceGroups]):
+// unblocked open groups flip to in_progress so their children may start, and
+// groups whose children have all closed are closed — cascading up the tree. It
+// then gathers every LEAF runnable right now — every in_progress leaf plus
+// every open leaf whose blockers have all closed and whose parent group has
+// started — flips the open ones to in_progress up front, then runs all of their
 // `complete`/`check` shell commands concurrently (bounded by
-// [maxStepConcurrency]) before awaiting any of them. This is the point of the
-// ticket: when one step closes and unblocks several siblings, the siblings all
-// start together rather than one-at-a-time in list order, so a slow check no
-// longer delays an independent branch.
+// [maxStepConcurrency]) before awaiting any of them. That way, when one step
+// closes and unblocks several siblings, the siblings all start together rather
+// than one-at-a-time in list order, so a slow check no longer delays an
+// independent branch.
 //
-// bd writes stay serialised: status flips happen before the wave's commands
-// run and closes happen after they all return, both in stable bead order — only
-// the shell commands run in parallel, so there are no races on the database. A
-// close may unblock further steps, which the next wave picks up. Steps whose
-// blockers are still open are left untouched. Only bd/infra failures abort
-// (returned error); a failing `complete`/`check` just leaves the step
-// in-progress with a recorded note.
+// bd writes stay serialised: group transitions, leaf status flips (before the
+// wave's commands run) and leaf closes (after they all return) happen in stable
+// bead order — only the shell commands run in parallel, so there are no races
+// on the database. A close may unblock further steps or complete a parent,
+// which the next iteration picks up. Each leaf is processed at most once, so the
+// loop terminates. Only bd/infra failures abort (returned error); a failing
+// `complete`/`check` just leaves the leaf in-progress with a recorded note.
 func advanceSteps(db, beadsDir, ticketID string, beads []*stepBead, stdout io.Writer) error {
-	byID := make(map[string]*stepBead, len(beads))
-	for _, b := range beads {
+	all := flattenSteps(beads)
+	byID := make(map[string]*stepBead, len(all))
+	for _, b := range all {
 		byID[b.ID] = b
 	}
 
-	processed := make(map[string]bool, len(beads))
+	processed := make(map[string]bool, len(all))
 	for {
-		// Gather every step that can run right now, in stable bead order so all
+		// Settle parent-group launches/closes before gathering leaves, so a
+		// group that just opened lets its children run and a group whose
+		// children all closed is itself closed this iteration.
+		if err := advanceGroups(db, beadsDir, all, byID, stdout); err != nil {
+			return err
+		}
+
+		// Gather every leaf that can run right now, in stable bead order so all
 		// logging and bd writes below stay deterministic.
 		var wave []*stepBead
-		for _, b := range beads {
-			if b.Status == "closed" || processed[b.ID] {
+		for _, b := range all {
+			if b.isParent() || b.Status == "closed" || processed[b.ID] {
 				continue
 			}
-			if b.Status == "open" && !blockersClosed(b, byID) {
+			if b.Status == "open" && !canStart(b, byID) {
 				continue // still blocked — reconsider once a blocker closes
 			}
 			wave = append(wave, b)
@@ -353,6 +409,45 @@ func advanceSteps(db, beadsDir, ticketID string, beads []*stepBead, stdout io.Wr
 	return nil
 }
 
+// advanceGroups settles parent (group) step state to a fixpoint: an unblocked
+// open group is flipped to in_progress (so [canStart] lets its children run),
+// and an in_progress group whose children have all closed is itself closed.
+// Both are bd-only writes (groups run no shell commands) and run in stable bead
+// order; the loop repeats because launching or closing one group can cascade to
+// another — a nested group opening, or a parent completing once its last child
+// group closes. Leaf steps are left to advanceSteps' concurrent wave.
+func advanceGroups(db, beadsDir string, all []*stepBead, byID map[string]*stepBead, stdout io.Writer) error {
+	for changed := true; changed; {
+		changed = false
+		for _, b := range all {
+			if !b.isParent() || b.Status == "closed" {
+				continue
+			}
+			if b.Status == "open" {
+				if !canStart(b, byID) {
+					continue // blocked or enclosing group not yet started
+				}
+				if err := bdUpdateStatus(db, beadsDir, b.ID, "in_progress"); err != nil {
+					return err
+				}
+				b.Status = "in_progress"
+				fmt.Fprintf(stdout, "finish-step %s (%s): group launched\n", b.ID, b.Title)
+				changed = true
+			}
+			if b.Status == "in_progress" && allChildrenClosed(b) {
+				if err := bdClose(db, beadsDir, b.ID); err != nil {
+					return err
+				}
+				b.Status = "closed"
+				b.note = ""
+				fmt.Fprintf(stdout, "finish-step %s (%s): all child steps closed — closed\n", b.ID, b.Title)
+				changed = true
+			}
+		}
+	}
+	return nil
+}
+
 // stepOutcome captures the result of one step's shell commands for a single
 // wave, gathered off the bd-write path so advanceSteps' serialised apply phase
 // can act on it.
@@ -379,6 +474,32 @@ func runStepShell(b *stepBead, justLaunched bool, ticketID string) stepOutcome {
 	return o
 }
 
+// flattenSteps returns every bead in the tree (parents before their children),
+// so advanceSteps can scan the whole graph in one loop while the fixpoint
+// re-runs until no step changes.
+func flattenSteps(beads []*stepBead) []*stepBead {
+	var out []*stepBead
+	var walk func([]*stepBead)
+	walk = func(bs []*stepBead) {
+		for _, b := range bs {
+			out = append(out, b)
+			walk(b.Children)
+		}
+	}
+	walk(beads)
+	return out
+}
+
+// canStart reports whether b may begin: all its (sibling) blockers are closed
+// AND its enclosing group has started (a child never runs before its parent
+// group does, so a group blocked by a sibling holds its children back too).
+func canStart(b *stepBead, byID map[string]*stepBead) bool {
+	if b.parent != nil && b.parent.Status == "open" {
+		return false
+	}
+	return blockersClosed(b, byID)
+}
+
 // blockersClosed reports whether every blocker of b is closed, reading the
 // blockers' CURRENT in-memory status (so a step closed earlier in this same
 // advance pass counts as cleared). A blocker id missing from byID is treated
@@ -393,6 +514,21 @@ func blockersClosed(b *stepBead, byID map[string]*stepBead) bool {
 	return true
 }
 
+// allChildrenClosed reports whether every child of a parent step is closed —
+// the trigger to close the parent. Only called for parents, which always have
+// at least one child.
+func allChildrenClosed(b *stepBead) bool {
+	for _, c := range b.Children {
+		if c.Status != "closed" {
+			return false
+		}
+	}
+	return true
+}
+
+// allClosed reports whether every top-level step is closed. A closed parent
+// implies its whole subtree is closed (a parent only closes once its children
+// do), so the top level is sufficient to decide the ticket is done.
 func allClosed(beads []*stepBead) bool {
 	for _, b := range beads {
 		if b.Status != "closed" {
@@ -403,10 +539,21 @@ func allClosed(beads []*stepBead) bool {
 }
 
 // pendingError summarises the steps that are not yet closed, so the non-zero
-// `this finish` exit explains what is still outstanding and why.
+// `this finish` exit explains what is still outstanding and why. The tree is
+// walked depth-first and indented by nesting level.
 func pendingError(beads []*stepBead) error {
 	var b strings.Builder
 	b.WriteString("finish-steps not all closed; re-run `this finish` to continue:")
+	writePending(&b, beads, 1)
+	return errors.New(b.String())
+}
+
+// writePending appends the not-yet-closed steps in beads (and their pending
+// descendants) to b, indented by depth. An `open` step is reported as "blocked"
+// (after an advance pass, an open step is one whose blockers — or parent group —
+// have not cleared); a parent group is prefixed with "group ".
+func writePending(b *strings.Builder, beads []*stepBead, depth int) {
+	indent := strings.Repeat("  ", depth)
 	for _, s := range beads {
 		if s.Status == "closed" {
 			continue
@@ -415,12 +562,15 @@ func pendingError(beads []*stepBead) error {
 		if s.Status == "open" {
 			state = "blocked"
 		}
-		fmt.Fprintf(&b, "\n  - %s (%s): %s", s.ID, s.Title, state)
-		if s.note != "" {
-			fmt.Fprintf(&b, " — %s", s.note)
+		if s.isParent() {
+			state = "group " + state
 		}
+		fmt.Fprintf(b, "\n%s- %s (%s): %s", indent, s.ID, s.Title, state)
+		if s.note != "" {
+			fmt.Fprintf(b, " — %s", s.note)
+		}
+		writePending(b, s.Children, depth+1)
 	}
-	return errors.New(b.String())
 }
 
 // stepEnv is the environment exposed to a step's complete/check commands:
@@ -439,16 +589,25 @@ func oneLine(s string) string {
 	return s
 }
 
-// loadStepBeads returns the ticket's `finish-step` children (closed ones
-// included) as [stepBead]s, sorted by their stored order. An empty result
-// means no steps have been created yet — the signal to evaluate the YAML.
+// loadStepBeads returns the ticket's top-level `finish-step` children (closed
+// ones included) as a sorted [stepBead] tree, recursively loading each step's
+// own children. An empty result means no steps have been created yet — the
+// signal to evaluate the YAML.
 func loadStepBeads(db, beadsDir, ticketID string) ([]*stepBead, error) {
-	out, err := bdcli.Cmd(beadsDir, db, "--json", "list", "--parent", ticketID, "--label", StepLabel, "--all").Output()
+	return loadStepChildren(db, beadsDir, ticketID, nil)
+}
+
+// loadStepChildren returns the `finish-step` children of parentID (closed ones
+// included), each with its own subtree loaded recursively, sorted by stored
+// order. parent is the in-memory bead these children hang off (nil at the top
+// level), wired so [canStart] can consult the enclosing group's status.
+func loadStepChildren(db, beadsDir, parentID string, parent *stepBead) ([]*stepBead, error) {
+	out, err := bdcli.Cmd(beadsDir, db, "--json", "list", "--parent", parentID, "--label", StepLabel, "--all").Output()
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
-			return nil, fmt.Errorf("bd list steps of %s: %v: %s", ticketID, err, ee.Stderr)
+			return nil, fmt.Errorf("bd list steps of %s: %v: %s", parentID, err, ee.Stderr)
 		}
-		return nil, fmt.Errorf("bd list steps of %s: %w", ticketID, err)
+		return nil, fmt.Errorf("bd list steps of %s: %w", parentID, err)
 	}
 	trimmed := strings.TrimSpace(string(out))
 	if trimmed == "" {
@@ -458,7 +617,7 @@ func loadStepBeads(db, beadsDir, ticketID string) ([]*stepBead, error) {
 		ID string `json:"id"`
 	}
 	if err := json.Unmarshal([]byte(trimmed), &rows); err != nil {
-		return nil, fmt.Errorf("parse bd list steps of %s: %w", ticketID, err)
+		return nil, fmt.Errorf("parse bd list steps of %s: %w", parentID, err)
 	}
 	beads := make([]*stepBead, 0, len(rows))
 	for _, r := range rows {
@@ -466,6 +625,12 @@ func loadStepBeads(db, beadsDir, ticketID string) ([]*stepBead, error) {
 		if err != nil {
 			return nil, err
 		}
+		b.parent = parent
+		children, err := loadStepChildren(db, beadsDir, b.ID, b)
+		if err != nil {
+			return nil, err
+		}
+		b.Children = children
 		beads = append(beads, b)
 	}
 	sort.SliceStable(beads, func(i, j int) bool {
@@ -591,20 +756,38 @@ func globalWorkdir(beadsDir, ticketID string, worktrees []dir.Entry) string {
 	return beadsDir
 }
 
-// createStepBeads materialises every step in set as a `finish-step` child bead
-// of ticketID, persisting each step's commands/workdir/order in metadata, then
-// wires blocked_by edges as bd `blocks` dependencies between the new beads.
-// Returns the beads in YAML order, all `open`, ready for [advanceSteps].
+// createStepBeads materialises set's step tree as `finish-step` beads beneath
+// ticketID (top-level steps are children of the ticket, nested steps children
+// of their parent step-bead), persisting each step's commands/workdir/order in
+// metadata and wiring blocked_by edges as bd `blocks` dependencies between
+// siblings. Returns the top-level beads in YAML order, all `open`, ready for
+// [advanceSteps].
 func createStepBeads(db, beadsDir, ticketID, workdir string, set StepSet, stdout io.Writer) ([]*stepBead, error) {
-	titleToID := make(map[string]string, len(set.Steps))
-	beads := make([]*stepBead, 0, len(set.Steps))
-	for i, s := range set.Steps {
-		id, err := createOneStepBead(db, beadsDir, ticketID, s, workdir, i)
+	beads, total, err := createStepLevel(db, beadsDir, ticketID, set.Steps, workdir, nil)
+	if err != nil {
+		return nil, err
+	}
+	fmt.Fprintf(stdout, "created %d finish-step(s) for %s (condition matched in %s)\n", total, ticketID, workdir)
+	return beads, nil
+}
+
+// createStepLevel materialises one sibling group as `finish-step` children of
+// parentBeadID, recursing into each parent step's nested group, then wires the
+// group's blocked_by edges as bd `blocks` dependencies between siblings. parent
+// is the in-memory bead the new beads hang off (nil at the top level). Returns
+// the group's beads (in YAML order, all `open`) and the total number of beads
+// created across the whole subtree.
+func createStepLevel(db, beadsDir, parentBeadID string, steps []Step, workdir string, parent *stepBead) ([]*stepBead, int, error) {
+	titleToID := make(map[string]string, len(steps))
+	beads := make([]*stepBead, 0, len(steps))
+	total := 0
+	for i, s := range steps {
+		id, err := createOneStepBead(db, beadsDir, parentBeadID, s, workdir, i)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
-		titleToID[s.Title] = id
-		beads = append(beads, &stepBead{
+		total++
+		b := &stepBead{
 			ID:       id,
 			Title:    s.Title,
 			Status:   "open",
@@ -612,25 +795,38 @@ func createStepBeads(db, beadsDir, ticketID, workdir string, set StepSet, stdout
 			Complete: s.Complete,
 			Workdir:  workdir,
 			Order:    i,
-		})
+			parent:   parent,
+		}
+		titleToID[s.Title] = id
+		if len(s.Steps) > 0 {
+			children, sub, err := createStepLevel(db, beadsDir, id, s.Steps, workdir, b)
+			if err != nil {
+				return nil, 0, err
+			}
+			b.Children = children
+			total += sub
+		}
+		beads = append(beads, b)
 	}
-	for i, s := range set.Steps {
+	for i, s := range steps {
 		for _, blockerTitle := range s.BlockedBy {
 			blockerID := titleToID[blockerTitle] // validated to exist by LoadStepSets
 			if err := bdDepAdd(db, beadsDir, beads[i].ID, blockerID); err != nil {
-				return nil, err
+				return nil, 0, err
 			}
 			beads[i].Blockers = append(beads[i].Blockers, blockerID)
 		}
 	}
-	fmt.Fprintf(stdout, "created %d finish-step(s) for %s (condition matched in %s)\n", len(beads), ticketID, workdir)
-	return beads, nil
+	return beads, total, nil
 }
 
-// createOneStepBead creates a single child bead, stamps the finish-step label,
-// and persists the step's commands, workdir, and order as bead metadata.
-func createOneStepBead(db, beadsDir, ticketID string, s Step, workdir string, order int) (string, error) {
-	out, err := bdcli.Cmd(beadsDir, db, "create", s.Title, "--silent", "--parent", ticketID).Output()
+// createOneStepBead creates a single step bead as a child of parentBeadID
+// (the ticket for a top-level step, or the enclosing step-bead for a nested
+// one), stamps the finish-step label, and persists the step's commands,
+// workdir, and order as bead metadata. A parent (group) step has empty
+// check/complete, so only its workdir and order are stored.
+func createOneStepBead(db, beadsDir, parentBeadID string, s Step, workdir string, order int) (string, error) {
+	out, err := bdcli.Cmd(beadsDir, db, "create", s.Title, "--silent", "--parent", parentBeadID).Output()
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
 			return "", fmt.Errorf("bd create step bead: %v: %s", err, ee.Stderr)
