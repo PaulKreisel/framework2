@@ -192,8 +192,13 @@ subcommands:
                                           onto their parent branch (FF when no
                                           divergence, real rebase otherwise),
                                           close the bead, remove the worktrees,
-                                          and delete the env folder. One-way;
-                                          never invoked automatically.
+                                          and delete the env folder. One-way. On
+                                          the step-driven path, while steps stay
+                                          pending a background poller re-runs
+                                          this on an interval until they close
+                                          (THIS_FINISH_POLL_INTERVAL, default
+                                          300s); concurrent runs are skipped via
+                                          a per-ticket lock.
   finish [<id>] --continue                resume a finish whose rebase paused on
                                           conflicts: runs ` + "`git rebase --continue`" + ` in
                                           each paused worktree, then completes
@@ -379,6 +384,12 @@ func dispatch(beadsDir string, args []string, stdout, stderr io.Writer) error {
 		// the hosting Terminal.app tab (and SIGHUP the wrapper) after the
 		// parent finish has returned. Not listed in `usage` on purpose.
 		return runTerminateAsync(rest[1:], stdout)
+	case "finish-poll":
+		// Hidden subcommand: detached background poller spawned by `finish`
+		// (step-driven path) that re-invokes the finish flow on an interval
+		// while steps remain pending. Not listed in `usage` on purpose —
+		// users never invoke it directly. See ai-vrc.86.5.
+		return runFinishPoll(db, beadsDir, rest[1:], stdout)
 	case "-h", "--help", "help":
 		fmt.Fprintln(stdout, usage)
 		return nil
@@ -1278,6 +1289,43 @@ func runTerminateAsync(args []string, stdout io.Writer) error {
 		}
 	}
 	return finish.RunTerminateAsync(wrapperPID, tty, stdout)
+}
+
+func runFinishPoll(db, beadsDir string, args []string, stdout io.Writer) error {
+	var ticketID string
+	intervalSeconds := 0
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--ticket":
+			if i+1 >= len(args) {
+				return errors.New("finish-poll: --ticket needs a value")
+			}
+			ticketID = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--ticket="):
+			ticketID = strings.TrimPrefix(a, "--ticket=")
+		case a == "--interval":
+			if i+1 >= len(args) {
+				return errors.New("finish-poll: --interval needs a value")
+			}
+			n, err := strconv.Atoi(args[i+1])
+			if err != nil {
+				return fmt.Errorf("finish-poll: --interval not a number: %w", err)
+			}
+			intervalSeconds = n
+			i++
+		case strings.HasPrefix(a, "--interval="):
+			n, err := strconv.Atoi(strings.TrimPrefix(a, "--interval="))
+			if err != nil {
+				return fmt.Errorf("finish-poll: --interval not a number: %w", err)
+			}
+			intervalSeconds = n
+		default:
+			return fmt.Errorf("finish-poll: unknown argument %q", a)
+		}
+	}
+	return finish.RunPoll(db, beadsDir, ticketID, intervalSeconds, stdout)
 }
 
 func runNext(db, beadsDir, ticket string, args []string, stdout, stderr io.Writer) error {

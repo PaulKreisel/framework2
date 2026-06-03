@@ -61,6 +61,27 @@ func Run(db, beadsDir, ticketID string, continueMode bool, stdout io.Writer) err
 		return errors.New("BEADS_DIR not set: cannot derive env path")
 	}
 
+	// Serialise against any other finish for this ticket. The lock is taken
+	// NON-BLOCKING: a second concurrent finish — a manual re-run, or the
+	// background poller's interval firing while this one is still going —
+	// must exit immediately rather than overlap the destructive
+	// rebase/close/cleanup work. See internal/finish/poll.go and lock.go.
+	ran, err := withFinishLock(beadsDir, ticketID, func() error {
+		return runLocked(db, beadsDir, ticketID, continueMode, stdout)
+	})
+	if err != nil {
+		return err
+	}
+	if !ran {
+		fmt.Fprintf(stdout, "this finish: another finish for %s is already in progress; skipping this run\n", ticketID)
+	}
+	return nil
+}
+
+// runLocked is the body of [Run], executed while the per-ticket finish lock is
+// held. Splitting it out keeps the lock acquisition in [Run] and lets the rest
+// of the flow stay lock-agnostic.
+func runLocked(db, beadsDir, ticketID string, continueMode bool, stdout io.Writer) error {
 	entries, err := dir.Load(db, beadsDir, ticketID)
 	if err != nil {
 		return err

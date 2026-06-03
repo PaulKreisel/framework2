@@ -255,6 +255,11 @@ func runStepBead(db, beadsDir, ticketID string, worktrees []dir.Entry, stdout io
 	}
 
 	if !allClosed(beads) {
+		// Steps remain open/in-progress: make sure a background poller is
+		// running so `this finish` keeps re-running on its own until the
+		// external state the checks watch flips. No-op under test, when one is
+		// already running, or when invoked by the poller itself. See poll.go.
+		ensurePollerRunning(db, beadsDir, ticketID, stdout)
 		return true, pendingError(beads)
 	}
 
