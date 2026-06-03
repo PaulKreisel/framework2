@@ -56,7 +56,7 @@ func gitDefaultBase(repo string) (string, error) {
 // gitWorktreeAdd creates a new worktree at wtPath with a new branch named
 // branch. If origin/<branch> exists (after a best-effort fetch from origin),
 // the new branch tracks it; otherwise the new branch is created based on
-// base. Returns the combined git output on failure.
+// base without any upstream. Returns the combined git output on failure.
 func gitWorktreeAdd(repo, wtPath, branch, base string) error {
 	// Best-effort fetch of the target branch (into refs/remotes/origin/) and
 	// the base ref from origin so we can detect a pre-existing remote
@@ -76,7 +76,12 @@ func gitWorktreeAdd(repo, wtPath, branch, base string) error {
 	if !hasLocal && hasRemote {
 		addBase = "refs/remotes/origin/" + branch
 	}
-	cmd := exec.Command("git", "-C", repo, "worktree", "add", "-b", branch, wtPath, addBase)
+	// --no-track: when base is a remote-tracking ref (e.g. origin/master for a
+	// root bead, see gitDefaultBase), git's default branch.autoSetupMerge would
+	// otherwise configure that ref as the new branch's upstream. We only want
+	// the new branch to *start* at base's commit, not to track it. The genuine
+	// "reuse the remote branch" case below sets upstream explicitly instead.
+	cmd := exec.Command("git", "-C", repo, "worktree", "add", "--no-track", "-b", branch, wtPath, addBase)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git worktree add: %w: %s", err, strings.TrimSpace(string(out)))
 	}

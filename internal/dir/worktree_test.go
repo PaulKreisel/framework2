@@ -760,6 +760,37 @@ func TestDirWorktreeReusesRemoteBranch(t *testing.T) {
 	}
 }
 
+func TestDirWorktreeRootBeadDoesNotTrackBase(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBead(t, beadsDir, "wt-root-no-track")
+	bare := bareRepo(t, "master")
+	// Give the bare repo the standard remote-tracking refspec so origin/master
+	// is a real remote-tracking ref (as a non-bare clone has). Without this,
+	// gitDefaultBase falls back to the local branch and git would never auto-set
+	// upstream — the bug only surfaces when the base is a remote-tracking ref.
+	gitInTest(t, bare, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
+	gitInTest(t, bare, "fetch", "-q", "origin")
+
+	if _, stderr, code := testutil.RunTicketIn(t, beadsDir, "dir", "worktree", ticket, bare); code != 0 {
+		t.Fatalf("worktree exit=%d stderr=%q", code, stderr)
+	}
+
+	entries := listEntries(t, beadsDir, ticket)
+	if len(entries) != 1 {
+		t.Fatalf("entries=%+v want 1", entries)
+	}
+	// Branch must start at the master commit...
+	if sha := refSHA(t, entries[0].Path, "HEAD"); sha != bareBranchSHA(t, bare, "master") {
+		t.Errorf("worktree HEAD %q != bare master %q (root should branch off master)", sha, bareBranchSHA(t, bare, "master"))
+	}
+	// ...but must NOT track origin/master (or anything) as upstream.
+	out, err := exec.Command("git", "-C", entries[0].Path, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}").CombinedOutput()
+	if err == nil {
+		t.Errorf("root bead branch has upstream %q, want none", strings.TrimSpace(string(out)))
+	}
+}
+
 func TestDirWorktreeFetchFailureFallsThrough(t *testing.T) {
 	t.Parallel()
 	beadsDir := testutil.TestDB(t)
