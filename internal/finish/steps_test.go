@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -172,6 +173,76 @@ func TestFinishStepsCascadeInOneCall(t *testing.T) {
 		assertStatus(t, beadsDir, s[title], "closed")
 	}
 	assertStatus(t, beadsDir, child, "closed")
+}
+
+// TestFinishStepSiblingsRunConcurrently is the headline regression for this
+// ticket: when one step unblocks several siblings, the siblings' checks run
+// concurrently rather than serialised in list order. `root` closes immediately
+// and unblocks `a` and `b`; each records the wall-clock window its check
+// occupied. Under the old sequential advance, `b` would not start until `a`'s
+// check (a 1s sleep) had finished, so their windows could never overlap. With
+// concurrent launch they do.
+func TestFinishStepSiblingsRunConcurrently(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	child := testutil.CreateBead(t, beadsDir, "step-concurrent-child")
+	bare := bareRepo(t, "main")
+
+	mustRunTicket(t, beadsDir, "dir", "worktree", child, bare)
+	dir := t.TempDir()
+	// Each sibling check stamps a start time, sleeps, then a stop time — all
+	// outside the worktree so the tree stays clean and removable. The checks
+	// pass (exit 0), so the whole graph closes in one finish call.
+	window := func(name string) string {
+		start := filepath.Join(dir, name+".start")
+		stop := filepath.Join(dir, name+".stop")
+		return fmt.Sprintf("'date +%%s.%%N > %s; sleep 1; date +%%s.%%N > %s'", start, stop)
+	}
+	writeStepsYAML(t, bare, ""+
+		"- condition: \"true\"\n"+
+		"  steps:\n"+
+		"    - title: root\n"+
+		"      check: \"true\"\n"+
+		"    - title: a\n"+
+		"      check: "+window("a")+"\n"+
+		"      blocked_by: [root]\n"+
+		"    - title: b\n"+
+		"      check: "+window("b")+"\n"+
+		"      blocked_by: [root]\n")
+
+	if _, stderr, code := testutil.RunTicketIn(t, beadsDir, "finish", child); code != 0 {
+		t.Fatalf("finish exit=%d stderr=%q (graph should complete in one call)", code, stderr)
+	}
+	s := stepsByTitle(t, beadsDir, child)
+	for _, title := range []string{"root", "a", "b"} {
+		assertStatus(t, beadsDir, s[title], "closed")
+	}
+
+	aStart, aStop := readWindow(t, dir, "a")
+	bStart, bStop := readWindow(t, dir, "b")
+	// Overlap ⟺ a started before b finished AND b started before a finished.
+	// Serialised execution would put b's whole window after a's, so no overlap.
+	if !(aStart < bStop && bStart < aStop) {
+		t.Errorf("sibling checks did not overlap (ran serially): a=[%.3f,%.3f] b=[%.3f,%.3f]", aStart, aStop, bStart, bStop)
+	}
+}
+
+// readWindow reads the start/stop unix timestamps a windowed check wrote for
+// step `name` (see TestFinishStepSiblingsRunConcurrently).
+func readWindow(t *testing.T, dir, name string) (start, stop float64) {
+	t.Helper()
+	read := func(suffix string) float64 {
+		raw, err := os.ReadFile(filepath.Join(dir, name+suffix))
+		if err != nil {
+			t.Fatalf("read %s%s: %v", name, suffix, err)
+		}
+		v, err := strconv.ParseFloat(strings.TrimSpace(string(raw)), 64)
+		if err != nil {
+			t.Fatalf("parse %s%s %q: %v", name, suffix, raw, err)
+		}
+		return v
+	}
+	return read(".start"), read(".stop")
 }
 
 // TestFinishStepEnvVars verifies the env surface: $BEAD_ID is visible to the

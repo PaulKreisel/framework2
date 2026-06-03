@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"framework2/internal/bdcli"
 	"framework2/internal/dir"
@@ -243,14 +244,33 @@ type stepBead struct {
 	note     string
 }
 
+// maxStepConcurrency bounds how many step shell commands (complete/check) run
+// at once inside a single advanceSteps wave. Checks are meant to be light
+// network polls (gh pr view, jenkins status); the cap keeps a wide graph from
+// spawning an unbounded number of subprocesses simultaneously.
+const maxStepConcurrency = 8
+
 // advanceSteps drives the blocking graph forward by one `this finish` call.
 // Each non-closed step is processed at most once: an unblocked `open` step is
 // launched (in-progress → complete → check), an `in_progress` step has its
-// `check` re-run. Whenever a check passes the step closes and the scan repeats
-// so a step it just unblocked gets its turn in the same call. Steps whose
-// blockers are still open are skipped and left untouched. Only bd/infra
-// failures abort (returned error); a failing `complete`/`check` just leaves
-// the step in-progress with a recorded note.
+// `check` re-run.
+//
+// The advance proceeds in waves. Each wave gathers every step runnable right
+// now — every in_progress step plus every open step whose blockers have all
+// closed — flips the open ones to in_progress up front, then runs all of their
+// `complete`/`check` shell commands concurrently (bounded by
+// [maxStepConcurrency]) before awaiting any of them. This is the point of the
+// ticket: when one step closes and unblocks several siblings, the siblings all
+// start together rather than one-at-a-time in list order, so a slow check no
+// longer delays an independent branch.
+//
+// bd writes stay serialised: status flips happen before the wave's commands
+// run and closes happen after they all return, both in stable bead order — only
+// the shell commands run in parallel, so there are no races on the database. A
+// close may unblock further steps, which the next wave picks up. Steps whose
+// blockers are still open are left untouched. Only bd/infra failures abort
+// (returned error); a failing `complete`/`check` just leaves the step
+// in-progress with a recorded note.
 func advanceSteps(db, beadsDir, ticketID string, beads []*stepBead, stdout io.Writer) error {
 	byID := make(map[string]*stepBead, len(beads))
 	for _, b := range beads {
@@ -258,47 +278,105 @@ func advanceSteps(db, beadsDir, ticketID string, beads []*stepBead, stdout io.Wr
 	}
 
 	processed := make(map[string]bool, len(beads))
-	for progress := true; progress; {
-		progress = false
+	for {
+		// Gather every step that can run right now, in stable bead order so all
+		// logging and bd writes below stay deterministic.
+		var wave []*stepBead
 		for _, b := range beads {
 			if b.Status == "closed" || processed[b.ID] {
 				continue
 			}
 			if b.Status == "open" && !blockersClosed(b, byID) {
-				continue // still blocked — reconsider if a blocker closes below
+				continue // still blocked — reconsider once a blocker closes
 			}
-			processed[b.ID] = true
+			wave = append(wave, b)
+		}
+		if len(wave) == 0 {
+			break
+		}
 
+		// Launch phase (serialised bd writes): flip every open step in the wave to
+		// in_progress before any check is awaited, so siblings unblocked at the
+		// same time all start together. Only steps launched this wave run
+		// `complete`; previously in_progress steps just re-check.
+		justLaunched := make([]bool, len(wave))
+		for i, b := range wave {
 			if b.Status == "open" {
 				if err := bdUpdateStatus(db, beadsDir, b.ID, "in_progress"); err != nil {
 					return err
 				}
 				b.Status = "in_progress"
+				justLaunched[i] = true
 				fmt.Fprintf(stdout, "finish-step %s (%s): launched\n", b.ID, b.Title)
-				if b.Complete != "" {
-					if res := runShell(b.Complete, b.Workdir, stepEnv(ticketID, b.ID)...); res.exit != 0 {
-						b.note = fmt.Sprintf("complete failed (exit=%d): %s", res.exit, oneLine(res.output))
-						fmt.Fprintf(stdout, "finish-step %s (%s): complete failed (exit=%d); check not run\n", b.ID, b.Title, res.exit)
-						continue // launched but not fulfilled — re-checked next call
-					}
-				}
 			}
+		}
 
-			if res := runShell(b.Check, b.Workdir, stepEnv(ticketID, b.ID)...); res.exit == 0 {
+		// Run phase (concurrent, bounded): each step's shell commands run in their
+		// own goroutine writing only its own slot — no bd writes, no shared state.
+		outcomes := make([]stepOutcome, len(wave))
+		var wg sync.WaitGroup
+		sem := make(chan struct{}, maxStepConcurrency)
+		for i, b := range wave {
+			wg.Add(1)
+			go func(i int, b *stepBead) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				outcomes[i] = runStepShell(b, justLaunched[i], ticketID)
+			}(i, b)
+		}
+		wg.Wait()
+
+		// Apply phase (serialised bd writes): close steps whose check passed and
+		// record notes for the rest, in stable bead order.
+		for i, b := range wave {
+			processed[b.ID] = true
+			o := outcomes[i]
+			if o.completeFailed {
+				b.note = fmt.Sprintf("complete failed (exit=%d): %s", o.completeRes.exit, oneLine(o.completeRes.output))
+				fmt.Fprintf(stdout, "finish-step %s (%s): complete failed (exit=%d); check not run\n", b.ID, b.Title, o.completeRes.exit)
+				continue // launched but not fulfilled — re-checked next call
+			}
+			if o.checkRes.exit == 0 {
 				if err := bdClose(db, beadsDir, b.ID); err != nil {
 					return err
 				}
 				b.Status = "closed"
 				b.note = ""
 				fmt.Fprintf(stdout, "finish-step %s (%s): check passed — closed\n", b.ID, b.Title)
-				progress = true // may have unblocked another step
 			} else {
-				b.note = fmt.Sprintf("check failed (exit=%d): %s", res.exit, oneLine(res.output))
-				fmt.Fprintf(stdout, "finish-step %s (%s): check failed (exit=%d) — staying in-progress\n", b.ID, b.Title, res.exit)
+				b.note = fmt.Sprintf("check failed (exit=%d): %s", o.checkRes.exit, oneLine(o.checkRes.output))
+				fmt.Fprintf(stdout, "finish-step %s (%s): check failed (exit=%d) — staying in-progress\n", b.ID, b.Title, o.checkRes.exit)
 			}
 		}
 	}
 	return nil
+}
+
+// stepOutcome captures the result of one step's shell commands for a single
+// wave, gathered off the bd-write path so advanceSteps' serialised apply phase
+// can act on it.
+type stepOutcome struct {
+	completeFailed bool        // `complete` ran and exited non-zero (check skipped)
+	completeRes    shellResult // valid when completeFailed
+	checkRes       shellResult // valid unless completeFailed
+}
+
+// runStepShell runs one step's shell work for a wave: a just-launched step with
+// a `complete` command runs it first and, on failure, skips the check (so a
+// launched-but-unfulfilled step is re-checked next call); otherwise it runs the
+// check. It performs no bd writes, so it is safe to call concurrently.
+func runStepShell(b *stepBead, justLaunched bool, ticketID string) stepOutcome {
+	var o stepOutcome
+	if justLaunched && b.Complete != "" {
+		o.completeRes = runShell(b.Complete, b.Workdir, stepEnv(ticketID, b.ID)...)
+		if o.completeRes.exit != 0 {
+			o.completeFailed = true
+			return o
+		}
+	}
+	o.checkRes = runShell(b.Check, b.Workdir, stepEnv(ticketID, b.ID)...)
+	return o
 }
 
 // blockersClosed reports whether every blocker of b is closed, reading the
