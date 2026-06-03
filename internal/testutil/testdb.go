@@ -155,6 +155,10 @@ func resetEntry(e poolEntry) error {
 	_ = os.Remove(filepath.Join(e.beadsDir, "last-touched"))
 	_ = os.Remove(filepath.Join(e.beadsDir, "interactions.jsonl"))
 	_ = os.RemoveAll(filepath.Join(e.beadsDir, "envs"))
+	// A global finish-steps.yaml a test wrote into this pooled beadsDir would
+	// otherwise be picked up by the next test reusing the entry. Defensive —
+	// tests that write one also remove it via t.Cleanup.
+	_ = os.Remove(filepath.Join(e.beadsDir, "finish-steps.yaml"))
 	return nil
 }
 

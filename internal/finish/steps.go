@@ -12,12 +12,14 @@ import (
 
 	"framework2/internal/bdcli"
 	"framework2/internal/dir"
+	"framework2/internal/project"
 
 	"gopkg.in/yaml.v3"
 )
 
-// StepsFilename is the basename of the per-bare-repo finish-step declaration,
-// read from the bare repo root (same convention as pipeline.md).
+// StepsFilename is the basename of the finish-step declaration. It is read
+// from each linked bare repo's root (same convention as pipeline.md) and, as a
+// project-wide fallback, from the BEADS_DIR root. See [findStep].
 const StepsFilename = "finish-steps.yaml"
 
 // StepLabel is the literal label stamped onto every step-bead created by the
@@ -95,7 +97,7 @@ func selectStep(steps []Step, workdir string) (Step, bool) {
 // the Go fallback). handled=false means no finish-steps.yaml was found or no
 // selector matched: the caller should run the monolithic Go finish unchanged.
 func runStepBead(db, beadsDir, ticketID string, worktrees []dir.Entry, stdout io.Writer) (handled bool, err error) {
-	wt, step, ok, err := findStep(worktrees)
+	workdir, step, ok, err := findStep(beadsDir, ticketID, worktrees)
 	if err != nil || !ok {
 		return false, err
 	}
@@ -108,18 +110,18 @@ func runStepBead(db, beadsDir, ticketID string, worktrees []dir.Entry, stdout io
 	if err != nil {
 		return false, err
 	}
-	fmt.Fprintf(stdout, "finish-step %s created for %s (selector matched in %s)\n", stepID, ticketID, wt.Path)
+	fmt.Fprintf(stdout, "finish-step %s created for %s (selector matched in %s)\n", stepID, ticketID, workdir)
 
 	if step.Complete != "" {
 		fmt.Fprintf(stdout, "finish-step %s: complete\n", stepID)
-		if res := runShell(step.Complete, wt.Path); res.exit != 0 {
+		if res := runShell(step.Complete, workdir); res.exit != 0 {
 			return false, fmt.Errorf("finish-step %s: complete command failed (exit=%d):\n%s",
 				stepID, res.exit, strings.TrimSpace(res.output))
 		}
 	}
 
 	fmt.Fprintf(stdout, "finish-step %s: check\n", stepID)
-	if res := runShell(step.Check, wt.Path); res.exit != 0 {
+	if res := runShell(step.Check, workdir); res.exit != 0 {
 		return false, fmt.Errorf("finish-step %s: check command failed (exit=%d); step left open for follow-up:\n%s",
 			stepID, res.exit, strings.TrimSpace(res.output))
 	}
@@ -135,24 +137,60 @@ func runStepBead(db, beadsDir, ticketID string, worktrees []dir.Entry, stdout io
 	return true, nil
 }
 
-// findStep returns the first worktree whose bare repo carries a
-// finish-steps.yaml with a matching selector, together with the matched step.
-// ok=false means no worktree's bare had a file with a matching selector — the
-// Go fallback applies. A parse error in any encountered file propagates.
-func findStep(worktrees []dir.Entry) (dir.Entry, Step, bool, error) {
+// findStep locates the finish step to run and the working directory its
+// commands run in. It checks, in order:
+//
+//  1. each linked worktree's bare repo root (<bareRepo>/finish-steps.yaml),
+//     evaluating selectors in that worktree — the spec'd per-repo location;
+//  2. a global <beadsDir>/finish-steps.yaml fallback, evaluating selectors in
+//     [globalWorkdir] (the first worktree, else the env folder). This is the
+//     one config that applies across every repo, so a single file can drive
+//     finish for all of a project's tickets without copying it into ~85 bare
+//     repos.
+//
+// The returned workdir is where the step's complete/check commands run.
+// ok=false means nothing matched anywhere — the Go fallback applies. A
+// parse error in any encountered file propagates.
+func findStep(beadsDir, ticketID string, worktrees []dir.Entry) (workdir string, step Step, ok bool, err error) {
 	for _, wt := range worktrees {
 		steps, err := LoadSteps(wt.BareRepo)
 		if err != nil {
-			return dir.Entry{}, Step{}, false, err
+			return "", Step{}, false, err
 		}
 		if steps == nil {
 			continue
 		}
-		if step, ok := selectStep(steps, wt.Path); ok {
-			return wt, step, true, nil
+		if s, ok := selectStep(steps, wt.Path); ok {
+			return wt.Path, s, true, nil
 		}
 	}
-	return dir.Entry{}, Step{}, false, nil
+
+	globalSteps, err := LoadSteps(beadsDir)
+	if err != nil {
+		return "", Step{}, false, err
+	}
+	if globalSteps != nil {
+		wd := globalWorkdir(beadsDir, ticketID, worktrees)
+		if s, ok := selectStep(globalSteps, wd); ok {
+			return wd, s, true, nil
+		}
+	}
+	return "", Step{}, false, nil
+}
+
+// globalWorkdir picks the cwd for commands driven by the global
+// <beadsDir>/finish-steps.yaml. With at least one worktree it uses the first
+// (repo context); otherwise it uses the ticket's env folder when that exists,
+// falling back to beadsDir — both always present while the step runs.
+func globalWorkdir(beadsDir, ticketID string, worktrees []dir.Entry) string {
+	if len(worktrees) > 0 {
+		return worktrees[0].Path
+	}
+	envPath := project.Path(beadsDir, filepath.Join("envs", ticketID))
+	if st, err := os.Stat(envPath); err == nil && st.IsDir() {
+		return envPath
+	}
+	return beadsDir
 }
 
 // createStepBead creates a child bead of ticketID and stamps the finish-step

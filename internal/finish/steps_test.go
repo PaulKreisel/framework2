@@ -224,6 +224,79 @@ func TestFinishStepInvalidYAMLAborts(t *testing.T) {
 	}
 }
 
+// TestFinishStepGlobalFallback: a finish-steps.yaml at the BEADS_DIR root
+// drives the finish when the worktree's bare repo has none of its own. The
+// step runs in the worktree.
+func TestFinishStepGlobalFallback(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	child := testutil.CreateBead(t, beadsDir, "step-global-child")
+	bare := bareRepo(t, "main")
+
+	mustRunTicket(t, beadsDir, "dir", "worktree", child, bare)
+	childWT := worktreePath(bare, child)
+	// No finish-steps.yaml in the bare repo; only the global one.
+	marker := filepath.Join(t.TempDir(), "where.txt")
+	writeGlobalStepsYAML(t, beadsDir, ""+
+		"- selector: \"true\"\n"+
+		"  title: global step\n"+
+		"  check: \"pwd > "+marker+"\"\n")
+
+	if _, stderr, code := testutil.RunTicketIn(t, beadsDir, "finish", child); code != 0 {
+		t.Fatalf("finish exit=%d stderr=%q", code, stderr)
+	}
+
+	steps := childrenWithLabel(t, beadsDir, child, finish.StepLabel)
+	if len(steps) != 1 {
+		t.Fatalf("expected one finish-step child via global config, got %v", steps)
+	}
+	if got := beadTitle(t, beadsDir, steps[0]); got != "global step" {
+		t.Errorf("step title=%q want %q (global config not used?)", got, "global step")
+	}
+	if got, err := os.ReadFile(marker); err != nil {
+		t.Errorf("read cwd marker: %v", err)
+	} else if strings.TrimSpace(string(got)) != childWT {
+		t.Errorf("global step ran in %q, want worktree %q", strings.TrimSpace(string(got)), childWT)
+	}
+}
+
+// TestFinishStepGlobalNoWorktree exercises the case the operator wants to try:
+// a top-level ticket with NO linked dirs. The global config still drives a
+// step-bead; commands run in the env folder, and cleanup closes the ticket.
+func TestFinishStepGlobalNoWorktree(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	child := testutil.CreateBead(t, beadsDir, "step-global-nodir-child")
+	mustMakeEnv(t, beadsDir, child)
+	envPath := filepath.Join(beadsDir, "envs", child)
+
+	marker := filepath.Join(t.TempDir(), "where.txt")
+	writeGlobalStepsYAML(t, beadsDir, ""+
+		"- selector: \"true\"\n"+
+		"  title: nodir step\n"+
+		"  check: \"pwd > "+marker+"\"\n")
+
+	if _, stderr, code := testutil.RunTicketIn(t, beadsDir, "finish", child); code != 0 {
+		t.Fatalf("finish exit=%d stderr=%q", code, stderr)
+	}
+
+	steps := childrenWithLabel(t, beadsDir, child, finish.StepLabel)
+	if len(steps) != 1 {
+		t.Fatalf("expected one finish-step child, got %v", steps)
+	}
+	if got := beadStatus(t, beadsDir, child); got != "closed" {
+		t.Errorf("ticket status=%q want closed", got)
+	}
+	if _, err := os.Stat(envPath); !os.IsNotExist(err) {
+		t.Errorf("env folder %s still exists after finish (err=%v)", envPath, err)
+	}
+	if got, err := os.ReadFile(marker); err != nil {
+		t.Errorf("read cwd marker: %v", err)
+	} else if strings.TrimSpace(string(got)) != envPath {
+		t.Errorf("step ran in %q, want env folder %q", strings.TrimSpace(string(got)), envPath)
+	}
+}
+
 // --- helpers ---
 
 func writeStepsYAML(t *testing.T, bare, body string) {
@@ -232,6 +305,18 @@ func writeStepsYAML(t *testing.T, bare, body string) {
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatalf("write %s: %v", path, err)
 	}
+}
+
+// writeGlobalStepsYAML writes the project-wide finish-steps.yaml at the
+// BEADS_DIR root and removes it on cleanup so it cannot leak into another test
+// reusing the same pooled beadsDir.
+func writeGlobalStepsYAML(t *testing.T, beadsDir, body string) {
+	t.Helper()
+	path := filepath.Join(beadsDir, finish.StepsFilename)
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+	t.Cleanup(func() { _ = os.Remove(path) })
 }
 
 func mustMakeEnv(t *testing.T, beadsDir, id string) {
