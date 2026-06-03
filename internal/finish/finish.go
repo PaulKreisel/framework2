@@ -6,11 +6,14 @@
 // only fire on explicit user action.
 //
 // There are two paths. When a linked bare repo carries a finish-steps.yaml
-// whose selector matches, the step-driven path in steps.go takes over: it
-// creates a single `finish-step` child bead, runs that step's complete/check
-// commands, closes the step, and then runs the shared [cleanup] tail. When no
-// finish-steps.yaml is found, no selector matches, or `--continue` is passed,
-// the monolithic Go flow below runs unchanged.
+// whose condition matches, the step-driven path in steps.go takes over: it
+// materialises the matched step-set into one `finish-step` child bead per
+// step (wiring blocked_by edges as bd dependencies), then on every `this
+// finish` advances the blocking graph — launching unblocked steps and
+// re-running `check` for in-progress ones — until all steps close, at which
+// point the shared [cleanup] tail runs. When no finish-steps.yaml is found,
+// no condition matches, or `--continue` is passed, the monolithic Go flow
+// below runs unchanged.
 //
 // The Go flow is:
 //

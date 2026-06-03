@@ -2,6 +2,7 @@ package finish_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,8 +12,8 @@ import (
 	"framework2/internal/testutil"
 )
 
-// TestFinishStepBeadHappyPath is the walking-skeleton acceptance test: a
-// finish-steps.yaml whose selector matches drives a single step-bead, which is
+// TestFinishStepBeadHappyPath is the single-step acceptance test: a
+// finish-steps.yaml whose condition matches drives one step-bead, which is
 // created as a `finish-step` child of the ticket, closed on a clean check, and
 // followed by the full cleanup (ticket closed, worktree + env removed).
 func TestFinishStepBeadHappyPath(t *testing.T) {
@@ -32,21 +33,18 @@ func TestFinishStepBeadHappyPath(t *testing.T) {
 	// proving complete ran first. We assert the recorded cwd is the worktree.
 	marker := filepath.Join(t.TempDir(), "where.txt")
 	writeStepsYAML(t, bare, ""+
-		"- selector: \"true\"\n"+
-		"  title: skeleton step\n"+
-		"  complete: \"pwd > " + marker + "\"\n"+
-		"  check: \"test -f " + marker + "\"\n")
+		"- condition: \"true\"\n"+
+		"  steps:\n"+
+		"    - title: skeleton step\n"+
+		"      complete: \"pwd > "+marker+"\"\n"+
+		"      check: \"test -f "+marker+"\"\n")
 
 	if _, stderr, code := testutil.RunTicketIn(t, beadsDir, "finish", child); code != 0 {
 		t.Fatalf("finish exit=%d stderr=%q", code, stderr)
 	}
 
 	// complete and check ran in the worktree.
-	if got, err := os.ReadFile(marker); err != nil {
-		t.Errorf("read cwd marker: %v", err)
-	} else if strings.TrimSpace(string(got)) != childWT {
-		t.Errorf("complete ran in %q, want worktree %q", strings.TrimSpace(string(got)), childWT)
-	}
+	assertRanIn(t, marker, childWT)
 
 	// A step-bead exists as a child of the ticket, carries the label, and is
 	// closed.
@@ -73,9 +71,150 @@ func TestFinishStepBeadHappyPath(t *testing.T) {
 	}
 }
 
-// TestFinishStepFirstSelectorWins regresses the "first exit-0 wins" rule: the
-// first entry's selector fails, the second matches, so the second step runs.
-func TestFinishStepFirstSelectorWins(t *testing.T) {
+// TestFinishStepThreeStepGraph is the headline acceptance test for this
+// ticket: a three-step graph (step 2 blocked_by step 1, step 3 blocked_by
+// step 2) advanced across three `this finish` calls, with checks that fail the
+// first time they run and pass on the second.
+func TestFinishStepThreeStepGraph(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	child := testutil.CreateBead(t, beadsDir, "step-graph-child")
+	bare := bareRepo(t, "main")
+
+	mustRunTicket(t, beadsDir, "dir", "worktree", child, bare)
+	mustMakeEnv(t, beadsDir, child)
+	childWT := worktreePath(bare, child)
+	envPath := filepath.Join(beadsDir, "envs", child)
+
+	// step 1 passes immediately; steps 2 and 3 each fail the FIRST time their
+	// check runs (creating their marker) and pass the SECOND time. Markers
+	// live outside the worktree so the tree stays clean for removal.
+	m2 := filepath.Join(t.TempDir(), "s2")
+	m3 := filepath.Join(t.TempDir(), "s3")
+	writeStepsYAML(t, bare, ""+
+		"- condition: \"true\"\n"+
+		"  steps:\n"+
+		"    - title: one\n"+
+		"      check: \"true\"\n"+
+		"    - title: two\n"+
+		"      check: "+failFirst(m2)+"\n"+
+		"      blocked_by: [one]\n"+
+		"    - title: three\n"+
+		"      check: "+failFirst(m3)+"\n"+
+		"      blocked_by: [two]\n")
+
+	// --- First call: step 1 closes, step 2 launches (check fails →
+	// in-progress), step 3 stays blocked.
+	_, stderr, code := testutil.RunTicketIn(t, beadsDir, "finish", child)
+	if code == 0 {
+		t.Fatalf("first finish should exit non-zero (steps pending); stderr=%q", stderr)
+	}
+	s := stepsByTitle(t, beadsDir, child)
+	assertStatus(t, beadsDir, s["one"], "closed")
+	assertStatus(t, beadsDir, s["two"], "in_progress")
+	assertStatus(t, beadsDir, s["three"], "open") // still blocked, never launched
+	assertStatus(t, beadsDir, child, "open")
+	if _, err := os.Stat(childWT); err != nil {
+		t.Errorf("worktree removed before all steps closed: %v", err)
+	}
+
+	// --- Second call: step 2 check passes → closes, step 3 launches (check
+	// fails → in-progress).
+	_, stderr, code = testutil.RunTicketIn(t, beadsDir, "finish", child)
+	if code == 0 {
+		t.Fatalf("second finish should exit non-zero (step 3 pending); stderr=%q", stderr)
+	}
+	assertStatus(t, beadsDir, s["two"], "closed")
+	assertStatus(t, beadsDir, s["three"], "in_progress")
+	assertStatus(t, beadsDir, child, "open")
+
+	// --- Third call: step 3 check passes → closes, full cleanup runs.
+	if _, stderr, code := testutil.RunTicketIn(t, beadsDir, "finish", child); code != 0 {
+		t.Fatalf("third finish exit=%d stderr=%q (expected success)", code, stderr)
+	}
+	assertStatus(t, beadsDir, s["three"], "closed")
+	assertStatus(t, beadsDir, child, "closed")
+	if _, err := os.Stat(childWT); !os.IsNotExist(err) {
+		t.Errorf("worktree %s still present after full cleanup (err=%v)", childWT, err)
+	}
+	if _, err := os.Stat(envPath); !os.IsNotExist(err) {
+		t.Errorf("env folder %s still present after full cleanup (err=%v)", envPath, err)
+	}
+}
+
+// TestFinishStepsCascadeInOneCall: when every check passes immediately, closing
+// a step unblocks the next within the SAME finish call, so a chain finishes in
+// one go.
+func TestFinishStepsCascadeInOneCall(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	child := testutil.CreateBead(t, beadsDir, "step-cascade-child")
+	bare := bareRepo(t, "main")
+
+	mustRunTicket(t, beadsDir, "dir", "worktree", child, bare)
+	writeStepsYAML(t, bare, ""+
+		"- condition: \"true\"\n"+
+		"  steps:\n"+
+		"    - title: a\n"+
+		"      check: \"true\"\n"+
+		"    - title: b\n"+
+		"      check: \"true\"\n"+
+		"      blocked_by: [a]\n"+
+		"    - title: c\n"+
+		"      check: \"true\"\n"+
+		"      blocked_by: [b]\n")
+
+	if _, stderr, code := testutil.RunTicketIn(t, beadsDir, "finish", child); code != 0 {
+		t.Fatalf("finish exit=%d stderr=%q (chain should complete in one call)", code, stderr)
+	}
+	s := stepsByTitle(t, beadsDir, child)
+	for _, title := range []string{"a", "b", "c"} {
+		assertStatus(t, beadsDir, s[title], "closed")
+	}
+	assertStatus(t, beadsDir, child, "closed")
+}
+
+// TestFinishStepEnvVars verifies the env surface: $BEAD_ID is visible to the
+// condition, and $BEAD_ID + $STEP_BEAD_ID are visible to check (the step's own
+// bead id).
+func TestFinishStepEnvVars(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	child := testutil.CreateBead(t, beadsDir, "step-env-child")
+	bare := bareRepo(t, "main")
+
+	mustRunTicket(t, beadsDir, "dir", "worktree", child, bare)
+	marker := filepath.Join(t.TempDir(), "env.txt")
+	// condition only matches when $BEAD_ID is the ticket; check records both
+	// ids so we can assert STEP_BEAD_ID is the step's own bead.
+	writeStepsYAML(t, bare, ""+
+		"- condition: '[ \"$BEAD_ID\" = \""+child+"\" ]'\n"+
+		"  steps:\n"+
+		"    - title: env step\n"+
+		"      check: 'echo \"$BEAD_ID|$STEP_BEAD_ID\" > "+marker+"'\n")
+
+	if _, stderr, code := testutil.RunTicketIn(t, beadsDir, "finish", child); code != 0 {
+		t.Fatalf("finish exit=%d stderr=%q", code, stderr)
+	}
+
+	steps := childrenWithLabel(t, beadsDir, child, finish.StepLabel)
+	if len(steps) != 1 {
+		t.Fatalf("expected one finish-step child, got %v", steps)
+	}
+	got, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("read env marker: %v", err)
+	}
+	want := child + "|" + steps[0]
+	if strings.TrimSpace(string(got)) != want {
+		t.Errorf("check saw env %q, want %q", strings.TrimSpace(string(got)), want)
+	}
+}
+
+// TestFinishStepFirstConditionWins regresses the "first exit-0 wins" rule
+// across step-sets: the first set's condition fails, the second matches, so
+// the second set's steps run.
+func TestFinishStepFirstConditionWins(t *testing.T) {
 	t.Parallel()
 	beadsDir := testutil.TestDB(t)
 	child := testutil.CreateBead(t, beadsDir, "step-select-child")
@@ -83,12 +222,14 @@ func TestFinishStepFirstSelectorWins(t *testing.T) {
 
 	mustRunTicket(t, beadsDir, "dir", "worktree", child, bare)
 	writeStepsYAML(t, bare, ""+
-		"- selector: \"false\"\n"+
-		"  title: first never\n"+
-		"  check: \"true\"\n"+
-		"- selector: \"true\"\n"+
-		"  title: second wins\n"+
-		"  check: \"true\"\n")
+		"- condition: \"false\"\n"+
+		"  steps:\n"+
+		"    - title: first never\n"+
+		"      check: \"true\"\n"+
+		"- condition: \"true\"\n"+
+		"  steps:\n"+
+		"    - title: second wins\n"+
+		"      check: \"true\"\n")
 
 	if _, stderr, code := testutil.RunTicketIn(t, beadsDir, "finish", child); code != 0 {
 		t.Fatalf("finish exit=%d stderr=%q", code, stderr)
@@ -99,14 +240,14 @@ func TestFinishStepFirstSelectorWins(t *testing.T) {
 		t.Fatalf("expected one finish-step child, got %v", steps)
 	}
 	if got := beadTitle(t, beadsDir, steps[0]); got != "second wins" {
-		t.Errorf("ran step %q, want the second (first exit-0 wins)", got)
+		t.Errorf("ran step %q, want the second set (first exit-0 wins)", got)
 	}
 }
 
-// TestFinishStepNoSelectorMatchFallsBack: a present finish-steps.yaml whose
-// selectors all fail must fall back to the Go path — no step-bead, ticket
+// TestFinishStepNoConditionMatchFallsBack: a present finish-steps.yaml whose
+// conditions all fail must fall back to the Go path — no step-bead, ticket
 // still finishes normally.
-func TestFinishStepNoSelectorMatchFallsBack(t *testing.T) {
+func TestFinishStepNoConditionMatchFallsBack(t *testing.T) {
 	t.Parallel()
 	beadsDir := testutil.TestDB(t)
 	parent := testutil.CreateBead(t, beadsDir, "step-nomatch-parent")
@@ -116,8 +257,10 @@ func TestFinishStepNoSelectorMatchFallsBack(t *testing.T) {
 	mustRunTicket(t, beadsDir, "dir", "worktree", child, bare)
 	childWT := worktreePath(bare, child)
 	writeStepsYAML(t, bare, ""+
-		"- selector: \"false\"\n"+
-		"  check: \"true\"\n")
+		"- condition: \"false\"\n"+
+		"  steps:\n"+
+		"    - title: never\n"+
+		"      check: \"true\"\n")
 
 	if _, stderr, code := testutil.RunTicketIn(t, beadsDir, "finish", child); code != 0 {
 		t.Fatalf("finish exit=%d stderr=%q", code, stderr)
@@ -133,9 +276,10 @@ func TestFinishStepNoSelectorMatchFallsBack(t *testing.T) {
 	}
 }
 
-// TestFinishStepCheckFailureLeavesBeadsOpen: a failing check aborts the finish
-// — the step-bead and the ticket stay open and the worktree is not removed.
-func TestFinishStepCheckFailureLeavesBeadsOpen(t *testing.T) {
+// TestFinishStepCheckFailureLeavesStepInProgress: a failing check aborts the
+// finish — the (launched) step-bead stays in-progress, the ticket stays open,
+// and the worktree is not removed.
+func TestFinishStepCheckFailureLeavesStepInProgress(t *testing.T) {
 	t.Parallel()
 	beadsDir := testutil.TestDB(t)
 	child := testutil.CreateBead(t, beadsDir, "step-checkfail-child")
@@ -144,15 +288,16 @@ func TestFinishStepCheckFailureLeavesBeadsOpen(t *testing.T) {
 	mustRunTicket(t, beadsDir, "dir", "worktree", child, bare)
 	childWT := worktreePath(bare, child)
 	writeStepsYAML(t, bare, ""+
-		"- selector: \"true\"\n"+
-		"  title: failing check\n"+
-		"  check: \"echo nope-marker; exit 3\"\n")
+		"- condition: \"true\"\n"+
+		"  steps:\n"+
+		"    - title: failing check\n"+
+		"      check: \"echo nope-marker; exit 3\"\n")
 
 	_, stderr, code := testutil.RunTicketIn(t, beadsDir, "finish", child)
 	if code == 0 {
 		t.Fatal("finish succeeded despite failing check, want error")
 	}
-	if !strings.Contains(stderr, "check command failed") || !strings.Contains(stderr, "nope-marker") {
+	if !strings.Contains(stderr, "check failed") || !strings.Contains(stderr, "nope-marker") {
 		t.Errorf("stderr=%q want to mention the failed check and its output", stderr)
 	}
 
@@ -160,8 +305,8 @@ func TestFinishStepCheckFailureLeavesBeadsOpen(t *testing.T) {
 	if len(steps) != 1 {
 		t.Fatalf("expected the step-bead to have been created, got %v", steps)
 	}
-	if got := beadStatus(t, beadsDir, steps[0]); got != "open" {
-		t.Errorf("step-bead status=%q want open after failed check", got)
+	if got := beadStatus(t, beadsDir, steps[0]); got != "in_progress" {
+		t.Errorf("step-bead status=%q want in_progress after failed check", got)
 	}
 	if got := beadStatus(t, beadsDir, child); got != "open" {
 		t.Errorf("ticket status=%q want still open after failed check", got)
@@ -171,38 +316,48 @@ func TestFinishStepCheckFailureLeavesBeadsOpen(t *testing.T) {
 	}
 }
 
-// TestFinishStepCompleteFailureAbortsBeforeCheck: a failing complete aborts
-// before check is reached, leaving the step-bead open.
-func TestFinishStepCompleteFailureAbortsBeforeCheck(t *testing.T) {
+// TestFinishStepCompleteFailureSkipsCheck: a failing complete leaves the step
+// in-progress and does NOT run check; the ticket stays open.
+func TestFinishStepCompleteFailureSkipsCheck(t *testing.T) {
 	t.Parallel()
 	beadsDir := testutil.TestDB(t)
 	child := testutil.CreateBead(t, beadsDir, "step-completefail-child")
 	bare := bareRepo(t, "main")
 
 	mustRunTicket(t, beadsDir, "dir", "worktree", child, bare)
+	checkRan := filepath.Join(t.TempDir(), "check-ran.txt")
 	writeStepsYAML(t, bare, ""+
-		"- selector: \"true\"\n"+
-		"  complete: \"echo boom-complete; exit 4\"\n"+
-		"  check: \"echo should-not-run > check-ran.txt\"\n")
+		"- condition: \"true\"\n"+
+		"  steps:\n"+
+		"    - title: bad complete\n"+
+		"      complete: \"echo boom-complete; exit 4\"\n"+
+		"      check: \"echo ran > "+checkRan+"\"\n")
 
 	_, stderr, code := testutil.RunTicketIn(t, beadsDir, "finish", child)
 	if code == 0 {
 		t.Fatal("finish succeeded despite failing complete, want error")
 	}
-	if !strings.Contains(stderr, "complete command failed") || !strings.Contains(stderr, "boom-complete") {
+	if !strings.Contains(stderr, "complete failed") || !strings.Contains(stderr, "boom-complete") {
 		t.Errorf("stderr=%q want to mention the failed complete and its output", stderr)
 	}
-	if _, err := os.Stat(filepath.Join(worktreePath(bare, child), "check-ran.txt")); !os.IsNotExist(err) {
-		t.Errorf("check ran despite failed complete (check-ran.txt exists)")
+	if _, err := os.Stat(checkRan); !os.IsNotExist(err) {
+		t.Errorf("check ran despite failed complete (%s exists)", checkRan)
+	}
+	steps := childrenWithLabel(t, beadsDir, child, finish.StepLabel)
+	if len(steps) != 1 {
+		t.Fatalf("expected one step-bead, got %v", steps)
+	}
+	if got := beadStatus(t, beadsDir, steps[0]); got != "in_progress" {
+		t.Errorf("step status=%q want in_progress after failed complete", got)
 	}
 	if got := beadStatus(t, beadsDir, child); got != "open" {
 		t.Errorf("ticket status=%q want still open after failed complete", got)
 	}
 }
 
-// TestFinishStepInvalidYAMLAborts: a malformed finish-steps.yaml (missing the
-// required `check`) aborts loudly rather than silently dropping to the Go
-// fallback.
+// TestFinishStepInvalidYAMLAborts: a malformed finish-steps.yaml (a step
+// missing the required `check`) aborts loudly rather than silently dropping to
+// the Go fallback.
 func TestFinishStepInvalidYAMLAborts(t *testing.T) {
 	t.Parallel()
 	beadsDir := testutil.TestDB(t)
@@ -210,7 +365,10 @@ func TestFinishStepInvalidYAMLAborts(t *testing.T) {
 	bare := bareRepo(t, "main")
 
 	mustRunTicket(t, beadsDir, "dir", "worktree", child, bare)
-	writeStepsYAML(t, bare, "- selector: \"true\"\n")
+	writeStepsYAML(t, bare, ""+
+		"- condition: \"true\"\n"+
+		"  steps:\n"+
+		"    - title: no-check step\n")
 
 	_, stderr, code := testutil.RunTicketIn(t, beadsDir, "finish", child)
 	if code == 0 {
@@ -221,6 +379,62 @@ func TestFinishStepInvalidYAMLAborts(t *testing.T) {
 	}
 	if got := beadStatus(t, beadsDir, child); got != "open" {
 		t.Errorf("ticket status=%q want still open after config error", got)
+	}
+}
+
+// TestFinishStepBlockedByUnknownTitleAborts: a blocked_by edge that names a
+// non-existent step is a config error and aborts loudly.
+func TestFinishStepBlockedByUnknownTitleAborts(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	child := testutil.CreateBead(t, beadsDir, "step-badedge-child")
+	bare := bareRepo(t, "main")
+
+	mustRunTicket(t, beadsDir, "dir", "worktree", child, bare)
+	writeStepsYAML(t, bare, ""+
+		"- condition: \"true\"\n"+
+		"  steps:\n"+
+		"    - title: real\n"+
+		"      check: \"true\"\n"+
+		"      blocked_by: [ghost]\n")
+
+	_, stderr, code := testutil.RunTicketIn(t, beadsDir, "finish", child)
+	if code == 0 {
+		t.Fatal("finish succeeded with a blocked_by to an unknown step, want error")
+	}
+	if !strings.Contains(stderr, "ghost") || !strings.Contains(stderr, "not a step") {
+		t.Errorf("stderr=%q want to flag the unknown blocked_by target", stderr)
+	}
+	if steps := childrenWithLabel(t, beadsDir, child, finish.StepLabel); len(steps) != 0 {
+		t.Errorf("expected no step-beads created on config error, got %v", steps)
+	}
+}
+
+// TestFinishStepCycleAborts: a blocked_by cycle would deadlock the advance and
+// is rejected at load time.
+func TestFinishStepCycleAborts(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	child := testutil.CreateBead(t, beadsDir, "step-cycle-child")
+	bare := bareRepo(t, "main")
+
+	mustRunTicket(t, beadsDir, "dir", "worktree", child, bare)
+	writeStepsYAML(t, bare, ""+
+		"- condition: \"true\"\n"+
+		"  steps:\n"+
+		"    - title: x\n"+
+		"      check: \"true\"\n"+
+		"      blocked_by: [y]\n"+
+		"    - title: y\n"+
+		"      check: \"true\"\n"+
+		"      blocked_by: [x]\n")
+
+	_, stderr, code := testutil.RunTicketIn(t, beadsDir, "finish", child)
+	if code == 0 {
+		t.Fatal("finish succeeded on a blocked_by cycle, want error")
+	}
+	if !strings.Contains(stderr, "cycle") {
+		t.Errorf("stderr=%q want to mention the blocked_by cycle", stderr)
 	}
 }
 
@@ -238,9 +452,10 @@ func TestFinishStepGlobalFallback(t *testing.T) {
 	// No finish-steps.yaml in the bare repo; only the global one.
 	marker := filepath.Join(t.TempDir(), "where.txt")
 	writeGlobalStepsYAML(t, beadsDir, ""+
-		"- selector: \"true\"\n"+
-		"  title: global step\n"+
-		"  check: \"pwd > "+marker+"\"\n")
+		"- condition: \"true\"\n"+
+		"  steps:\n"+
+		"    - title: global step\n"+
+		"      check: \"pwd > "+marker+"\"\n")
 
 	if _, stderr, code := testutil.RunTicketIn(t, beadsDir, "finish", child); code != 0 {
 		t.Fatalf("finish exit=%d stderr=%q", code, stderr)
@@ -253,16 +468,12 @@ func TestFinishStepGlobalFallback(t *testing.T) {
 	if got := beadTitle(t, beadsDir, steps[0]); got != "global step" {
 		t.Errorf("step title=%q want %q (global config not used?)", got, "global step")
 	}
-	if got, err := os.ReadFile(marker); err != nil {
-		t.Errorf("read cwd marker: %v", err)
-	} else if strings.TrimSpace(string(got)) != childWT {
-		t.Errorf("global step ran in %q, want worktree %q", strings.TrimSpace(string(got)), childWT)
-	}
+	assertRanIn(t, marker, childWT)
 }
 
-// TestFinishStepGlobalNoWorktree exercises the case the operator wants to try:
-// a top-level ticket with NO linked dirs. The global config still drives a
-// step-bead; commands run in the env folder, and cleanup closes the ticket.
+// TestFinishStepGlobalNoWorktree exercises a top-level ticket with NO linked
+// dirs. The global config still drives a step-bead; commands run in the env
+// folder, and cleanup closes the ticket.
 func TestFinishStepGlobalNoWorktree(t *testing.T) {
 	t.Parallel()
 	beadsDir := testutil.TestDB(t)
@@ -272,9 +483,10 @@ func TestFinishStepGlobalNoWorktree(t *testing.T) {
 
 	marker := filepath.Join(t.TempDir(), "where.txt")
 	writeGlobalStepsYAML(t, beadsDir, ""+
-		"- selector: \"true\"\n"+
-		"  title: nodir step\n"+
-		"  check: \"pwd > "+marker+"\"\n")
+		"- condition: \"true\"\n"+
+		"  steps:\n"+
+		"    - title: nodir step\n"+
+		"      check: \"pwd > "+marker+"\"\n")
 
 	if _, stderr, code := testutil.RunTicketIn(t, beadsDir, "finish", child); code != 0 {
 		t.Fatalf("finish exit=%d stderr=%q", code, stderr)
@@ -290,14 +502,54 @@ func TestFinishStepGlobalNoWorktree(t *testing.T) {
 	if _, err := os.Stat(envPath); !os.IsNotExist(err) {
 		t.Errorf("env folder %s still exists after finish (err=%v)", envPath, err)
 	}
-	if got, err := os.ReadFile(marker); err != nil {
-		t.Errorf("read cwd marker: %v", err)
-	} else if strings.TrimSpace(string(got)) != envPath {
-		t.Errorf("step ran in %q, want env folder %q", strings.TrimSpace(string(got)), envPath)
-	}
+	assertRanIn(t, marker, envPath)
 }
 
 // --- helpers ---
+
+// failFirst is a check command that fails (exit 1) the first time it runs —
+// creating its marker file — and passes (exit 0) on every subsequent run. It
+// simulates a check that only succeeds after some external state settles.
+func failFirst(marker string) string {
+	return fmt.Sprintf("'test -f %s && exit 0; touch %s; exit 1'", marker, marker)
+}
+
+// assertRanIn reads the cwd a step's command recorded into marker (via `pwd`)
+// and asserts it is wantDir. Both sides are resolved with EvalSymlinks because
+// `pwd` reports the real path while t.TempDir() may hand back a symlinked one
+// (on macOS /tmp → /private/tmp).
+func assertRanIn(t *testing.T, marker, wantDir string) {
+	t.Helper()
+	raw, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("read cwd marker: %v", err)
+	}
+	got := resolve(t, strings.TrimSpace(string(raw)))
+	want := resolve(t, wantDir)
+	if got != want {
+		t.Errorf("step ran in %q, want %q", got, want)
+	}
+}
+
+// resolve canonicalises p by resolving symlinks. It works even when p itself
+// no longer exists (cleanup may have removed the worktree by assert time): it
+// resolves the longest existing ancestor and rejoins the remainder, which is
+// enough to canonicalise the /tmp → /private/tmp symlink that matters here.
+func resolve(t *testing.T, p string) string {
+	t.Helper()
+	rest := ""
+	for d := p; ; {
+		if r, err := filepath.EvalSymlinks(d); err == nil {
+			return filepath.Join(r, rest)
+		}
+		parent := filepath.Dir(d)
+		if parent == d {
+			return p
+		}
+		rest = filepath.Join(filepath.Base(d), rest)
+		d = parent
+	}
+}
 
 func writeStepsYAML(t *testing.T, bare, body string) {
 	t.Helper()
@@ -322,6 +574,25 @@ func writeGlobalStepsYAML(t *testing.T, beadsDir, body string) {
 func mustMakeEnv(t *testing.T, beadsDir, id string) {
 	t.Helper()
 	mustRunTicket(t, beadsDir, "env", id)
+}
+
+// assertStatus fails unless bead id is in the expected status.
+func assertStatus(t *testing.T, beadsDir, id, want string) {
+	t.Helper()
+	if got := beadStatus(t, beadsDir, id); got != want {
+		t.Errorf("bead %s status=%q want %q", id, got, want)
+	}
+}
+
+// stepsByTitle maps each finish-step child of ticketID to its bead id by title.
+func stepsByTitle(t *testing.T, beadsDir, ticketID string) map[string]string {
+	t.Helper()
+	ids := childrenWithLabel(t, beadsDir, ticketID, finish.StepLabel)
+	out := make(map[string]string, len(ids))
+	for _, id := range ids {
+		out[beadTitle(t, beadsDir, id)] = id
+	}
+	return out
 }
 
 // childrenWithLabel returns the ids of beads whose parent is ticketID and
