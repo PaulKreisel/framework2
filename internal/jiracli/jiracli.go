@@ -23,6 +23,7 @@ import (
 	"framework2/internal/bdcli"
 	"framework2/internal/dir"
 	"framework2/internal/githubcli"
+	"framework2/internal/pr"
 	"framework2/internal/project"
 	"framework2/internal/projectconfig"
 	"framework2/internal/repoclone"
@@ -70,7 +71,7 @@ func RunWithOptions(opts Options, args []string, stdout, stderr io.Writer) int {
 	if opts.BeadsDir == "" {
 		opts.BeadsDir = project.Dir()
 	}
-	if err := dispatch(opts, args, stdout); err != nil {
+	if err := dispatch(opts, args, stdout, stderr); err != nil {
 		fmt.Fprintln(stderr, "jira:", err)
 		return 1
 	}
@@ -85,11 +86,15 @@ database. Prints the new bead id to stdout.
   --discover-branches   after creating the bead(s), run `+"`github branches <KEY>`"+`
                         and attach each distinct owner/repo as a worktree on
                         the root bead, resolving local bare paths via the
-                        `+"`bare-repo:`"+` template in project.yaml.
+                        `+"`bare-repo:`"+` template in project.yaml. Each
+                        discovered branch's unique open PR is then attached to
+                        the root bead's metadata.prs (same as `+"`ticket pr link`"+`);
+                        branches with zero or multiple open PRs are skipped
+                        with a notice.
 
 Auth: requires KNIME_ATLASSIAN_EMAIL and KNIME_ATLASSIAN_API_TOKEN.`
 
-func dispatch(opts Options, args []string, stdout io.Writer) error {
+func dispatch(opts Options, args []string, stdout, stderr io.Writer) error {
 	var (
 		key             string
 		sawKey          bool
@@ -136,7 +141,7 @@ func dispatch(opts Options, args []string, stdout io.Writer) error {
 		return err
 	}
 	if discoverBranchs {
-		if err := discoverAndAttach(ctx, opts, cfg, key, rootID); err != nil {
+		if err := discoverAndAttach(ctx, opts, cfg, key, rootID, stderr); err != nil {
 			return err
 		}
 	}
@@ -146,14 +151,17 @@ func dispatch(opts Options, args []string, stdout io.Writer) error {
 // discoverAndAttach runs `github branches <key>` and attaches each distinct
 // owner/repo to rootID as a worktree, resolving local bare-repo paths via the
 // `bare-repo:` template in project.yaml. Strict: any missing template or
-// missing bare path fails the whole call.
-func discoverAndAttach(ctx context.Context, opts Options, cfg projectconfig.Config, key, rootID string) error {
+// missing bare path fails the whole call. After attaching, each discovered
+// branch's unique open PR is linked to rootID's metadata.prs (the same effect
+// as `ticket pr link`); per-branch notices go to stderr so stdout stays the
+// bead id alone.
+func discoverAndAttach(ctx context.Context, opts Options, cfg projectconfig.Config, key, rootID string, stderr io.Writer) error {
 	if cfg.BareRepo == "" {
 		return fmt.Errorf("--discover-branches: project.yaml has no `bare-repo:` template")
 	}
 	runner := opts.GHRunner
 	if runner == nil {
-		runner = githubcli.NewDefaultRunner(os.Stderr)
+		runner = githubcli.NewDefaultRunner(stderr)
 	}
 	matches, err := githubcli.ListBranches(ctx, runner, key)
 	if err != nil {
@@ -170,6 +178,51 @@ func discoverAndAttach(ctx context.Context, opts Options, cfg projectconfig.Conf
 		}
 		if err := dir.WorktreeForBranch(opts.DB, opts.BeadsDir, rootID, bare, m.Branch); err != nil {
 			return fmt.Errorf("--discover-branches: attach %s@%s: %w", ownerRepo, m.Branch, err)
+		}
+	}
+	return linkDiscoveredPRs(ctx, opts, runner, rootID, matches, stderr)
+}
+
+// linkDiscoveredPRs attaches the unique open PR of each discovered branch to
+// rootID, mirroring the `ticket pr link --all` semantics: branches with zero
+// or multiple open PRs are skipped with a notice, and a repo that already has
+// a PR attached on the bead is skipped too (which keeps re-runs of `jira
+// --discover-branches` idempotent). The (repo, branch) pairs come straight
+// from branch discovery, so no local-dir PR detection is needed. PR-list
+// failures are strict, consistent with the rest of the discover flow.
+func linkDiscoveredPRs(ctx context.Context, opts Options, runner githubcli.GHRunner, rootID string, matches []githubcli.Branch, stderr io.Writer) error {
+	for _, m := range matches {
+		ownerRepo := m.Owner + "/" + m.Repo
+		// Reload each iteration so earlier links are reflected in the
+		// duplicate check (consistent with `pr link --all`).
+		existing, err := pr.Load(opts.DB, opts.BeadsDir, rootID)
+		if err != nil {
+			return fmt.Errorf("--discover-branches: %w", err)
+		}
+		attached := false
+		for _, r := range existing {
+			if r.Repo == ownerRepo {
+				attached = true
+				break
+			}
+		}
+		if attached {
+			fmt.Fprintf(stderr, "%s@%s: PR already attached for %s, skipping\n", ownerRepo, m.Branch, ownerRepo)
+			continue
+		}
+		nums, err := githubcli.OpenPRNumbers(ctx, runner, ownerRepo, m.Branch)
+		if err != nil {
+			return fmt.Errorf("--discover-branches: %w", err)
+		}
+		switch len(nums) {
+		case 0:
+			fmt.Fprintf(stderr, "%s@%s: no open PR, skipping\n", ownerRepo, m.Branch)
+		case 1:
+			if err := pr.AutoLink(opts.DB, opts.BeadsDir, rootID, ownerRepo, m.Branch, nums[0], stderr); err != nil {
+				return fmt.Errorf("--discover-branches: link PR for %s@%s: %w", ownerRepo, m.Branch, err)
+			}
+		default:
+			fmt.Fprintf(stderr, "%s@%s: multiple open PRs, skipping\n", ownerRepo, m.Branch)
 		}
 	}
 	return nil

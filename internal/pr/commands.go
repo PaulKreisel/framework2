@@ -1056,6 +1056,18 @@ func branchOpenPRs(entry dir.Entry, repo string) (branch string, nums []int, err
 	return branch, nums, nil
 }
 
+// AutoLink attaches the known open PR num on repo/branch to ticketID, with
+// the same same-repo duplicate guard as the no-url `pr link` paths. Used by
+// `jira --discover-branches`, which already knows (repo, branch, number)
+// from GitHub and needs no local-dir detection.
+func AutoLink(db, beadsDir, ticketID, repo, branch string, num int, stdout io.Writer) error {
+	existing, err := Load(db, beadsDir, ticketID)
+	if err != nil {
+		return err
+	}
+	return autoLinkPR(db, beadsDir, ticketID, repo, branch, num, existing, stdout)
+}
+
 // autoLinkPR appends a Record for the open PR num on repo/branch to the bead,
 // after the same-repo duplicate guard. Shared by the no-url `pr link` paths
 // and the `pr create` path that finds a pre-existing open PR.

@@ -891,7 +891,7 @@ func TestRunDiscoverBranches(t *testing.T) {
 	fj := newFakeJira(t, map[string]fakeIssue{"FOO-1": {}})
 
 	// Fake gh runner: one org, one repo (matching the bare basename), one
-	// branch containing the search term.
+	// branch containing the search term, and one open PR on that branch.
 	now := time.Now()
 	runner := func(_ context.Context, args []string) ([]byte, error) {
 		switch {
@@ -913,6 +913,14 @@ func TestRunDiscoverBranches(t *testing.T) {
 					},
 				},
 			})
+		case len(args) >= 2 && args[0] == "pr" && args[1] == "list":
+			if got := ghFlag(args, "--repo"); got != "knime/my-repo" {
+				return nil, fmt.Errorf("pr list --repo=%q want knime/my-repo", got)
+			}
+			if got := ghFlag(args, "--head"); got != "topic/FOO-1-something" {
+				return nil, fmt.Errorf("pr list --head=%q want topic/FOO-1-something", got)
+			}
+			return json.Marshal([]map[string]any{{"number": 7}})
 		}
 		return nil, fmt.Errorf("unexpected gh args: %v", args)
 	}
@@ -950,6 +958,59 @@ func TestRunDiscoverBranches(t *testing.T) {
 	if got := strings.TrimSpace(string(out)); got != "topic/FOO-1-something" {
 		t.Errorf("worktree HEAD branch=%q want %q", got, "topic/FOO-1-something")
 	}
+	prs := loadPRs(t, beadsDir, rootID)
+	if len(prs) != 1 {
+		t.Fatalf("prs=%v want 1 (the discovered branch's open PR)", prs)
+	}
+	if got, _ := prs[0]["repo"].(string); got != "knime/my-repo" {
+		t.Errorf("prs[0].repo=%q want %q", got, "knime/my-repo")
+	}
+	if got, _ := prs[0]["number"].(float64); got != 7 {
+		t.Errorf("prs[0].number=%v want 7", got)
+	}
+	if got, _ := prs[0]["branch"].(string); got != "topic/FOO-1-something" {
+		t.Errorf("prs[0].branch=%q want %q", got, "topic/FOO-1-something")
+	}
+	if !strings.Contains(stderr.String(), "linked existing PR https://github.com/knime/my-repo/pull/7") {
+		t.Errorf("stderr=%q missing linked-PR notice", stderr.String())
+	}
+}
+
+// ghFlag returns the value following flag in args, or "" when absent.
+func ghFlag(args []string, flag string) string {
+	for i, a := range args {
+		if a == flag && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
+// loadPRs reads the ticket's metadata.prs via `bd --json show`.
+func loadPRs(t *testing.T, beadsDir, ticketID string) []map[string]any {
+	t.Helper()
+	out, err := testutil.BdCmd(beadsDir, "--json", "show", ticketID).Output()
+	if err != nil {
+		t.Fatalf("bd show %s: %v", ticketID, err)
+	}
+	var rows []struct {
+		Metadata map[string]json.RawMessage `json:"metadata"`
+	}
+	if err := json.Unmarshal(out, &rows); err != nil {
+		t.Fatalf("parse bd show %q: %v", out, err)
+	}
+	if len(rows) == 0 {
+		t.Fatalf("ticket not found: %s", ticketID)
+	}
+	raw, ok := rows[0].Metadata["prs"]
+	if !ok || len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var recs []map[string]any
+	if err := json.Unmarshal(raw, &recs); err != nil {
+		t.Fatalf("parse prs metadata %q: %v", raw, err)
+	}
+	return recs
 }
 
 // TestRunDiscoverBranchesMultiplePerRepo ensures every discovered branch on
@@ -992,6 +1053,11 @@ func TestRunDiscoverBranchesMultiplePerRepo(t *testing.T) {
 					},
 				},
 			})
+		case len(args) >= 2 && args[0] == "pr" && args[1] == "list":
+			// One open PR per branch; only the first may be linked (one PR
+			// record per repo on a bead).
+			num := map[string]int{"topic/FOO-1-a": 11, "topic/FOO-1-b": 22}[ghFlag(args, "--head")]
+			return json.Marshal([]map[string]any{{"number": num}})
 		}
 		return nil, fmt.Errorf("unexpected gh args: %v", args)
 	}
@@ -1021,6 +1087,90 @@ func TestRunDiscoverBranchesMultiplePerRepo(t *testing.T) {
 		if !gotBranches[want] {
 			t.Errorf("missing entry for branch %q; got %v", want, gotBranches)
 		}
+	}
+	// PR linking is per repo: the first branch's PR is linked, the second
+	// branch (same repo) is skipped with a notice.
+	prs := loadPRs(t, beadsDir, rootID)
+	if len(prs) != 1 {
+		t.Fatalf("prs=%v want 1 (one PR record per repo)", prs)
+	}
+	if got, _ := prs[0]["number"].(float64); got != 11 {
+		t.Errorf("prs[0].number=%v want 11 (first discovered branch)", got)
+	}
+	if !strings.Contains(stderr.String(), "PR already attached") {
+		t.Errorf("stderr=%q missing same-repo skip notice", stderr.String())
+	}
+}
+
+// TestRunDiscoverBranchesPRSkips covers the non-linking outcomes: a branch
+// with no open PR and a branch with several open PRs are both skipped (with a
+// notice) and the command still succeeds with no prs metadata.
+func TestRunDiscoverBranchesPRSkips(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	bare := bareRepoForTest(t, "topic/FOO-1-none", "topic/FOO-1-many")
+	bareDir := filepath.Dir(bare)
+	yaml := fmt.Sprintf("bare-repo: %q\nworktree:\n  path: %q\n",
+		filepath.Join(bareDir, "{repo-name}.git"),
+		filepath.Join(bareDir, "{bare-repo-name}-{branch}"))
+	if err := os.WriteFile(filepath.Join(beadsDir, "project.yaml"), []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(filepath.Join(beadsDir, "project.yaml")) })
+
+	fj := newFakeJira(t, map[string]fakeIssue{"FOO-1": {}})
+
+	now := time.Now()
+	runner := func(_ context.Context, args []string) ([]byte, error) {
+		switch {
+		case len(args) >= 2 && args[0] == "api" && args[1] == "user/orgs":
+			return []byte("knime\n"), nil
+		case len(args) >= 2 && args[0] == "repo" && args[1] == "list":
+			return json.Marshal([]map[string]any{{
+				"name":     "my-repo",
+				"pushedAt": now.Format(time.RFC3339),
+			}})
+		case len(args) >= 2 && args[0] == "api" && args[1] == "graphql":
+			return json.Marshal(map[string]any{
+				"data": map[string]any{
+					"r0": map[string]any{
+						"name": "my-repo",
+						"refs": map[string]any{"nodes": []map[string]string{
+							{"name": "topic/FOO-1-none"},
+							{"name": "topic/FOO-1-many"},
+						}},
+					},
+				},
+			})
+		case len(args) >= 2 && args[0] == "pr" && args[1] == "list":
+			if ghFlag(args, "--head") == "topic/FOO-1-many" {
+				return json.Marshal([]map[string]any{{"number": 1}, {"number": 2}})
+			}
+			return []byte("[]"), nil
+		}
+		return nil, fmt.Errorf("unexpected gh args: %v", args)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := jiracli.RunWithOptions(jiracli.Options{
+		BaseURL:  fj.server.URL,
+		BeadsDir: beadsDir,
+		Email:    "me@example.com",
+		Token:    "tok",
+		GHRunner: githubcli.GHRunner(runner),
+	}, []string{"FOO-1", "--discover-branches"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
+	}
+	rootID := strings.TrimSpace(stdout.String())
+	if prs := loadPRs(t, beadsDir, rootID); prs != nil {
+		t.Fatalf("prs=%v want none", prs)
+	}
+	if !strings.Contains(stderr.String(), "no open PR, skipping") {
+		t.Errorf("stderr=%q missing no-open-PR notice", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "multiple open PRs, skipping") {
+		t.Errorf("stderr=%q missing multiple-PRs notice", stderr.String())
 	}
 }
 
