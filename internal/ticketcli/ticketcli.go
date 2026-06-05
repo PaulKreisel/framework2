@@ -68,6 +68,13 @@ subcommands:
                                      parent's. selector matches path/localRepo
                                      /bareRepo; may be omitted when the ticket
                                      has exactly one linked dir.
+  dir sync-check [<id>]              for each linked dir that has a branch with
+                                     a configured upstream, fetch and verify it
+                                     is in sync (0 ahead, 0 behind). Read-only
+                                     (fetch only). Dirs that are gone, detached,
+                                     or have no upstream are skipped (pass).
+                                     Exit non-zero, listing the offenders, when
+                                     a checkable dir diverges. Finish-step check.
   dir slug [<id>] <slug>             set the bead's slug (refused once the slug
                                      has been frozen by a branch/worktree)
   dir slug --ai [<id>]               refine the slug via Claude Haiku in place;
@@ -441,6 +448,12 @@ func runDir(db, beadsDir, ticket string, args []string, stdout io.Writer) error 
 		return runSlug(db, beadsDir, ticket, rest)
 	case "status":
 		return runDirStatus(db, beadsDir, ticket, rest, stdout)
+	case "sync-check":
+		id, _, err := resolveID(ticket, rest, 0, "usage: ticket dir sync-check [<id>]")
+		if err != nil {
+			return err
+		}
+		return dir.SyncCheck(db, beadsDir, id, stdout)
 	default:
 		return fmt.Errorf("unknown dir subcommand %q", sub)
 	}
