@@ -129,13 +129,20 @@ func ensureWorktree(db, beadsDir, ticketID, bare string, cfg projectconfig.Confi
 }
 
 // WorktreeForBranch creates a worktree on bareRepo that checks out the given
-// pre-existing branch (no template-derived branch name, no new branch off
-// base). Used by `jira --discover-branches` to attach worktrees for the exact
-// branches GitHub reports for a Jira key.
+// branch (no template-derived branch name, no parent cascade). Used by
+// `jira --discover-branches` to attach worktrees for the exact branches GitHub
+// reports for a Jira key, and by `dir worktree --branch` to attach an explicit
+// branch.
+//
+// When createMissing is true and the branch exists neither locally nor on
+// origin, a fresh branch is created off the repo's default base (this is the
+// `dir worktree --branch` behavior). When false, a missing branch is an error
+// (the `jira --discover-branches` branches are reported by GitHub, so a missing
+// one is a genuine anomaly).
 //
 // Idempotent on (bare, branch): if the ticket already has an entry pointing
 // at bareRepo with this branch, returns without error.
-func WorktreeForBranch(db, beadsDir, ticketID, bareRepo, branch string) error {
+func WorktreeForBranch(db, beadsDir, ticketID, bareRepo, branch string, createMissing bool) error {
 	if branch == "" {
 		return fmt.Errorf("WorktreeForBranch: empty branch")
 	}
@@ -192,7 +199,7 @@ func WorktreeForBranch(db, beadsDir, ticketID, bareRepo, branch string) error {
 		} else if !os.IsNotExist(err) {
 			return fmt.Errorf("stat worktree path: %w", err)
 		}
-		if err := gitWorktreeAddExisting(bare, wtPath, branch); err != nil {
+		if err := gitWorktreeAddExisting(bare, wtPath, branch, createMissing); err != nil {
 			return err
 		}
 		if err := link(db, beadsDir, ticketID, wtPath, bare); err != nil {

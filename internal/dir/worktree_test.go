@@ -318,7 +318,7 @@ worktree:
 		gitInTest(t, source, "checkout", "-q", "-b", b)
 		gitInTest(t, source, "commit", "--allow-empty", "-q", "-m", "on "+b)
 		gitInTest(t, source, "checkout", "-q", "main")
-		if err := dir.WorktreeForBranch("", beadsDir, parent, bare, b); err != nil {
+		if err := dir.WorktreeForBranch("", beadsDir, parent, bare, b, false); err != nil {
 			t.Fatalf("WorktreeForBranch(%s): %v", b, err)
 		}
 	}
@@ -505,7 +505,7 @@ func TestWorktreeForBranchDiffersFromTemplate(t *testing.T) {
 	explicitSHA := gitInTest(t, source, "rev-parse", "HEAD")
 	gitInTest(t, source, "checkout", "-q", "main")
 
-	if err := dir.WorktreeForBranch("", beadsDir, ticket, bare, explicit); err != nil {
+	if err := dir.WorktreeForBranch("", beadsDir, ticket, bare, explicit, false); err != nil {
 		t.Fatalf("WorktreeForBranch: %v", err)
 	}
 	entries := listEntries(t, beadsDir, ticket)
@@ -546,7 +546,7 @@ func TestWorktreeForBranchMatchesTemplate(t *testing.T) {
 	wantSHA := gitInTest(t, source, "rev-parse", "HEAD")
 	gitInTest(t, source, "checkout", "-q", "main")
 
-	if err := dir.WorktreeForBranch("", beadsDir, ticket, bare, branch); err != nil {
+	if err := dir.WorktreeForBranch("", beadsDir, ticket, bare, branch, false); err != nil {
 		t.Fatalf("WorktreeForBranch: %v", err)
 	}
 	entries := listEntries(t, beadsDir, ticket)
@@ -581,7 +581,7 @@ worktree:
 	}
 
 	for _, b := range []string{"topic/a", "topic/b"} {
-		if err := dir.WorktreeForBranch("", beadsDir, ticket, bare, b); err != nil {
+		if err := dir.WorktreeForBranch("", beadsDir, ticket, bare, b, false); err != nil {
 			t.Fatalf("WorktreeForBranch(%s): %v", b, err)
 		}
 	}
@@ -631,6 +631,63 @@ func TestDirWorktreeBranchFlagAttachesRemoteBranch(t *testing.T) {
 	}
 	if sha := refSHA(t, entries[0].Path, "HEAD"); sha != explicitSHA {
 		t.Errorf("HEAD=%q want explicit SHA %q", sha, explicitSHA)
+	}
+}
+
+// TestDirWorktreeBranchFlagCreatesMissingBranch drives the `--branch` CLI path
+// with a branch that exists neither locally nor on origin: it must be created
+// off the repo's default base (here, origin/HEAD == main) rather than erroring.
+func TestDirWorktreeBranchFlagCreatesMissingBranch(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBead(t, beadsDir, "wt-branch-create")
+	bare := bareRepo(t, "main")
+	gitInTest(t, bare, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
+	gitInTest(t, bare, "fetch", "-q", "origin")
+
+	branch := "todo/SKEEK-254-add-on-reset-hook"
+	if _, stderr, code := testutil.RunTicketIn(t, beadsDir, "dir", "worktree", ticket, bare, "--branch", branch); code != 0 {
+		t.Fatalf("worktree exit=%d stderr=%q", code, stderr)
+	}
+	entries := listEntries(t, beadsDir, ticket)
+	if len(entries) != 1 {
+		t.Fatalf("entries=%+v want 1", entries)
+	}
+	if entries[0].Branch != branch {
+		t.Errorf("branch=%q want %q", entries[0].Branch, branch)
+	}
+	if !worktreeOnBranch(t, entries[0].Path, branch) {
+		t.Errorf("worktree not on branch %q", branch)
+	}
+	// The new branch must start at the default base (main) commit.
+	if sha := refSHA(t, entries[0].Path, "HEAD"); sha != bareBranchSHA(t, bare, "main") {
+		t.Errorf("worktree HEAD %q != bare main %q (new branch should start at default base)", sha, bareBranchSHA(t, bare, "main"))
+	}
+	// A freshly created branch has no upstream to track.
+	out, err := exec.Command("git", "-C", entries[0].Path, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}").CombinedOutput()
+	if err == nil {
+		t.Errorf("created branch has upstream %q, want none", strings.TrimSpace(string(out)))
+	}
+}
+
+// TestWorktreeForBranchNoCreateErrorsWhenMissing locks in that the
+// non-creating caller (jira --discover-branches) still errors when the branch
+// exists nowhere, rather than silently fabricating one.
+func TestWorktreeForBranchNoCreateErrorsWhenMissing(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBead(t, beadsDir, "wt-no-create")
+	bare := bareRepo(t, "main")
+
+	err := dir.WorktreeForBranch("", beadsDir, ticket, bare, "feature/never-existed", false)
+	if err == nil {
+		t.Fatal("WorktreeForBranch(createMissing=false) succeeded for a missing branch; want error")
+	}
+	if !strings.Contains(err.Error(), "not found locally or on origin") {
+		t.Errorf("err=%v want 'not found locally or on origin'", err)
+	}
+	if got := listEntries(t, beadsDir, ticket); len(got) != 0 {
+		t.Errorf("entries=%+v want none", got)
 	}
 }
 
@@ -1019,7 +1076,7 @@ func TestFastForwardWorktreesNoParentEntry(t *testing.T) {
 	gitInTest(t, source2, "checkout", "-q", "-b", childBranch)
 	gitInTest(t, source2, "commit", "--allow-empty", "-q", "-m", "branch on bare2")
 	gitInTest(t, source2, "checkout", "-q", "main")
-	if err := dir.WorktreeForBranch("", beadsDir, child, bare2, childBranch); err != nil {
+	if err := dir.WorktreeForBranch("", beadsDir, child, bare2, childBranch, false); err != nil {
 		t.Fatalf("WorktreeForBranch: %v", err)
 	}
 

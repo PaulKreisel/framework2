@@ -58,9 +58,11 @@ subcommands:
                                      checked out instead of the template-derived
                                      one: origin is fetched best-effort and the
                                      worktree tracks origin/<name> if it shows
-                                     up, otherwise the local branch is reused;
-                                     errors when the branch exists in neither
-                                     place. No parent cascade in this mode.
+                                     up, otherwise the local branch is reused; if
+                                     the branch exists in neither place it is
+                                     created off the repo's default base
+                                     (origin/HEAD, or local main/master). No
+                                     parent cascade in this mode.
   dir status [<id>] [<selector>] [--json]
                                      show working-tree status of one linked dir
                                      and (when the parent links the same bare
@@ -501,7 +503,8 @@ func runDirStatus(db, beadsDir, ticket string, args []string, stdout io.Writer) 
 // runDirWorktree handles `ticket dir worktree [<id>] <bare-repo> [--branch <name>]`.
 // Without --branch we delegate to [dir.Worktree] (template-derived branch,
 // parent cascade). With --branch we delegate to [dir.WorktreeForBranch]
-// (explicit name, origin fetch + remote-track detection, no cascade).
+// (explicit name, origin fetch + remote-track detection, created off the
+// default base when it exists nowhere, no cascade).
 func runDirWorktree(db, beadsDir, ticket string, args []string) error {
 	const usage = "usage: ticket dir worktree [<id>] <bare-repo> [--branch <name>]"
 	var branch string
@@ -526,7 +529,7 @@ func runDirWorktree(db, beadsDir, ticket string, args []string) error {
 		return err
 	}
 	if branch != "" {
-		if err := dir.WorktreeForBranch(db, beadsDir, id, tail[0], branch); err != nil {
+		if err := dir.WorktreeForBranch(db, beadsDir, id, tail[0], branch, true); err != nil {
 			return err
 		}
 	} else {

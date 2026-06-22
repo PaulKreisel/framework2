@@ -293,7 +293,7 @@ func TestFinishErrorsOnMultipleParentWorktreesSameBare(t *testing.T) {
 	gitDo(t, source, "checkout", "-q", "-b", "extra/branch")
 	gitDo(t, source, "commit", "--allow-empty", "-q", "-m", "extra")
 	gitDo(t, source, "checkout", "-q", "main")
-	if err := dir.WorktreeForBranch("", beadsDir, parent, bare, "extra/branch"); err != nil {
+	if err := dir.WorktreeForBranch("", beadsDir, parent, bare, "extra/branch", false); err != nil {
 		t.Fatalf("WorktreeForBranch: %v", err)
 	}
 

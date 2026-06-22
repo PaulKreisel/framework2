@@ -119,8 +119,10 @@ func gitFastForwardOnto(wtPath, parentBranch string) (advanced, skipped bool) {
 // gitWorktreeAddExisting creates a worktree at wtPath that checks out the
 // pre-existing branch. Fetches it from origin best-effort, then uses the
 // local branch if present, otherwise creates one tracking the remote ref.
-// Errors if the branch is found in neither place.
-func gitWorktreeAddExisting(repo, wtPath, branch string) error {
+// If the branch is found in neither place: when createMissing is true a fresh
+// branch is created off the repo's default base (origin/HEAD, or local
+// main/master); when it is false it errors instead.
+func gitWorktreeAddExisting(repo, wtPath, branch string, createMissing bool) error {
 	_ = exec.Command("git", "-C", repo, "fetch", "origin",
 		"+refs/heads/"+branch+":refs/remotes/origin/"+branch).Run()
 
@@ -133,6 +135,15 @@ func gitWorktreeAddExisting(repo, wtPath, branch string) error {
 		cmd = exec.Command("git", "-C", repo, "worktree", "add", wtPath, branch)
 	case hasRemote:
 		cmd = exec.Command("git", "-C", repo, "worktree", "add", "-b", branch, wtPath, "refs/remotes/origin/"+branch)
+	case createMissing:
+		base, err := gitDefaultBase(repo)
+		if err != nil {
+			return err
+		}
+		// --no-track for the same reason as in gitWorktreeAdd: base may be a
+		// remote-tracking ref (e.g. origin/master) and we only want the new
+		// branch to start at its commit, not to track it.
+		cmd = exec.Command("git", "-C", repo, "worktree", "add", "--no-track", "-b", branch, wtPath, base)
 	default:
 		return fmt.Errorf("branch %q not found locally or on origin in %s", branch, repo)
 	}
