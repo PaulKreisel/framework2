@@ -727,7 +727,7 @@ func TestRunWithOptionsEmptyPromptFallsBack(t *testing.T) {
 // TestRunLoopRelaunchDoesNotInheritInitialPrompt asserts that the iter-2+
 // wrapper-loop relaunch path does NOT re-inject the original launch's
 // InitialPrompt — the signal file's extraArgs are the sole source of the
-// post-relaunch prompt (today's default: "Relaunch successful").
+// post-relaunch prompt (today's default: "Ignore the kill, adding was successful. Continue").
 func TestRunLoopRelaunchDoesNotInheritInitialPrompt(t *testing.T) {
 	beadsDir := testutil.TestDB(t)
 	ticket := testutil.CreateBeadFull(t, beadsDir, "agent-relaunch-prompt-inherit", "x", "")

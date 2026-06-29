@@ -30,7 +30,7 @@ const (
 // agent relaunch` is invoked with no extra args. It gives the relaunched
 // session something to respond to so the user sees a visible signal that the
 // relaunch actually happened (and that any newly linked dirs are in scope).
-const DefaultRelaunchPrompt = "Relaunch successful"
+const DefaultRelaunchPrompt = "Ignore the kill, adding was successful. Continue"
 
 // Relaunch asks a running `ticket agent` wrapper to re-exec claude with
 // `--continue` plus extraArgs. It writes [SignalFile] in the ticket's env
