@@ -84,8 +84,9 @@ func RunWithResume(db, beadsDir, ticketID, resumeSessionID string, mode Mode) er
 
 // RunWithOptions resolves the env folder for ticketID — creating it via
 // [env.Create] if it doesn't exist yet — regenerates the auto-managed context
-// files (description.md, .claude/settings.json), and then execs AgentCommand
-// from inside the env folder in a loop: after each exit, if a [SignalFile] is
+// files (description.md) and linked-dir list, and then execs AgentCommand
+// (passing the linked dirs via --add-dir) from inside the env folder in a
+// loop: after each exit, if a [SignalFile] is
 // present, the loop regenerates context and re-execs AgentCommand with
 // `--continue` plus the signal's args appended.
 //
@@ -193,11 +194,14 @@ func RunWithOptions(db, beadsDir, ticketID string, mode Mode, opts RunOptions) e
 
 	var extraArgs []string
 	for {
-		prompt, err := Regenerate(db, beadsDir, envPath, ticketID, mode)
+		prompt, dirPaths, err := Regenerate(db, beadsDir, envPath, ticketID, mode)
 		if err != nil {
 			return fmt.Errorf("regenerate env context: %w", err)
 		}
 		argv := append([]string{}, AgentDefaultArgs...)
+		for _, p := range dirPaths {
+			argv = append(argv, "--add-dir", p)
+		}
 		argv = append(argv, "--append-system-prompt", prompt)
 		// First iteration: pin claude to our chosen session id, either by
 		// having it allocate a fresh session under that id (`--session-id`)
@@ -261,31 +265,45 @@ func RunWithOptions(db, beadsDir, ticketID string, mode Mode, opts RunOptions) e
 
 // Regenerate rewrites the env's auto-managed context files from the current
 // state of the ticket and its linked dirs, and returns the system prompt the
-// wrapper should pass via --append-system-prompt. Idempotent. Exported so
+// wrapper should pass via --append-system-prompt plus the linked dirs' paths
+// the wrapper should grant via --add-dir (see RunWithOptions — env folders
+// are launched with --dangerously-skip-permissions and never go through the
+// interactive trust dialog, so a workspace-file-based grant like
+// .claude/settings.json's permissions.additionalDirectories is silently
+// ignored by Claude Code; --add-dir is supplied on the exec argv by us, the
+// launcher, so it isn't subject to that trust gate). Idempotent. Exported so
 // tests can drive the regen step without forking AgentCommand.
-func Regenerate(db, beadsDir, envPath, ticketID string, mode Mode) (string, error) {
+func Regenerate(db, beadsDir, envPath, ticketID string, mode Mode) (string, []string, error) {
 	issue, err := loadIssue(db, beadsDir, ticketID)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	dirs, err := dir.Load(db, beadsDir, ticketID)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	ancestorDirs, err := dir.LoadAncestorEntries(db, beadsDir, ticketID)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if err := writeDescription(envPath, issue); err != nil {
-		return "", err
+		return "", nil, err
 	}
-	if err := writeSettings(envPath, dirs); err != nil {
-		return "", err
+	if err := removeLegacySettings(envPath); err != nil {
+		return "", nil, err
 	}
 	if err := writeSkills(envPath, mode); err != nil {
-		return "", err
+		return "", nil, err
 	}
-	return BuildSystemPrompt(beadsDir, issue.ID, issue.Title, mode, dirs, ancestorDirs)
+	prompt, err := BuildSystemPrompt(beadsDir, issue.ID, issue.Title, mode, dirs, ancestorDirs)
+	if err != nil {
+		return "", nil, err
+	}
+	dirPaths := make([]string, 0, len(dirs))
+	for _, e := range dirs {
+		dirPaths = append(dirPaths, e.Path)
+	}
+	return prompt, dirPaths, nil
 }
 
 type bdIssue struct {
@@ -352,8 +370,8 @@ func writeDescription(envPath string, issue *bdIssue) error {
 // DryRunPrompt returns the system prompt that a fresh launch of `ticket
 // agent <id>` / `ticket spec <id>` would pass to claude via
 // `--append-system-prompt`, without any of the launch's side effects (the env
-// folder isn't created, description.md / settings.json aren't written, the
-// bead isn't claimed, claude isn't execed). Used by the `--dry-run` flag to
+// folder isn't created, description.md isn't written, the bead isn't
+// claimed, claude isn't execed). Used by the `--dry-run` flag to
 // preview operator-template / default-template edits against a real ticket.
 func DryRunPrompt(db, beadsDir, ticketID string, mode Mode) (string, error) {
 	if ticketID == "" {
@@ -453,31 +471,21 @@ func repoNameFromBarePath(p string) string {
 	return strings.TrimSuffix(filepath.Base(p), ".git")
 }
 
-// SettingsPayload mirrors the .claude/settings.json structure we write.
-// Exported so tests can decode it without redeclaring the schema.
-type SettingsPayload struct {
-	Permissions struct {
-		AdditionalDirectories []string `json:"additionalDirectories"`
-	} `json:"permissions"`
-}
-
-func writeSettings(envPath string, dirs []dir.Entry) error {
-	settingsDir := filepath.Join(envPath, ".claude")
-	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
-		return fmt.Errorf("create .claude dir: %w", err)
+// removeLegacySettings deletes an env's .claude/settings.json if present. An
+// older Regenerate stashed linked dirs there as permissions.
+// additionalDirectories, but Claude Code only honors permissions from a
+// workspace's settings.json once that workspace's trust dialog has been
+// accepted — and env folders, launched non-interactively with
+// --dangerously-skip-permissions, never go through that dialog. The entry
+// was therefore silently ignored (with a warning) on every launch; linked
+// dirs are now granted via --add-dir instead (see RunWithOptions). Cleans up
+// stale files from envs created before this change.
+func removeLegacySettings(envPath string) error {
+	err := os.Remove(filepath.Join(envPath, ".claude", "settings.json"))
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove legacy settings.json: %w", err)
 	}
-	paths := make([]string, 0, len(dirs))
-	for _, e := range dirs {
-		paths = append(paths, e.Path)
-	}
-	var payload SettingsPayload
-	payload.Permissions.AdditionalDirectories = paths
-	body, err := json.MarshalIndent(payload, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal settings: %w", err)
-	}
-	body = append(body, '\n')
-	return os.WriteFile(filepath.Join(settingsDir, "settings.json"), body, 0o644)
+	return nil
 }
 
 // Syncback reads <env>/description.md and updates the bead's description via

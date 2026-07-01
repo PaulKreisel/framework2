@@ -22,7 +22,7 @@ func TestRegenerateMaterialisesShippedSkills(t *testing.T) {
 
 	for _, mode := range []agent.Mode{agent.ModeAgent, agent.ModeSpec} {
 		envPath := mustEnv(t, beadsDir, ticket)
-		if _, err := agent.Regenerate("", beadsDir, envPath, ticket, mode); err != nil {
+		if _, _, err := agent.Regenerate("", beadsDir, envPath, ticket, mode); err != nil {
 			t.Fatalf("Regenerate %s: %v", mode, err)
 		}
 		skillPath := filepath.Join(envPath, ".claude", "skills", "new-skill", "SKILL.md")

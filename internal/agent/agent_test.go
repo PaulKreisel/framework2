@@ -19,7 +19,7 @@ func TestRegenerateWritesDescriptionMD(t *testing.T) {
 		"a short description for the agent regen test", "")
 	envPath := mustEnv(t, beadsDir, ticket)
 
-	prompt, err := agent.Regenerate("", beadsDir, envPath, ticket, agent.ModeAgent)
+	prompt, _, err := agent.Regenerate("", beadsDir, envPath, ticket, agent.ModeAgent)
 	if err != nil {
 		t.Fatalf("Regenerate: %v", err)
 	}
@@ -92,25 +92,29 @@ func TestBuildSystemPromptModes(t *testing.T) {
 	}
 }
 
-func TestRegenerateSettingsMatchesLinkedDirs(t *testing.T) {
+// TestRegenerateDirPathsMatchesLinkedDirs asserts Regenerate's returned dir
+// paths (fed into --add-dir by RunWithOptions — see
+// TestRunPassesAddDirForLinkedDirs) track the ticket's linked dirs exactly.
+// This used to be settings.json's permissions.additionalDirectories, but
+// Claude Code silently ignores that field for untrusted workspaces (env
+// folders never go through the interactive trust dialog), so linked dirs are
+// now granted via --add-dir instead.
+func TestRegenerateDirPathsMatchesLinkedDirs(t *testing.T) {
 	t.Parallel()
 	beadsDir := testutil.TestDB(t)
-	ticket := testutil.CreateBeadFull(t, beadsDir, "agent-settings-paths", "x", "")
+	ticket := testutil.CreateBeadFull(t, beadsDir, "agent-dirpaths", "x", "")
 	envPath := mustEnv(t, beadsDir, ticket)
 
-	// Empty: settings.json must still be written with an empty array.
-	if _, err := agent.Regenerate("", beadsDir, envPath, ticket, agent.ModeAgent); err != nil {
+	// Empty: must be an empty (non-nil-panicking) slice, not an error.
+	_, got, err := agent.Regenerate("", beadsDir, envPath, ticket, agent.ModeAgent)
+	if err != nil {
 		t.Fatalf("Regenerate (empty): %v", err)
-	}
-	got := readSettings(t, envPath)
-	if got == nil {
-		t.Fatal("settings.permissions.additionalDirectories must be [], got nil")
 	}
 	if len(got) != 0 {
 		t.Errorf("empty linked-dir list produced %v, want []", got)
 	}
 
-	// Link two dirs and re-regen — settings must list exactly those paths.
+	// Link two dirs and re-regen — returned paths must list exactly those.
 	d1 := t.TempDir()
 	d2 := t.TempDir()
 	if _, _, code := testutil.RunTicketIn(t, beadsDir, "dir", "link", ticket, d1); code != 0 {
@@ -119,26 +123,52 @@ func TestRegenerateSettingsMatchesLinkedDirs(t *testing.T) {
 	if _, _, code := testutil.RunTicketIn(t, beadsDir, "dir", "link", ticket, d2); code != 0 {
 		t.Fatalf("link d2: exit=%d", code)
 	}
-	if _, err := agent.Regenerate("", beadsDir, envPath, ticket, agent.ModeAgent); err != nil {
+	_, got, err = agent.Regenerate("", beadsDir, envPath, ticket, agent.ModeAgent)
+	if err != nil {
 		t.Fatalf("Regenerate (two dirs): %v", err)
 	}
-	got = readSettings(t, envPath)
 	want := []string{d1, d2}
 	if !equalStringSlices(got, want) {
-		t.Errorf("settings paths = %v, want %v", got, want)
+		t.Errorf("dir paths = %v, want %v", got, want)
 	}
 
 	// Remove one and re-regen — stale entry must drop, not merge.
 	if _, _, code := testutil.RunTicketIn(t, beadsDir, "dir", "remove", ticket, d1); code != 0 {
 		t.Fatalf("remove d1: exit=%d", code)
 	}
-	if _, err := agent.Regenerate("", beadsDir, envPath, ticket, agent.ModeAgent); err != nil {
+	_, got, err = agent.Regenerate("", beadsDir, envPath, ticket, agent.ModeAgent)
+	if err != nil {
 		t.Fatalf("Regenerate (after remove): %v", err)
 	}
-	got = readSettings(t, envPath)
 	want = []string{d2}
 	if !equalStringSlices(got, want) {
-		t.Errorf("after remove, settings paths = %v, want %v", got, want)
+		t.Errorf("after remove, dir paths = %v, want %v", got, want)
+	}
+}
+
+// TestRegenerateRemovesLegacySettingsJSON asserts Regenerate cleans up a
+// pre-existing .claude/settings.json (written by an older version of this
+// tool) rather than leaving it behind to keep triggering Claude Code's
+// "this workspace has not been trusted" warning on every launch.
+func TestRegenerateRemovesLegacySettingsJSON(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBeadFull(t, beadsDir, "agent-legacy-settings", "x", "")
+	envPath := mustEnv(t, beadsDir, ticket)
+
+	settingsPath := filepath.Join(envPath, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
+		t.Fatalf("mkdir .claude: %v", err)
+	}
+	if err := os.WriteFile(settingsPath, []byte(`{"permissions":{"additionalDirectories":["/tmp"]}}`), 0o644); err != nil {
+		t.Fatalf("plant legacy settings.json: %v", err)
+	}
+
+	if _, _, err := agent.Regenerate("", beadsDir, envPath, ticket, agent.ModeAgent); err != nil {
+		t.Fatalf("Regenerate: %v", err)
+	}
+	if _, err := os.Stat(settingsPath); !os.IsNotExist(err) {
+		t.Errorf("legacy settings.json survived Regenerate (err=%v)", err)
 	}
 }
 
@@ -153,7 +183,7 @@ func TestRegenerateOverwritesStaleDescriptionMD(t *testing.T) {
 		t.Fatalf("plant stale: %v", err)
 	}
 
-	if _, err := agent.Regenerate("", beadsDir, envPath, ticket, agent.ModeAgent); err != nil {
+	if _, _, err := agent.Regenerate("", beadsDir, envPath, ticket, agent.ModeAgent); err != nil {
 		t.Fatalf("Regenerate: %v", err)
 	}
 	body := readFile(t, filepath.Join(envPath, agent.DescriptionFile))
@@ -171,7 +201,7 @@ func TestRegenerateDoesNotWriteClaudeMD(t *testing.T) {
 	ticket := testutil.CreateBeadFull(t, beadsDir, "agent-no-claudemd", "x", "")
 	envPath := mustEnv(t, beadsDir, ticket)
 
-	if _, err := agent.Regenerate("", beadsDir, envPath, ticket, agent.ModeAgent); err != nil {
+	if _, _, err := agent.Regenerate("", beadsDir, envPath, ticket, agent.ModeAgent); err != nil {
 		t.Fatalf("Regenerate: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(envPath, "CLAUDE.md")); !os.IsNotExist(err) {
@@ -185,7 +215,7 @@ func TestSyncbackPushesDescription(t *testing.T) {
 	ticket := testutil.CreateBeadFull(t, beadsDir, "agent-syncback", "original", "")
 	envPath := mustEnv(t, beadsDir, ticket)
 
-	if _, err := agent.Regenerate("", beadsDir, envPath, ticket, agent.ModeAgent); err != nil {
+	if _, _, err := agent.Regenerate("", beadsDir, envPath, ticket, agent.ModeAgent); err != nil {
 		t.Fatalf("Regenerate: %v", err)
 	}
 	newBody := "edited via spec session\n\nwith a second paragraph\n"
@@ -322,19 +352,6 @@ func readFile(t *testing.T, p string) string {
 		t.Fatalf("read %s: %v", p, err)
 	}
 	return string(b)
-}
-
-// readSettings reads <env>/.claude/settings.json and returns
-// additionalDirectories. The file is strict JSON (Claude Code's settings
-// parser rejects JSONC), so parse it as such.
-func readSettings(t *testing.T, envPath string) []string {
-	t.Helper()
-	raw := readFile(t, filepath.Join(envPath, ".claude", "settings.json"))
-	var payload agent.SettingsPayload
-	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
-		t.Fatalf("parse settings.json: %v\n--- body ---\n%s", err, raw)
-	}
-	return payload.Permissions.AdditionalDirectories
 }
 
 func equalStringSlices(a, b []string) bool {

@@ -415,6 +415,72 @@ func TestRunAgentModeInitialPrompt(t *testing.T) {
 	}
 }
 
+// TestRunPassesAddDirForLinkedDirs asserts that RunWithOptions grants a
+// ticket's linked dirs via `--add-dir` on the claude argv, not via
+// .claude/settings.json's permissions.additionalDirectories. Claude Code
+// only honors that settings.json field once a workspace's trust dialog has
+// been accepted, and env folders — launched non-interactively with
+// --dangerously-skip-permissions — never go through it, so the setting was
+// silently ignored (with a warning) on every launch. --add-dir is supplied
+// directly on the exec argv by the launcher, so it isn't subject to that
+// gate.
+func TestRunPassesAddDirForLinkedDirs(t *testing.T) {
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBeadFull(t, beadsDir, "agent-add-dir", "x", "")
+	mustEnv(t, beadsDir, ticket)
+
+	d1 := t.TempDir()
+	d2 := t.TempDir()
+	if _, _, code := testutil.RunTicketIn(t, beadsDir, "dir", "link", ticket, d1); code != 0 {
+		t.Fatalf("link d1: exit=%d", code)
+	}
+	if _, _, code := testutil.RunTicketIn(t, beadsDir, "dir", "link", ticket, d2); code != 0 {
+		t.Fatalf("link d2: exit=%d", code)
+	}
+
+	workDir := t.TempDir()
+	argvFile := filepath.Join(workDir, "argv")
+	script := fmt.Sprintf(`printf "%%s\n" "$@" > %q`, argvFile)
+
+	prevCmd, prevArgs := agent.AgentCommand, agent.AgentDefaultArgs
+	t.Cleanup(func() { agent.AgentCommand, agent.AgentDefaultArgs = prevCmd, prevArgs })
+	agent.AgentCommand = "/bin/sh"
+	agent.AgentDefaultArgs = []string{"-c", script, "fake-claude"}
+
+	done := make(chan error, 1)
+	go func() { done <- agent.Run("", beadsDir, ticket, agent.ModeAgent) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("agent.Run: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("agent.Run hung")
+	}
+
+	body, err := os.ReadFile(argvFile)
+	if err != nil {
+		t.Fatalf("read argv: %v", err)
+	}
+	args := strings.Split(strings.TrimRight(string(body), "\n"), "\n")
+	for _, want := range []string{d1, d2} {
+		if !argvHasAddDir(args, want) {
+			t.Errorf("argv missing `--add-dir %s`; full argv:\n%s", want, strings.Join(args, "\n"))
+		}
+	}
+}
+
+// argvHasAddDir reports whether args contains "--add-dir" immediately
+// followed by dir.
+func argvHasAddDir(args []string, dir string) bool {
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == "--add-dir" && args[i+1] == dir {
+			return true
+		}
+	}
+	return false
+}
+
 // TestRunSpecModeNoInitialPrompt asserts spec mode does NOT auto-submit a
 // kickoff prompt: the operator must type the first input.
 func TestRunSpecModeNoInitialPrompt(t *testing.T) {
