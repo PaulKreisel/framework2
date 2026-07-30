@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -1276,5 +1277,122 @@ jira-type:
 	}
 	if rows[0].IssueType != "feature" {
 		t.Errorf("issue_type=%q want feature (New node → feature via project.yaml)", rows[0].IssueType)
+	}
+}
+
+// TestRunBareNumberDefaultsToSleekProject verifies "jira 42" is shorthand for
+// "jira SLEEK-42".
+func TestRunBareNumberDefaultsToSleekProject(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	fj := newFakeJira(t, map[string]fakeIssue{"SLEEK-42": {}})
+
+	var stdout, stderr bytes.Buffer
+	code := jiracli.RunWithOptions(jiracli.Options{
+		BaseURL:  fj.server.URL,
+		BeadsDir: beadsDir,
+		Email:    "me@example.com",
+		Token:    "tok",
+	}, []string{"42"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
+	}
+	rootID := strings.TrimSpace(stdout.String())
+	out, err := testutil.BdCmd(beadsDir, "--json", "show", rootID).Output()
+	if err != nil {
+		t.Fatalf("bd show: %v", err)
+	}
+	var rows []struct {
+		ExternalRef string `json:"external_ref"`
+	}
+	if err := json.Unmarshal(out, &rows); err != nil {
+		t.Fatal(err)
+	}
+	wantRef := fj.server.URL + "/browse/SLEEK-42"
+	if rows[0].ExternalRef != wantRef {
+		t.Errorf("external_ref = %q, want %q", rows[0].ExternalRef, wantRef)
+	}
+}
+
+// TestRunDiscoverBranchesGHAccessDeniedCreatesNoBead covers the requirement
+// that a GitHub access failure under --discover-branches aborts before any
+// bead is created — no orphan ticket left behind in .beads/.
+func TestRunDiscoverBranchesGHAccessDeniedCreatesNoBead(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	yaml := `bare-repo: "/tmp/does-not-matter/{repo-name}.git"`
+	if err := os.WriteFile(filepath.Join(beadsDir, "project.yaml"), []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(filepath.Join(beadsDir, "project.yaml")) })
+
+	fj := newFakeJira(t, map[string]fakeIssue{"FOO-1": {}})
+	runner := func(context.Context, []string) ([]byte, error) {
+		return nil, errors.New("HTTP 403: Resource not accessible (access denied)")
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := jiracli.RunWithOptions(jiracli.Options{
+		BaseURL:  fj.server.URL,
+		BeadsDir: beadsDir,
+		Email:    "me@example.com",
+		Token:    "tok",
+		GHRunner: githubcli.GHRunner(runner),
+	}, []string{"FOO-1", "--discover-branches"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("expected nonzero exit; stdout=%q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "access denied") {
+		t.Errorf("stderr=%q missing access-denied reason", stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout should be empty on GitHub-access failure, got %q", stdout.String())
+	}
+
+	out, err := testutil.BdCmd(beadsDir, "--json", "list", "--all").Output()
+	if err != nil {
+		t.Fatalf("bd list: %v", err)
+	}
+	var rows []struct{ ID string }
+	if err := json.Unmarshal(out, &rows); err != nil {
+		t.Fatalf("parse bd list: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("expected no beads created, got %v", rows)
+	}
+}
+
+// TestRunCreatesEnvFolder verifies "jira" auto-runs the equivalent of `ticket
+// env <rootID>` after a successful import: the env folder and its
+// .ticket-id marker must exist, and stdout must stay just the bead id (no
+// extra lines) so scripted callers keep working.
+func TestRunCreatesEnvFolder(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	fj := newFakeJira(t, map[string]fakeIssue{"FOO-1": {}})
+
+	var stdout, stderr bytes.Buffer
+	code := jiracli.RunWithOptions(jiracli.Options{
+		BaseURL:  fj.server.URL,
+		BeadsDir: beadsDir,
+		Email:    "me@example.com",
+		Token:    "tok",
+	}, []string{"FOO-1"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
+	}
+	out := strings.TrimSpace(stdout.String())
+	if strings.Contains(out, "\n") {
+		t.Fatalf("stdout should be a single line (the bead id), got %q", stdout.String())
+	}
+	rootID := out
+
+	marker := filepath.Join(beadsDir, "envs", rootID, ".ticket-id")
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("env marker not created: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != rootID {
+		t.Errorf("marker contains %q, want %q", got, rootID)
 	}
 }

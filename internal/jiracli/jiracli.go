@@ -22,6 +22,7 @@ import (
 
 	"framework2/internal/bdcli"
 	"framework2/internal/dir"
+	"framework2/internal/env"
 	"framework2/internal/githubcli"
 	"framework2/internal/pr"
 	"framework2/internal/project"
@@ -34,11 +35,18 @@ import (
 // [Options].
 const DefaultBaseURL = "https://knime-com.atlassian.net"
 
+// DefaultProject is the Jira project prefix assumed for a bare-number key
+// (e.g. "123" -> "SLEEK-123").
+const DefaultProject = "SLEEK"
+
 // httpTimeout caps each Jira call. Long enough for cold paths to the cloud,
 // short enough to fail rather than hang an interactive shell.
 const httpTimeout = 30 * time.Second
 
-var keyPattern = regexp.MustCompile(`^[A-Z]+-[0-9]+$`)
+var (
+	keyPattern     = regexp.MustCompile(`^[A-Z]+-[0-9]+$`)
+	numericKeyOnly = regexp.MustCompile(`^[0-9]+$`)
+)
 
 // Options pins values that production reads from the environment. Tests use
 // it to drive a fake Jira server and a per-test .beads/ directory.
@@ -81,10 +89,14 @@ func RunWithOptions(opts Options, args []string, stdout, stderr io.Writer) int {
 const usage = `usage: jira <KEY> [--discover-branches]
 
 Fetch one Jira issue and create a top-level bead for it in the current .beads/
-database. Prints the new bead id to stdout.
+database. A bare number (e.g. "3141") is shorthand for "`+DefaultProject+`-3141".
+Prints the new bead id to stdout, then opens ` + "`ticket env <id>`" + ` on it.
 
-  --discover-branches   after creating the bead(s), run `+"`github branches <KEY>`"+`
-                        and attach each distinct owner/repo as a worktree on
+  --discover-branches   before creating any bead, run `+"`github branches <KEY>`"+`
+                        to confirm GitHub access and find matching branches
+                        (a GitHub access failure here aborts before anything
+                        is created locally). After the bead(s) are created,
+                        attach each distinct owner/repo as a worktree on
                         the root bead, resolving local bare paths via the
                         `+"`bare-repo:`"+` template in project.yaml. Each
                         discovered branch's unique open PR is then attached to
@@ -119,6 +131,9 @@ func dispatch(opts Options, args []string, stdout, stderr io.Writer) error {
 	if !sawKey {
 		return errors.New(usage)
 	}
+	if numericKeyOnly.MatchString(key) {
+		key = DefaultProject + "-" + key
+	}
 	if !keyPattern.MatchString(key) {
 		return fmt.Errorf("%q is not a Jira key (expected e.g. UIEXT-3141)", key)
 	}
@@ -133,6 +148,21 @@ func dispatch(opts Options, args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+
+	// Resolve --discover-branches' GitHub side (and validate access to it)
+	// before creating anything locally: a GitHub access failure here must not
+	// leave behind an orphan bead.
+	var (
+		ghRunner githubcli.GHRunner
+		matches  []githubcli.Branch
+	)
+	if discoverBranchs {
+		ghRunner, matches, err = discoverBranches(ctx, opts, cfg, key, stderr)
+		if err != nil {
+			return err
+		}
+	}
+
 	rootID, err := walkAndImport(ctx, opts, cfg, email, token, key)
 	if err != nil {
 		return err
@@ -141,23 +171,29 @@ func dispatch(opts Options, args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	if discoverBranchs {
-		if err := discoverAndAttach(ctx, opts, cfg, key, rootID, stderr); err != nil {
+		if err := attachDiscovered(ctx, opts, cfg, ghRunner, rootID, matches, stderr); err != nil {
 			return err
 		}
 	}
-	return nil
+
+	// Mirrors `ticket env <rootID>`: create the env folder and, when attached
+	// to a terminal, drop straight into it. Deliberately doesn't print
+	// envPath — stdout stays just the bead id, so scripted callers piping
+	// `jira`'s output keep working.
+	envPath, err := env.Create(opts.DB, opts.BeadsDir, rootID)
+	if err != nil {
+		return err
+	}
+	return env.EnterShell(stdout, envPath)
 }
 
-// discoverAndAttach runs `github branches <key>` and attaches each distinct
-// owner/repo to rootID as a worktree, resolving local bare-repo paths via the
-// `bare-repo:` template in project.yaml. Strict: any missing template or
-// missing bare path fails the whole call. After attaching, each discovered
-// branch's unique open PR is linked to rootID's metadata.prs (the same effect
-// as `ticket pr link`); per-branch notices go to stderr so stdout stays the
-// bead id alone.
-func discoverAndAttach(ctx context.Context, opts Options, cfg projectconfig.Config, key, rootID string, stderr io.Writer) error {
+// discoverBranches runs `github branches <key>` and returns the matches (plus
+// the GHRunner used, for reuse by [attachDiscovered]). Runs before any bead
+// is created so a GitHub access failure aborts the whole `jira` invocation
+// without leaving an orphan bead behind.
+func discoverBranches(ctx context.Context, opts Options, cfg projectconfig.Config, key string, stderr io.Writer) (githubcli.GHRunner, []githubcli.Branch, error) {
 	if cfg.BareRepo == "" {
-		return fmt.Errorf("--discover-branches: project.yaml has no `bare-repo:` template")
+		return nil, nil, fmt.Errorf("--discover-branches: project.yaml has no `bare-repo:` template")
 	}
 	runner := opts.GHRunner
 	if runner == nil {
@@ -165,8 +201,18 @@ func discoverAndAttach(ctx context.Context, opts Options, cfg projectconfig.Conf
 	}
 	matches, err := githubcli.ListBranches(ctx, runner, key)
 	if err != nil {
-		return fmt.Errorf("--discover-branches: %w", err)
+		return nil, nil, fmt.Errorf("--discover-branches: %w", err)
 	}
+	return runner, matches, nil
+}
+
+// attachDiscovered attaches each distinct owner/repo among matches to rootID
+// as a worktree, resolving local bare-repo paths via the `bare-repo:`
+// template in project.yaml. Strict: any missing bare path fails the whole
+// call. After attaching, each discovered branch's unique open PR is linked to
+// rootID's metadata.prs (the same effect as `ticket pr link`); per-branch
+// notices go to stderr so stdout stays the bead id alone.
+func attachDiscovered(ctx context.Context, opts Options, cfg projectconfig.Config, runner githubcli.GHRunner, rootID string, matches []githubcli.Branch, stderr io.Writer) error {
 	for _, m := range matches {
 		ownerRepo := m.Owner + "/" + m.Repo
 		bare, err := cfg.RenderBareRepo(m.Owner, m.Repo)

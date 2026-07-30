@@ -7,11 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 
 	"framework2/internal/bdcli"
 	"framework2/internal/project"
@@ -57,6 +59,38 @@ func Create(db, beadsDir, ticketID string) (string, error) {
 		return "", fmt.Errorf("write marker: %w", err)
 	}
 	return envPath, nil
+}
+
+// EnterShell drops the caller into an interactive $SHELL rooted at envPath so
+// they end up inside the env folder. A binary cannot cd its parent shell, so
+// we exec a child shell instead — `exit` returns them.
+//
+// Gated on stdout being an *os.File terminal so tests and pipelines (which
+// pass a bytes.Buffer or redirect) keep the plain print-and-return behavior.
+func EnterShell(stdout io.Writer, envPath string) error {
+	if !isTerminalWriter(stdout) {
+		return nil
+	}
+	shell := os.Getenv("SHELL")
+	if shell == "" {
+		return nil
+	}
+	if err := os.Chdir(envPath); err != nil {
+		return fmt.Errorf("chdir to env: %w", err)
+	}
+	return syscall.Exec(shell, []string{shell}, os.Environ())
+}
+
+func isTerminalWriter(w io.Writer) bool {
+	f, ok := w.(*os.File)
+	if !ok {
+		return false
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
 }
 
 // assertOpenable verifies ticketID exists and is a bead that may own an
