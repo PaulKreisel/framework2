@@ -1362,6 +1362,39 @@ func TestRunDiscoverBranchesGHAccessDeniedCreatesNoBead(t *testing.T) {
 	}
 }
 
+// TestRunDiscoverBranchesShortFlag verifies -b is an alias for
+// --discover-branches: with -b the GitHub side runs (and its access failure
+// aborts the import), which never happens without the flag.
+func TestRunDiscoverBranchesShortFlag(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	yaml := `bare-repo: "/tmp/does-not-matter/{repo-name}.git"`
+	if err := os.WriteFile(filepath.Join(beadsDir, "project.yaml"), []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(filepath.Join(beadsDir, "project.yaml")) })
+
+	fj := newFakeJira(t, map[string]fakeIssue{"FOO-1": {}})
+	runner := func(context.Context, []string) ([]byte, error) {
+		return nil, errors.New("HTTP 403: Resource not accessible (access denied)")
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := jiracli.RunWithOptions(jiracli.Options{
+		BaseURL:  fj.server.URL,
+		BeadsDir: beadsDir,
+		Email:    "me@example.com",
+		Token:    "tok",
+		GHRunner: githubcli.GHRunner(runner),
+	}, []string{"FOO-1", "-b"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("expected nonzero exit (GH runner must have been invoked); stdout=%q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "access denied") {
+		t.Errorf("stderr=%q missing access-denied reason", stderr.String())
+	}
+}
+
 // TestRunCreatesEnvFolder verifies "jira" auto-runs the equivalent of `ticket
 // env <rootID>` after a successful import: the env folder and its
 // .ticket-id marker must exist, and stdout must stay just the bead id (no

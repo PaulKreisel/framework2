@@ -86,13 +86,14 @@ func RunWithOptions(opts Options, args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-const usage = `usage: jira <KEY> [--discover-branches]
+const usage = `usage: jira <KEY> [-b | --discover-branches]
 
 Fetch one Jira issue and create a top-level bead for it in the current .beads/
 database. A bare number (e.g. "3141") is shorthand for "`+DefaultProject+`-3141".
 Prints the new bead id to stdout, then opens ` + "`ticket env <id>`" + ` on it.
 
-  --discover-branches   before creating any bead, run `+"`github branches <KEY>`"+`
+  -b, --discover-branches
+                        before creating any bead, run `+"`github branches <KEY>`"+`
                         to confirm GitHub access and find matching branches
                         (a GitHub access failure here aborts before anything
                         is created locally). After the bead(s) are created,
@@ -117,7 +118,7 @@ func dispatch(opts Options, args []string, stdout, stderr io.Writer) error {
 		case a == "-h" || a == "--help" || a == "help":
 			fmt.Fprintln(stdout, usage)
 			return nil
-		case a == "--discover-branches":
+		case a == "--discover-branches" || a == "-b":
 			discoverBranchs = true
 		case strings.HasPrefix(a, "-"):
 			return fmt.Errorf("unknown flag %q\n\n%s", a, usage)
