@@ -34,7 +34,7 @@ Although the description should be perfect already, you might want to update it 
 - Run `{{cmd_env_syncback}}` to persist it back to the bead.
 
 ## Creating the worktree(s)
-- Before writing code (or even before reading it), we need to create a worktree for every bare git repository we want to access. Note that this might already be available when the session is started. To add one, run:
+- Before writing code (or even before reading it), we need to create a worktree for every bare git repository we want to access. Note that this might already be available when the session is started. To add one or more (pass all paths to a single invocation — do NOT chain separate calls with `&&`), run:
 
   ```
   {{cmd_dir_add}}

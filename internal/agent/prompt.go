@@ -145,7 +145,7 @@ const cmdCreateChildText = "this create child <title> --description <text>"
 
 func renderCmdCreateChild(PromptContext) string { return cmdCreateChildText }
 
-const cmdDirAddText = "this dir worktree <path-to-bare-repo>"
+const cmdDirAddText = "this dir worktree <path-to-bare-repo> [<path-to-bare-repo> ...]"
 
 func renderCmdDirAdd(PromptContext) string { return cmdDirAddText }
 

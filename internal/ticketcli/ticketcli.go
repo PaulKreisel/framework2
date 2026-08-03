@@ -44,10 +44,13 @@ subcommands:
   dir link [<id>] <path>             link a path to a ticket
   dir remove [<id>] <path>           unlink a path from a ticket
   dir list [<id>]                    list paths linked to a ticket
-  dir worktree [<id>] <bare-repo> [--branch <name>]
-                                     create a worktree off <bare-repo> for the
-                                     ticket and link it (cascades through
+  dir worktree [<id>] <bare-repo> [<bare-repo> ...] [--branch <name>]
+                                     create a worktree off each <bare-repo> for
+                                     the ticket and link it (cascades through
                                      parents so ancestors gain the worktree too).
+                                     Several bare repos can be passed at once;
+                                     each is handled as if added by its own
+                                     invocation.
                                      Branch name and worktree path follow the
                                      templates in <beadsDir>/project.yaml when
                                      present; otherwise the defaults match the
@@ -499,13 +502,20 @@ func runDirStatus(db, beadsDir, ticket string, args []string, stdout io.Writer) 
 	return dir.Status(db, beadsDir, id, selector, jsonOut, stdout)
 }
 
-// runDirWorktree handles `ticket dir worktree [<id>] <bare-repo> [--branch <name>]`.
+// runDirWorktree handles `ticket dir worktree [<id>] <bare-repo>... [--branch <name>]`.
 // Without --branch we delegate to [dir.Worktree] (template-derived branch,
 // parent cascade). With --branch we delegate to [dir.WorktreeForBranch]
 // (explicit name, origin fetch + remote-track detection, created off the
 // default base when it exists nowhere, no cascade).
+//
+// Several bare repos can be passed in one call; each gets its worktree as if
+// added by its own invocation (with --branch, each attaches the same branch
+// name). Repos are processed in order; a failing repo does not stop the rest.
+// The agent wrapper is relaunched once at the end — this is why multi-arg
+// matters: chaining single-repo calls with `&&` never runs the second command
+// because the first call's relaunch kills the calling session.
 func runDirWorktree(db, beadsDir, ticket string, args []string) error {
-	const usage = "usage: ticket dir worktree [<id>] <bare-repo> [--branch <name>]"
+	const usage = "usage: ticket dir worktree [<id>] <bare-repo> [<bare-repo> ...] [--branch <name>]"
 	var branch string
 	positional := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
@@ -523,23 +533,38 @@ func runDirWorktree(db, beadsDir, ticket string, args []string) error {
 			positional = append(positional, a)
 		}
 	}
-	id, tail, err := resolveID(ticket, positional, 1, usage)
+	id, repos, err := resolveIDVariadic(ticket, positional, usage)
 	if err != nil {
 		return err
 	}
-	if branch != "" {
-		if err := dir.WorktreeForBranch(db, beadsDir, id, tail[0], branch, true); err != nil {
-			return err
+	if len(repos) == 0 {
+		return errors.New(usage)
+	}
+	var errs []error
+	added := 0
+	for _, repo := range repos {
+		var err error
+		if branch != "" {
+			err = dir.WorktreeForBranch(db, beadsDir, id, repo, branch, true)
+		} else {
+			err = dir.Worktree(db, beadsDir, id, repo)
 		}
-	} else {
-		if err := dir.Worktree(db, beadsDir, id, tail[0]); err != nil {
-			return err
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", repo, err))
+			continue
 		}
+		added++
 	}
 	// Only the explicitly addressed ticket may have a live wrapper to
 	// refresh; cascade-created ancestor worktrees belong to tickets whose
-	// agents aren't running.
-	return agent.RelaunchIfActive(beadsDir, id)
+	// agents aren't running. Relaunch even after partial failure so the
+	// successfully added repos reach the refreshed prompt.
+	if added > 0 {
+		if err := agent.RelaunchIfActive(beadsDir, id); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // runSlug handles `ticket dir slug [<id>] <slug>` (set the slug) and

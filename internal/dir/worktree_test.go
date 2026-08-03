@@ -335,6 +335,96 @@ worktree:
 	}
 }
 
+// TestDirWorktreeMultipleRepos drives the multi-arg CLI form: several bare
+// repos in one invocation must each get a worktree, exactly as if added by
+// independent calls.
+func TestDirWorktreeMultipleRepos(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBead(t, beadsDir, "wt-multi-arg")
+	bare1 := bareRepo(t, "main")
+	bare2 := bareRepo(t, "main")
+
+	_, stderr, code := testutil.RunTicketIn(t, beadsDir, "dir", "worktree", ticket, bare1, bare2)
+	if code != 0 {
+		t.Fatalf("worktree exit=%d stderr=%q", code, stderr)
+	}
+	entries := listEntries(t, beadsDir, ticket)
+	if len(entries) != 2 {
+		t.Fatalf("entries=%+v, want 2 (one per bare repo)", entries)
+	}
+	gotBares := map[string]bool{}
+	for _, e := range entries {
+		gotBares[e.BareRepo] = true
+		wantBranch := "todo/" + ticket
+		if e.Branch != wantBranch {
+			t.Errorf("branch=%q want %q", e.Branch, wantBranch)
+		}
+		if !worktreeOnBranch(t, e.Path, wantBranch) {
+			t.Errorf("worktree at %s is not on branch %s", e.Path, wantBranch)
+		}
+	}
+	for _, want := range []string{bare1, bare2} {
+		if !gotBares[want] {
+			t.Errorf("missing entry for bare %q; got %v", want, gotBares)
+		}
+	}
+}
+
+// TestDirWorktreeMultipleReposPartialFailure: one bad path among several must
+// not stop the others — the good repos are linked, the command still exits
+// non-zero and names the failing path.
+func TestDirWorktreeMultipleReposPartialFailure(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBead(t, beadsDir, "wt-multi-partial")
+	notRepo := t.TempDir()
+	bare := bareRepo(t, "main")
+
+	_, stderr, code := testutil.RunTicketIn(t, beadsDir, "dir", "worktree", ticket, notRepo, bare)
+	if code == 0 {
+		t.Fatal("worktree succeeded despite non-git path, want error")
+	}
+	if !strings.Contains(stderr, "not a git repository") {
+		t.Errorf("stderr=%q want to mention 'not a git repository'", stderr)
+	}
+	if !strings.Contains(stderr, notRepo) {
+		t.Errorf("stderr=%q want to name the failing path %q", stderr, notRepo)
+	}
+	entries := listEntries(t, beadsDir, ticket)
+	if len(entries) != 1 {
+		t.Fatalf("entries=%+v, want 1 (the good repo must still be linked)", entries)
+	}
+	if entries[0].BareRepo != bare {
+		t.Errorf("bareRepo=%q want %q", entries[0].BareRepo, bare)
+	}
+}
+
+// TestDirWorktreeMultipleReposBranchFlag: --branch combined with several
+// repos attaches the same branch name in each.
+func TestDirWorktreeMultipleReposBranchFlag(t *testing.T) {
+	t.Parallel()
+	beadsDir := testutil.TestDB(t)
+	ticket := testutil.CreateBead(t, beadsDir, "wt-multi-branch-flag")
+	bare1 := bareRepo(t, "main")
+	bare2 := bareRepo(t, "main")
+
+	branch := "feature/multi-arg"
+	_, stderr, code := testutil.RunTicketIn(t, beadsDir, "dir", "worktree", ticket, bare1, bare2, "--branch", branch)
+	if code != 0 {
+		t.Fatalf("worktree exit=%d stderr=%q", code, stderr)
+	}
+	entries := listEntries(t, beadsDir, ticket)
+	if len(entries) != 2 {
+		t.Fatalf("entries=%+v, want 2", entries)
+	}
+	for _, e := range entries {
+		if e.Branch != branch {
+			t.Errorf("branch=%q want %q", e.Branch, branch)
+		}
+	}
+}
+
 func TestDirWorktreeNotAGitRepo(t *testing.T) {
 	t.Parallel()
 	beadsDir := testutil.TestDB(t)

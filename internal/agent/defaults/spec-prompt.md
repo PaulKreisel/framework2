@@ -58,7 +58,7 @@ Updating a bead's data can be done via `bd edit [id] [flags]`.
 - In case tickets were created but then the requirements change, either update the existing new tickets or delete and re-create them. Do NOT leave tickets around that are not relevant anymore.
 
 ## Accessing the code
-- When working on code (reading in this case), we need to create a worktree for every bare git repository we want to access. Note that this might already be available when the session is started. To add one, run:
+- When working on code (reading in this case), we need to create a worktree for every bare git repository we want to access. Note that this might already be available when the session is started. To add one or more (pass all paths to a single invocation — do NOT chain separate calls with `&&`), run:
 
   ```
   {{cmd_dir_add}}
