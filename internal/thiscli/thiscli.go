@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"framework2/internal/env"
@@ -54,26 +53,9 @@ func RunFromWithOptions(opts ticketcli.Options, cwd string, args []string, stdou
 }
 
 // Discover walks up from start looking for a .ticket-id marker file. Returns
-// the ticket id (trimmed) and the directory containing the marker.
+// the ticket id (trimmed) and the directory containing the marker. Thin
+// delegate to [env.Discover] — the walk lives next to the marker constant so
+// `ticket` can reuse it (see `ticket agent continue`).
 func Discover(start string) (id, envDir string, err error) {
-	dir := start
-	for {
-		marker := filepath.Join(dir, env.MarkerFile)
-		data, rerr := os.ReadFile(marker)
-		if rerr == nil {
-			id = strings.TrimSpace(string(data))
-			if id == "" {
-				return "", "", fmt.Errorf("empty .ticket-id at %s", marker)
-			}
-			return id, dir, nil
-		}
-		if !os.IsNotExist(rerr) {
-			return "", "", rerr
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return "", "", fmt.Errorf("not inside a ticket env (no .ticket-id found from %s)", start)
-		}
-		dir = parent
-	}
+	return env.Discover(start)
 }

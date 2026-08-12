@@ -8,6 +8,7 @@
 package ticketcli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -169,6 +170,21 @@ subcommands:
                                           ask-user-question (tool_input JSON),
                                           exit-plan-mode (tool_input.plan), or
                                           stop-failure (matcher[: message]).
+  agent continue [<id>]                   resume the ticket's most recently active
+                                          session in the current terminal, in its
+                                          recorded mode (agent or spec). The ticket
+                                          is taken from --ticket / <id> when given,
+                                          otherwise from the .ticket-id marker found
+                                          by walking up from the cwd. Outside a
+                                          ticket env it degrades to a plain
+                                          ` + "`claude --continue`" + ` launch, so it can back
+                                          the machine-wide ` + "`cc`" + ` alias.
+  agent resume [<id>]                     like ` + "`agent continue`" + ` but pick the session
+                                          from an fzf picker listing exactly the rows
+                                          ` + "`agent list`" + ` shows. Aborting the picker is a
+                                          no-op. Outside a ticket env it degrades to
+                                          a plain ` + "`claude --resume`" + ` launch (the ` + "`cr`" + `
+                                          alias).
   agent relaunch [<id>] [extra-args...]   from inside a session: ask the running
                                           wrapper to re-exec claude with --continue
                                           (use after a dir link/worktree)
@@ -805,6 +821,10 @@ func runAgent(db, beadsDir, ticket string, args []string, mode agent.Mode, stdou
 		// ticket, no state filter (every row shows up).
 		return next.RunAgent(db, beadsDir, id, 0, 0, false, next.StateFilterNone, jsonOut, stdout)
 	}
+	if mode == agent.ModeAgent && len(args) > 0 && (args[0] == "continue" || args[0] == "resume") {
+		// `ticket agent continue [<id>]` / `ticket agent resume [<id>]`
+		return runAgentContinue(db, beadsDir, ticket, args[0], args[1:])
+	}
 	if mode == agent.ModeAgent && len(args) > 0 && args[0] == "set-status" {
 		// `ticket agent set-status <running|waiting> [--session <id>] [--ticket <id>]`
 		return runAgentSetStatus(db, beadsDir, ticket, args[1:])
@@ -904,6 +924,58 @@ func runAgent(db, beadsDir, ticket string, args []string, mode agent.Mode, stdou
 		ResumeSessionID: resume,
 		InitialPrompt:   initialPrompt,
 	})
+}
+
+// CwdForDiscovery returns the directory `agent continue` / `agent resume`
+// start their .ticket-id walk-up from. Exposed as a var so tests can pin a
+// tmpdir instead of inheriting the test process's cwd.
+var CwdForDiscovery = os.Getwd
+
+// runAgentContinue handles `ticket agent continue [<id>]` (sub == "continue")
+// and `ticket agent resume [<id>]` (sub == "resume") — the two commands the
+// machine-wide `cc` / `cr` aliases point at.
+//
+// Ticket resolution is deliberately laxer than every other subcommand: an
+// explicit --ticket / <id> wins, but with neither we fall back to the
+// .ticket-id marker discovered by walking up from the cwd (the same marker
+// `this` uses). Not being inside a ticket env is not an error — it means the
+// alias was used somewhere ordinary, so we hand over to a bare claude launch
+// and the pre-framework behaviour is preserved.
+func runAgentContinue(db, beadsDir, ticket, sub string, args []string) error {
+	usage := fmt.Sprintf("usage: ticket agent %s [<id>]", sub)
+	id, _, err := resolveOptionalID(ticket, args, 0, usage)
+	if err != nil {
+		return err
+	}
+	if id == "" {
+		cwd, err := CwdForDiscovery()
+		if err != nil {
+			return err
+		}
+		discovered, _, err := env.Discover(cwd)
+		if err != nil && !errors.Is(err, env.ErrNoTicketEnv) {
+			return err
+		}
+		if discovered == "" {
+			// Not in a ticket env: be `claude --continue` / `claude --resume`.
+			return agent.ExecClaude([]string{"--" + sub})
+		}
+		id = discovered
+	}
+	if sub == "continue" {
+		return agent.ContinueLatest(db, beadsDir, id)
+	}
+	// Build the picker's input with the `agent list` renderer itself so the
+	// rows are, by construction, the rows `this agent list` prints.
+	var table bytes.Buffer
+	if err := next.RunAgent(db, beadsDir, id, 0, 0, false, next.StateFilterNone, false, &table); err != nil {
+		return err
+	}
+	err = agent.PickAndResume(db, beadsDir, id, table.String())
+	if errors.Is(err, agent.ErrPickCancelled) {
+		return nil
+	}
+	return err
 }
 
 // runAgentStatus handles `ticket agent status [<id>] <session-id> [--json]`.

@@ -106,6 +106,17 @@ func (m Mode) String() string {
 	}
 }
 
+// ParseMode maps an [AgentEntry.Mode] string back to a [Mode]. Anything other
+// than "spec" — including the empty string carried by legacy records written
+// before the field existed — is [ModeAgent], matching how [Attach] treats an
+// empty recorded mode.
+func ParseMode(s string) Mode {
+	if s == ModeSpec.String() {
+		return ModeSpec
+	}
+	return ModeAgent
+}
+
 // NewSessionID returns a freshly generated UUIDv4 suitable for passing to
 // claude via `--session-id`. Exposed so callers that need the id before
 // invoking [Run] (e.g. tests) can pre-generate it.

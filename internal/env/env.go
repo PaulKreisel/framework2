@@ -22,6 +22,38 @@ import (
 // MarkerFile is the basename of the per-env file containing the ticket id.
 const MarkerFile = ".ticket-id"
 
+// ErrNoTicketEnv is returned by [Discover] when no [MarkerFile] exists in the
+// starting directory or any of its ancestors. Callers that have a meaningful
+// non-env behaviour (e.g. `ticket agent continue`, which falls back to a plain
+// claude launch) branch on this rather than treating it as a hard failure.
+var ErrNoTicketEnv = errors.New("not inside a ticket env")
+
+// Discover walks up from start looking for a [MarkerFile]. Returns the ticket
+// id (trimmed) and the directory containing the marker. Wraps
+// [ErrNoTicketEnv] when the walk reaches the filesystem root without a hit.
+func Discover(start string) (id, envDir string, err error) {
+	dir := start
+	for {
+		marker := filepath.Join(dir, MarkerFile)
+		data, rerr := os.ReadFile(marker)
+		if rerr == nil {
+			id = strings.TrimSpace(string(data))
+			if id == "" {
+				return "", "", fmt.Errorf("empty %s at %s", MarkerFile, marker)
+			}
+			return id, dir, nil
+		}
+		if !os.IsNotExist(rerr) {
+			return "", "", rerr
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", "", fmt.Errorf("%w (no %s found from %s)", ErrNoTicketEnv, MarkerFile, start)
+		}
+		dir = parent
+	}
+}
+
 // stepLabel mirrors finish.StepLabel — the label stamped onto step-beads by the
 // step-driven finish path. It is duplicated as a literal rather than imported
 // because internal/finish's test package imports internal/env, so an

@@ -15,6 +15,27 @@ internal/    shared internals (added as needed)
 
 For per-command usage, run the binary with `--help` — this README intentionally does not duplicate it.
 
+## The `cc` / `cr` shell aliases
+
+`cc` and `cr` are the machine-wide "get me back into a claude session"
+shortcuts. Pointing them at the framework makes them ticket-aware:
+
+```sh
+alias cc="ticket agent continue"   # most recently active session
+alias cr="ticket agent resume"     # fzf picker over the ticket's sessions
+```
+
+Inside a ticket env folder (anything under a directory holding a
+`.ticket-id` marker) both re-launch the *wrapper* — hooks, appended system
+prompt, `--add-dir` for linked worktrees, agent record — against the
+existing transcript, in the mode the session was recorded with. `cr`'s
+picker lists exactly the rows `this agent list` prints.
+
+Anywhere else they fall through to a bare `claude --continue` /
+`claude --resume`, which is what they did before, so the aliases stay safe
+to use everywhere. Keep them as shell *aliases*: a `cc` binary on `$PATH`
+would shadow the C compiler for every subprocess.
+
 ## Customizing the agent system prompt
 
 `ticket agent` and `ticket spec` append a mode-specific prompt to claude on
