@@ -15,6 +15,11 @@
 //	  feature: enh
 //	  bug:     fix
 //	  # unmapped types fall back to "todo"
+//	pde:
+//	  target: ~/repos/sdk-setup/some.target
+//	  bundle-pool: ~/pde/bundle-pool
+//	  extra-bundles: [~/repos/other/org.example.plugin]
+//	  vm-args: [-Dfoo=bar]
 //
 // Placeholders supported in templates:
 //
@@ -68,7 +73,34 @@ type Config struct {
 	// expanded to the user's home directory. Empty means: no post-clone
 	// step.
 	SetupScript string `yaml:"setup-script"`
+	// PDE holds the machine-specific inputs `ticket pde` needs to write a
+	// pde.yaml. Absent means: `ticket pde` is not configured for this project.
+	PDE PDEConfig `yaml:"pde"`
 }
+
+// PDEConfig configures `ticket pde`. Every path may start with `~/`.
+//
+// Only the values that cannot be derived live here: the launch preset itself
+// (product/application/splash and the base vmArgs) is owned by internal/pde,
+// because pde merges `launches` by name but REPLACES array values — a preset
+// kept in an included template could never be appended to, only restated.
+type PDEConfig struct {
+	// Target is the `.target` definition the generated config resolves
+	// against. Required: there is no sane default to guess.
+	Target string `yaml:"target"`
+	// BundlePool is the shared p2 artifact pool. Empty leaves pde's own
+	// default (`./.target/bundle-pool`, i.e. per-ticket and unshared).
+	BundlePool string `yaml:"bundle-pool"`
+	// ExtraBundles are workspace bundle directories appended to every
+	// generated config regardless of what changed — e.g. a plugin that hosts
+	// an MCP server inside the launched application.
+	ExtraBundles []string `yaml:"extra-bundles"`
+	// VMArgs are appended to the built-in launch preset's vmArgs.
+	VMArgs []string `yaml:"vm-args"`
+}
+
+// Configured reports whether enough is set to generate a pde.yaml.
+func (p PDEConfig) Configured() bool { return strings.TrimSpace(p.Target) != "" }
 
 // WorktreeConfig holds the two templates that control `ticket dir worktree`.
 type WorktreeConfig struct {
@@ -131,7 +163,22 @@ func Load(beadsDir string) (Config, error) {
 	if loaded.SetupScript != "" {
 		cfg.SetupScript = loaded.SetupScript
 	}
+	cfg.PDE = loaded.PDE
 	return cfg, nil
+}
+
+// ExpandHome expands a leading `~/` to the user's home directory. Paths without
+// the prefix are returned unchanged. pde itself performs no tilde expansion, so
+// every path handed to it must go through here first.
+func ExpandHome(path string) (string, error) {
+	if !strings.HasPrefix(path, "~/") {
+		return path, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("expand ~ in %q: %w", path, err)
+	}
+	return filepath.Join(home, path[2:]), nil
 }
 
 // RenderBareRepo renders the configured bare-repo template against an

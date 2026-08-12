@@ -49,3 +49,32 @@ Although the description should be perfect already, you might want to update it 
 #### Parent tickets touch the following repos
 
 {{repos_parents}}{{end}}
+## Compiling / testing / launching
+
+The `pde` CLI builds and runs this ticket's OSGi bundles headlessly — no Eclipse IDE. It needs a `pde.yaml` in this env folder, written by:
+
+```
+{{cmd_pde_setup}}
+```
+
+- Run it once the worktrees exist. It detects the plugins this ticket changed (diff vs the repo's default branch, plus working-tree changes), builds each plugin's `lib/fetch_jars` jars, and provisions the ticket's own p2 profile (first run only; needs VPN).
+- Re-run it when the **set** of touched plugins changes — a plugin you hadn't touched before, or a new worktree. Editing files inside already-listed plugins needs no re-run.
+- It will not clobber your hand-edits: once the generated header on line 1 is gone it refuses to overwrite (`--force` overrides).
+
+Then, from this folder or anywhere below it (`pde` walks up to find `pde.yaml`):
+
+- `pde compile` — build all workspace bundles. Run it before launching or testing; both use the compiled output.
+- `pde test [<name>]` — run the `tests:` entries. Add them by hand: put the test fragment (`org.knime.base.tests`) in `bundles`, and set `testPluginName` to the **host** plugin (`org.knime.base`), not the fragment. One entry can run many classes: `programArgs: ["-classname", "<fqn>", "<fqn>", ...]`.
+- `pde launch` — start the KNIME AP. `--clean` rebuilds OSGi state, `pde launch <preset>` picks a non-default preset.
+
+Everything in `pde.yaml` is yours to edit — add or drop `bundles`, add `vmArgs`, add a second launch preset. Two things to know: paths must be absolute (`pde` does not expand `~`), and `vmArgs`/`bundles` written into the file are the whole story, since pde replaces array values rather than merging them.
+
+The launched AP hosts the workflow-building MCP server on `127.0.0.1:3399` — the `org.knime.wf.mcp.prototype` bundle is included in every generated config — so you can build, configure and execute real workflows in it. Follow the `knime-workflow-building` skill for that. Only one AP can hold the port, so quit any other running one first.
+
+To serve a frontend from a vite dev server instead of the bundle's built `dist`, add vm args. For the node dialog:
+
+```
+{{cmd_pde_setup}} --vm-arg -Dorg.knime.ui.dev.mode=true --vm-arg -Dorg.knime.ui.dev.node.dialog.url=http://localhost:3333/NodeDialog.js
+```
+
+with `pnpm dev:NodeDialog` running in `org.knime.core.ui/js-src/packages/core-ui`. The same arg ships disabled in knime-sdk-setup's `KNIME Analytics Platform.launch` (prefixed `-Dx…`), which is also where to look for the sibling `*.ui.mode=js` flags.

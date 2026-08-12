@@ -26,6 +26,7 @@ import (
 	"framework2/internal/finish"
 	"framework2/internal/handover"
 	"framework2/internal/next"
+	"framework2/internal/pde"
 	"framework2/internal/pr"
 	"framework2/internal/project"
 	"framework2/internal/projectconfig"
@@ -86,6 +87,28 @@ subcommands:
   env [<id>]                              create on-disk env folder for a ticket
   env syncback [<id>]                     push <env>/description.md back to the
                                           bead description (one-way file → bead)
+  pde [<id>] [--vm-arg <arg>]... [--no-fetch-jars] [--no-target-install]
+      [--dry-run] [--force]
+                                          write <env>/pde.yaml so the headless
+                                          pde CLI can compile/launch/test the
+                                          plugins this ticket changed. Detects
+                                          them per linked dir (merge-base diff
+                                          vs the bare repo's default branch,
+                                          plus working-tree changes), runs each
+                                          plugin's lib/fetch_jars Maven build,
+                                          emits the target section, those
+                                          bundles plus project.yaml's
+                                          pde.extra-bundles and one KNIME AP
+                                          launch preset, then provisions the
+                                          env's p2 profile on first run (needs
+                                          VPN). Requires pde.target in
+                                          <beadsDir>/project.yaml.
+                                          pde finds the file by walking up, so
+                                          "pde compile" works from the env
+                                          folder down. --vm-arg appends to the
+                                          preset (repeatable); --dry-run prints
+                                          instead of writing; --force replaces a
+                                          file whose generated header is gone.
   agent [<id>] [--prompt "<text>"] [--resume <session-id> | --dry-run]
                                           launch claude from a ticket's env folder
                                           in coding mode. With --prompt, the
@@ -374,6 +397,8 @@ func dispatch(beadsDir string, args []string, stdout, stderr io.Writer) error {
 		return runDir(db, beadsDir, ticket, rest[1:], stdout)
 	case "env":
 		return runEnv(db, beadsDir, ticket, rest[1:], stdout)
+	case "pde":
+		return runPde(db, beadsDir, ticket, rest[1:], stdout)
 	case "agent":
 		return runAgent(db, beadsDir, ticket, rest[1:], agent.ModeAgent, stdout)
 	case "spec":
@@ -697,6 +722,41 @@ func runEnv(db, beadsDir, ticket string, args []string, stdout io.Writer) error 
 	}
 	fmt.Fprintln(stdout, envPath)
 	return env.EnterShell(stdout, envPath)
+}
+
+func runPde(db, beadsDir, ticket string, args []string, stdout io.Writer) error {
+	const usage = "usage: ticket pde [<id>] [--vm-arg <arg>]... [--no-fetch-jars] [--no-target-install] [--dry-run] [--force]"
+	req := pde.Request{DB: db, BeadsDir: beadsDir}
+	var positional []string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--vm-arg":
+			if i+1 >= len(args) {
+				return errors.New("--vm-arg needs a value\n" + usage)
+			}
+			req.VMArgs = append(req.VMArgs, args[i+1])
+			i++
+		case "--no-fetch-jars":
+			req.SkipFetchJars = true
+		case "--no-target-install":
+			req.SkipTargetInstall = true
+		case "--dry-run":
+			req.DryRun = true
+		case "--force":
+			req.Force = true
+		default:
+			if strings.HasPrefix(args[i], "-") {
+				return fmt.Errorf("unknown flag %q\n%s", args[i], usage)
+			}
+			positional = append(positional, args[i])
+		}
+	}
+	id, _, err := resolveID(ticket, positional, 0, usage)
+	if err != nil {
+		return err
+	}
+	req.TicketID = id
+	return pde.Run(req, stdout)
 }
 
 func runAgent(db, beadsDir, ticket string, args []string, mode agent.Mode, stdout io.Writer) error {

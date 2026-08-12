@@ -48,6 +48,7 @@ var fragments = map[string]fragmentRenderer{
 	"cmd_create_followup_not_blocked": renderCmdCreateFollowupNotBlocked,
 	"cmd_create_child":                renderCmdCreateChild,
 	"cmd_dir_add":                     renderCmdDirAdd,
+	"cmd_pde_setup":                   renderCmdPdeSetup,
 	"cmd_env_syncback":                renderCmdEnvSyncback,
 	"cmd_finish_ticket":               renderCmdFinishTicket,
 	"list_of_linked_repos":            renderListOfLinkedRepos,
@@ -148,6 +149,10 @@ func renderCmdCreateChild(PromptContext) string { return cmdCreateChildText }
 const cmdDirAddText = "this dir worktree <path-to-bare-repo> [<path-to-bare-repo> ...]"
 
 func renderCmdDirAdd(PromptContext) string { return cmdDirAddText }
+
+const cmdPdeSetupText = "this pde"
+
+func renderCmdPdeSetup(PromptContext) string { return cmdPdeSetupText }
 
 const cmdEnvSyncbackText = "this env syncback"
 
