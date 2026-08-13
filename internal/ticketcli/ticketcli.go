@@ -114,8 +114,10 @@ subcommands:
                                           launch claude from a ticket's env folder
                                           in coding mode. With --prompt, the
                                           supplied text replaces the built-in
-                                          "Implement the ticket" kickoff message
-                                          claude auto-submits as turn 1 (empty
+                                          kickoff message ("Implement the
+                                          ticket, then set up pde and compile,
+                                          test and launch it ...") claude
+                                          auto-submits as turn 1 (empty
                                           string behaves like an omitted flag).
                                           With --resume, claude reattaches to
                                           the named transcript instead of
