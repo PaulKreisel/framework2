@@ -69,5 +69,8 @@ file is present.
 
 ```
 make install
-make test
 ```
+
+Tests are disabled on purpose — `make test` refuses to run and `go test ./...`
+fails on a deliberate guard. Use `make test-for-real` when you actually want the
+suite. See [TESTING.md](TESTING.md#tests-are-disabled-on-purpose).

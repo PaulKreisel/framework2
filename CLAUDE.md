@@ -8,6 +8,7 @@ Per-task specifications live in beads. Find what to work on with `bd ready`.
 - **Talk to `bd` via the CLI, with `--json` for parsing.** Do not import bd as a Go library.
 - **Go for everything new.** No new shell scripts.
 - **Tests are realistic.** Use a real `bd` and real git repos in tmpdirs. No mocks. See [TESTING.md](TESTING.md) for the test framework and patterns.
+- **Do not run the tests.** They are disabled on purpose (`//go:build runtests` on every `*_test.go`); `make test` and `go test ./...` fail loudly by design. Do not re-enable them, and do not run `make test-for-real` unless explicitly asked. `make install` is the check that a change builds.
 
 ## Working with beads
 

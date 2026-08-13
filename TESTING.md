@@ -2,15 +2,30 @@
 
 Tests are realistic: they exercise the real `bd` binary against a real bd database, and (for `dir` tests) real `git init`-ed repos in tmpdirs. No mocks.
 
+## Tests are disabled on purpose
+
+**Read this before "fixing" anything about the test setup.**
+
+Every `*_test.go` file in this repo carries a `//go:build runtests` constraint, so the default build excludes the whole suite. `make test` refuses to run and exits 1, and `go test ./...` fails on a single deliberate guard test (`internal/testsdisabled`) whose only job is to say so out loud instead of quietly printing "no test files" for 20 packages.
+
+Why: the suite is realistic, which makes it slow — real `bd`, real Dolt servers, real git repos in tmpdirs. Running it is a deliberate act, not something an agent should do reflexively at the end of every change.
+
+**This is a switch, not a bug.** Do not drop the build tags, do not delete the guard, do not re-point `make test` at `go test ./...`. If you think the default should change, ask the repo owner first.
+
 ## Running tests
 
+The escape hatch is the `runtests` tag:
+
 ```sh
-go test ./...        # all packages
-go test ./internal/dir/...   # one package
-go test -run TestLink ./internal/dir/   # one test
+make test-for-real                                   # all packages
+go test -tags runtests ./...                         # same thing
+go test -tags runtests ./internal/dir/...            # one package
+go test -tags runtests -run TestLink ./internal/dir/ # one test
 ```
 
 The first run per package creates the test DB and takes a few seconds longer than subsequent runs.
+
+New test files must carry the tag too — copy the header block from any existing `*_test.go`.
 
 ## The shared bd database
 
