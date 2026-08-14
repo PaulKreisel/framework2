@@ -30,7 +30,8 @@ const (
 // whole list. Owning the list here makes Options.VMArgs a plain append.
 //
 // Omissions from knime.ini are deliberate: `-vm` (the JVM is chosen by pde via
-// JAVA_HOME) and `-Xdock:icon` (no app bundle to point at).
+// JAVA_HOME) and `-Xdock:icon` (no app bundle to point at). Additions are too:
+// a launch from source is always a dev launch, so `org.knime.ui.dev.mode` is on.
 var baseVMArgs = []string{
 	"-server",
 	"-Xmx2048m",
@@ -47,6 +48,7 @@ var baseVMArgs = []string{
 	"-Dorg.apache.cxf.bus.factory=org.knime.cxf.core.fragment.KNIMECXFBusFactory",
 	"-Dorg.apache.cxf.transport.http.forceURLConnection=true",
 	"-Dknime.xml.disable_external_entities=true",
+	"-Dorg.knime.ui.dev.mode=true",
 	"-Dcomm.disable_dynamic_service=true",
 	"-Dp2.trustedAuthorities=https://update.knime.com",
 	"-Declipse.e4.inject.javax.warning=false",
