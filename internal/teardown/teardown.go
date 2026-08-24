@@ -40,10 +40,18 @@ func Run(db, beadsDir, ticketID string, stdout io.Writer) error {
 	var firstErr error
 	removed := 0
 	for _, e := range entries {
-		if e.BareRepo == "" {
-			continue
+		bare := e.BareRepo
+		if bare == "" {
+			// Legacy worktree entries (pre-bareRepo) carry only the path.
+			// Recover the owning bare from git itself; plain `dir link`
+			// entries (standalone checkouts, non-git dirs) resolve to ""
+			// and stay untouched.
+			bare = owningBare(e.Path)
+			if bare == "" {
+				continue
+			}
 		}
-		if err := removeWorktree(e.BareRepo, e.Path); err != nil {
+		if err := removeWorktree(bare, e.Path); err != nil {
 			fmt.Fprintf(stdout, "warn: %s: %v\n", ticketID, err)
 			if firstErr == nil {
 				firstErr = err
@@ -69,6 +77,25 @@ func Run(db, beadsDir, ticketID string, stdout io.Writer) error {
 	}
 	fmt.Fprintf(stdout, "teardown %s: %d worktree(s) removed\n", ticketID, removed)
 	return firstErr
+}
+
+// owningBare returns the git dir that owns path as a linked worktree, or ""
+// when path is missing, not a git dir, or a standalone checkout (a repo whose
+// common dir is its own .git — removing that would destroy the checkout, not
+// unregister a worktree).
+func owningBare(path string) string {
+	if _, err := os.Stat(path); err != nil {
+		return ""
+	}
+	out, err := exec.Command("git", "-C", path, "rev-parse", "--path-format=absolute", "--git-common-dir").Output()
+	if err != nil {
+		return ""
+	}
+	common := strings.TrimSpace(string(out))
+	if common == "" || common == filepath.Join(path, ".git") {
+		return ""
+	}
+	return common
 }
 
 // removeWorktree force-removes wt from bare. A worktree whose directory is
