@@ -33,6 +33,7 @@ import (
 	"framework2/internal/projectconfig"
 	"framework2/internal/ready"
 	"framework2/internal/slug"
+	"framework2/internal/teardown"
 )
 
 const usage = `usage:
@@ -255,6 +256,15 @@ subcommands:
                                           conflicts: runs ` + "`git rebase --continue`" + ` in
                                           each paused worktree, then completes
                                           the rest of the flow.
+  teardown [<id>]                         dismantle without landing: force-remove
+                                          every linked worktree (uncommitted
+                                          changes included), unlink the entries,
+                                          close the bead if still open, delete
+                                          the env folder. Branches stay in the
+                                          bare repo. No rebase, no PR checks, no
+                                          follow-up launches. Accepts already-
+                                          closed beads, so stale environments
+                                          can be swept in bulk.
   pr list [<id>]                          print attached GitHub PRs as a table.
                                           State is fetched live from GitHub via
                                           ` + "`gh`" + `.
@@ -431,6 +441,8 @@ func dispatch(beadsDir string, args []string, stdout, stderr io.Writer) error {
 		return runNotReady(db, beadsDir, ticket, rest[1:])
 	case "finish":
 		return runFinish(db, beadsDir, ticket, rest[1:], stdout)
+	case "teardown":
+		return runTeardown(db, beadsDir, ticket, rest[1:], stdout)
 	case "pr":
 		return runPR(db, beadsDir, ticket, rest[1:], stdout)
 	case "handover":
@@ -1381,6 +1393,14 @@ func runFinish(db, beadsDir, ticket string, args []string, stdout io.Writer) err
 		return err
 	}
 	return finish.Run(db, beadsDir, id, continueMode, stdout)
+}
+
+func runTeardown(db, beadsDir, ticket string, args []string, stdout io.Writer) error {
+	id, _, err := resolveID(ticket, args, 0, "usage: ticket teardown [<id>]")
+	if err != nil {
+		return err
+	}
+	return teardown.Run(db, beadsDir, id, stdout)
 }
 
 func runPipelineAsync(db, beadsDir string, args []string, stdout io.Writer) error {
