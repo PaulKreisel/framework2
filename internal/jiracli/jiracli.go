@@ -324,6 +324,8 @@ type Issue struct {
 		} `json:"issuetype"`
 		// customfield_11444 is KNIME's "Steps to Reproduce" field.
 		StepsToReproduce string `json:"customfield_11444"`
+		// customfield_12618 is KNIME's "Acceptance Criteria" field.
+		AcceptanceCriteria string `json:"customfield_12618"`
 		// Subtasks lists classic Jira sub-tasks of this issue.
 		Subtasks []IssueRef `json:"subtasks"`
 		// Parent is the issue this one hangs off of in next-gen
@@ -342,7 +344,7 @@ func Fetch(ctx context.Context, opts Options, email, token, key string) (*Issue,
 	if base == "" {
 		base = DefaultBaseURL
 	}
-	reqURL := fmt.Sprintf("%s/rest/api/2/issue/%s?fields=summary,description,issuetype,customfield_11444,subtasks,parent,issuelinks", base, key)
+	reqURL := fmt.Sprintf("%s/rest/api/2/issue/%s?fields=summary,description,issuetype,customfield_11444,customfield_12618,subtasks,parent,issuelinks", base, key)
 
 	cctx, cancel := context.WithTimeout(ctx, httpTimeout)
 	defer cancel()
@@ -400,17 +402,23 @@ func MapType(jiraType string) string {
 }
 
 // BuildDescription returns the bead description body: Jira description verbatim,
-// with "## Steps to Reproduce" appended when customfield_11444 is non-empty.
+// with "## Steps to Reproduce" (customfield_11444) and "## Acceptance Criteria"
+// (customfield_12618) appended when the respective field is non-empty.
 func BuildDescription(issue *Issue) string {
-	desc := strings.TrimRight(issue.Fields.Description, "\n")
-	steps := strings.TrimSpace(issue.Fields.StepsToReproduce)
-	if steps == "" {
-		return desc
+	parts := []string{strings.TrimRight(issue.Fields.Description, "\n")}
+	sections := []struct{ heading, body string }{
+		{"Steps to Reproduce", issue.Fields.StepsToReproduce},
+		{"Acceptance Criteria", issue.Fields.AcceptanceCriteria},
 	}
-	if desc == "" {
-		return "## Steps to Reproduce\n\n" + steps
+	for _, s := range sections {
+		if body := strings.TrimSpace(s.body); body != "" {
+			parts = append(parts, "## "+s.heading+"\n\n"+body)
+		}
 	}
-	return desc + "\n\n## Steps to Reproduce\n\n" + steps
+	if parts[0] == "" {
+		parts = parts[1:]
+	}
+	return strings.Join(parts, "\n\n")
 }
 
 // createBead shells out to `bd create` and returns the new bead id. When
