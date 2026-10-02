@@ -60,17 +60,24 @@ type RunOptions struct {
 	// transcript" to "reattach to the named one"; see [RunWithOptions]
 	// for the full contract.
 	ResumeSessionID string
+	// ForkFromSessionID, when non-empty, duplicates the named transcript
+	// into a new session: claude is started with `--resume <parent>
+	// --fork-session --session-id <new>`, so the new session has the
+	// parent's context but its own id. Mutually exclusive with
+	// ResumeSessionID. Set by `ticket agent fork`.
+	ForkFromSessionID string
 	// InitialPrompt overrides the iter-1 trailing positional. When empty,
 	// [ModeAgent] fresh launches fall back to [InitialAgentPrompt] and
-	// [ModeSpec] / resumes pass nothing. Operator-supplied via
+	// [ModeSpec] / resumes / forks pass nothing. Operator-supplied via
 	// `--prompt "..."` on `ticket agent` / `ticket spec`.
 	InitialPrompt string
 }
 
 // Run is the fresh-launch variant of [RunWithOptions]: it generates a new
-// session id, claims the bead, and lets claude allocate the session via
-// `--session-id`. See [RunWithOptions] for the resume-on-existing-transcript
-// path used by [Attach].
+// session id, claims the bead (unless another agent already did), and lets
+// claude allocate the session via `--session-id`. See [RunWithOptions] for
+// the resume-on-existing-transcript path used by [Attach] and the fork path
+// used by [ForkSession].
 func Run(db, beadsDir, ticketID string, mode Mode) error {
 	return RunWithOptions(db, beadsDir, ticketID, mode, RunOptions{})
 }
@@ -86,15 +93,21 @@ func RunWithResume(db, beadsDir, ticketID, resumeSessionID string, mode Mode) er
 // [env.Create] if it doesn't exist yet — regenerates the auto-managed context
 // files (description.md) and linked-dir list, and then execs AgentCommand
 // (passing the linked dirs via --add-dir) from inside the env folder in a
-// loop: after each exit, if a [SignalFile] is
-// present, the loop regenerates context and re-execs AgentCommand with
-// `--continue` plus the signal's args appended.
+// loop: after each exit, if a [SignalFile] is present, the loop regenerates
+// context and re-execs AgentCommand with `--resume <own session id>` plus
+// the signal's args appended. The loop resumes by id rather than with
+// `--continue` because several wrappers may run on one ticket (a fork, or
+// a second coding agent); `--continue` picks the most recent transcript in
+// the env folder, which may be the sibling's.
 //
-// When opts.ResumeSessionID is empty (the common path used by `ticket agent`),
-// a fresh session id is generated, the bead is claimed (unless mode is
-// [ModeSpec] — `ticket spec` doesn't own the status transition), and the
-// first claude invocation passes `--session-id <newID>` so the id is stable
-// from the start.
+// When neither opts.ResumeSessionID nor opts.ForkFromSessionID is set (the
+// common path used by `ticket agent`), a fresh session id is generated, the
+// bead is claimed (unless mode is [ModeSpec] — `ticket spec` doesn't own the
+// status transition), and the first claude invocation passes `--session-id
+// <newID>` so the id is stable from the start. A bead that is already
+// in_progress is not re-claimed: the launch joins it as a second coding
+// agent, which gets no kickoff prompt (the operator says what the second
+// session is for; `--prompt` still wins when given).
 //
 // When opts.ResumeSessionID is non-empty (the path the user takes after a
 // wrapper has been killed), the bead is NOT re-claimed (it's already
@@ -103,45 +116,67 @@ func RunWithResume(db, beadsDir, ticketID, resumeSessionID string, mode Mode) er
 // `--resume <sessionID>` so it reattaches to the same transcript instead of
 // starting a new one.
 //
+// When opts.ForkFromSessionID is non-empty (`ticket agent fork`), a fresh
+// session id is generated and registered with ForkedFrom set, the bead is
+// not claimed, and the first claude invocation passes `--resume <parent>
+// --fork-session --session-id <newID>`: claude loads the parent's transcript
+// and continues it under the new id. No kickoff prompt is passed.
+//
 // While AgentCommand is running, its pid is recorded at <env>/[PIDFile] so
 // [Relaunch] can target it.
 func RunWithOptions(db, beadsDir, ticketID string, mode Mode, opts RunOptions) error {
 	resumeSessionID := opts.ResumeSessionID
+	forkFrom := opts.ForkFromSessionID
 	if ticketID == "" {
 		return errors.New("ticket id required")
 	}
 	if beadsDir == "" {
 		return errors.New("BEADS_DIR not set: cannot derive env root")
 	}
+	if resumeSessionID != "" && forkFrom != "" {
+		return errors.New("resume and fork are mutually exclusive")
+	}
 	envPath, err := env.Create(db, beadsDir, ticketID)
 	if err != nil {
 		return fmt.Errorf("create env dir: %w", err)
 	}
 
-	if resumeSessionID != "" {
-		// Refuse to resume in a mode that doesn't match what was recorded:
-		// `ticket agent --resume <spec-id>` (and the reverse) would otherwise
-		// silently change the agent's type via the UpsertAgent below.
-		// Sessions without a recorded entry slip through — `ticket agent
-		// --resume <unknown-id>` keeps working as a manual-paste escape hatch.
+	if recorded := firstNonEmpty(resumeSessionID, forkFrom); recorded != "" {
+		// Refuse to resume (or fork) in a mode that doesn't match what was
+		// recorded: `ticket agent --resume <spec-id>` (and the reverse) would
+		// otherwise silently change the agent's type via the UpsertAgent
+		// below. Sessions without a recorded entry slip through — `ticket
+		// agent --resume <unknown-id>` keeps working as a manual-paste
+		// escape hatch.
 		entries, err := LoadAgents(db, beadsDir, ticketID)
 		if err != nil {
 			return fmt.Errorf("load agents: %w", err)
 		}
 		for i := range entries {
-			if entries[i].SessionID != resumeSessionID {
+			if entries[i].SessionID != recorded {
 				continue
 			}
 			if entries[i].Mode != "" && entries[i].Mode != mode.String() {
 				return fmt.Errorf("session %s was recorded as %s mode; use `ticket %s --resume %s` instead",
-					resumeSessionID, entries[i].Mode, entries[i].Mode, resumeSessionID)
+					recorded, entries[i].Mode, entries[i].Mode, recorded)
 			}
 			break
 		}
 	}
 
-	if resumeSessionID == "" && mode != ModeSpec {
-		if err := Claim(db, beadsDir, ticketID); err != nil {
+	// fresh is a launch that allocates a new transcript: not a resume, not
+	// a fork. secondAgent marks a fresh coding launch onto a bead another
+	// agent already claimed; it skips both the claim and the kickoff prompt.
+	fresh := resumeSessionID == "" && forkFrom == ""
+	secondAgent := false
+	if fresh && mode != ModeSpec {
+		issue, err := loadIssue(db, beadsDir, ticketID)
+		if err != nil {
+			return err
+		}
+		if issue.Status == "in_progress" {
+			secondAgent = true
+		} else if err := claimIssue(db, beadsDir, issue); err != nil {
 			return err
 		}
 	}
@@ -183,6 +218,7 @@ func RunWithOptions(db, beadsDir, ticketID string, mode Mode, opts RunOptions) e
 		Mode:            mode.String(),
 		StartedAt:       startedAt,
 		Env:             envPath,
+		ForkedFrom:      forkFrom,
 		Status:          StatusWaiting,
 		StatusUpdatedAt: startedAt,
 	}); err != nil {
@@ -204,29 +240,36 @@ func RunWithOptions(db, beadsDir, ticketID string, mode Mode, opts RunOptions) e
 		}
 		argv = append(argv, "--append-system-prompt", prompt)
 		// First iteration: pin claude to our chosen session id, either by
-		// having it allocate a fresh session under that id (`--session-id`)
-		// or by reattaching to an existing transcript (`--resume`).
-		// Subsequent iterations pass --continue (via extraArgs) and inherit
-		// the same session.
+		// having it allocate a fresh session under that id (`--session-id`),
+		// by reattaching to an existing transcript (`--resume`), or by
+		// forking an existing transcript into our id (`--resume <parent>
+		// --fork-session --session-id <ours>`; claude accepts the three
+		// together and writes the fork under the given id). Subsequent
+		// iterations pass `--resume <ours>` (via extraArgs) and inherit the
+		// same session.
 		if len(extraArgs) == 0 {
-			if resumeSessionID != "" {
+			switch {
+			case resumeSessionID != "":
 				argv = append(argv, "--resume", sessionID)
-			} else {
+			case forkFrom != "":
+				argv = append(argv, "--resume", forkFrom, "--fork-session", "--session-id", sessionID)
+			default:
 				argv = append(argv, "--session-id", sessionID)
 			}
 		}
 		argv = append(argv, extraArgs...)
 		// Fresh-launch mode gets a kickoff prompt as the trailing positional,
 		// so claude dispatches it on turn 1 instead of opening to a blank
-		// input. Resumes/relaunches skip this (their transcript already has
-		// a turn 1). Agent mode falls back to InitialAgentPrompt when the
-		// operator didn't supply --prompt; spec mode only injects when an
-		// explicit --prompt was supplied.
-		if len(extraArgs) == 0 && resumeSessionID == "" {
+		// input. Resumes/forks/relaunches skip this (their transcript already
+		// has a turn 1). Agent mode falls back to InitialAgentPrompt when the
+		// operator didn't supply --prompt, except for a second agent on an
+		// already-claimed bead, which opens to a blank input; spec mode only
+		// injects when an explicit --prompt was supplied.
+		if len(extraArgs) == 0 && fresh {
 			switch {
 			case opts.InitialPrompt != "":
 				argv = append(argv, opts.InitialPrompt)
-			case mode == ModeAgent:
+			case mode == ModeAgent && !secondAgent:
 				argv = append(argv, InitialAgentPrompt)
 			}
 		}
@@ -259,8 +302,18 @@ func RunWithOptions(db, beadsDir, ticketID string, mode Mode, opts RunOptions) e
 		if _, err := os.Stat(envPath); os.IsNotExist(err) {
 			return waitErr
 		}
-		extraArgs = append([]string{"--continue"}, sigArgs...)
+		extraArgs = append([]string{"--resume", sessionID}, sigArgs...)
 	}
+}
+
+// firstNonEmpty returns the first of its arguments that is not "".
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // Regenerate rewrites the env's auto-managed context files from the current
@@ -329,17 +382,23 @@ func Claim(db, beadsDir, ticketID string) error {
 	if err != nil {
 		return err
 	}
+	return claimIssue(db, beadsDir, issue)
+}
+
+// claimIssue is [Claim] for an already-loaded issue, so a caller that has
+// just inspected the status doesn't pay for a second `bd show`.
+func claimIssue(db, beadsDir string, issue *bdIssue) error {
 	if issue.Status == "in_progress" {
-		return fmt.Errorf("ticket %s is already in_progress; refusing to claim", ticketID)
+		return fmt.Errorf("ticket %s is already in_progress; refusing to claim", issue.ID)
 	}
 	for _, dep := range issue.Dependencies {
 		if dep.DependencyType == "blocks" && dep.Status != "closed" {
-			return fmt.Errorf("ticket %s is blocked by %s (status %s); refusing to claim", ticketID, dep.ID, dep.Status)
+			return fmt.Errorf("ticket %s is blocked by %s (status %s); refusing to claim", issue.ID, dep.ID, dep.Status)
 		}
 	}
-	out, err := bdcli.Cmd(beadsDir, db, "update", ticketID, "--claim").CombinedOutput()
+	out, err := bdcli.Cmd(beadsDir, db, "update", issue.ID, "--claim").CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("bd update %s --claim: %v: %s", ticketID, err, out)
+		return fmt.Errorf("bd update %s --claim: %v: %s", issue.ID, err, out)
 	}
 	return nil
 }

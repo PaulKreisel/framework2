@@ -182,6 +182,15 @@ func TestPickAndResumeParsesSessionIDFromRow(t *testing.T) {
 	beadsDir := testutil.TestDB(t)
 	ticket := testutil.CreateBeadFull(t, beadsDir, "resume-pick-parse", "x", "")
 
+	// One recorded session, so an unregistered pick lands in the strict
+	// lookup's "known sessions" error (a ticket with no records at all gets
+	// a different message that does not repeat the picked id).
+	if err := agent.RegisterAgent("", beadsDir, ticket, agent.AgentEntry{
+		SessionID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", PID: 1, Mode: "agent",
+		StartedAt: "2026-08-11T09:00:00Z", Env: t.TempDir(),
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
 	sid := "33333333-3333-4333-8333-333333333333"
 	// The picked row carries every `agent list` column; only the first field is
 	// the session id.

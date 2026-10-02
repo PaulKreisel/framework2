@@ -58,12 +58,18 @@ func renderStatusBlock(e AgentEntry, stdout io.Writer) error {
 	fields := [][2]string{
 		{"Session ID", e.SessionID},
 		{"Mode", e.Mode},
-		{"PID", fmt.Sprintf("%d", e.PID)},
-		{"Started", FormatStarted(e.StartedAt)},
-		{"State", StateOf(e)},
-		{"Status Updated", FormatStarted(e.StatusUpdatedAt)},
-		{"Env", e.Env},
 	}
+	// Only forks carry a parent; the line is omitted for the rest.
+	if e.ForkedFrom != "" {
+		fields = append(fields, [2]string{"Forked From", e.ForkedFrom})
+	}
+	fields = append(fields,
+		[2]string{"PID", fmt.Sprintf("%d", e.PID)},
+		[2]string{"Started", FormatStarted(e.StartedAt)},
+		[2]string{"State", StateOf(e)},
+		[2]string{"Status Updated", FormatStarted(e.StatusUpdatedAt)},
+		[2]string{"Env", e.Env},
+	)
 	for _, f := range fields {
 		if _, err := fmt.Fprintf(stdout, "%s: %s\n", f[0], f[1]); err != nil {
 			return err

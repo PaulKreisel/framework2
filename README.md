@@ -15,26 +15,50 @@ internal/    shared internals (added as needed)
 
 For per-command usage, run the binary with `--help` — this README intentionally does not duplicate it.
 
-## The `cc` / `cr` shell aliases
+## The `cc` / `cr` / `cf` shell aliases
 
-`cc` and `cr` are the machine-wide "get me back into a claude session"
+`cc`, `cr` and `cf` are the machine-wide "get me back into a claude session"
 shortcuts. Pointing them at the framework makes them ticket-aware:
 
 ```sh
 alias cc="ticket agent continue"   # most recently active session
 alias cr="ticket agent resume"     # fzf picker over the ticket's sessions
+alias cf="ticket agent fork"       # same picker, but fork into a new session
 ```
 
 Inside a ticket env folder (anything under a directory holding a
-`.ticket-id` marker) both re-launch the *wrapper* — hooks, appended system
-prompt, `--add-dir` for linked worktrees, agent record — against the
-existing transcript, in the mode the session was recorded with. `cr`'s
-picker lists exactly the rows `this agent list` prints.
+`.ticket-id` marker) all three launch the *wrapper* — hooks, appended system
+prompt, `--add-dir` for linked worktrees, agent record — in the mode the
+session was recorded with. `cc` and `cr` reattach to the existing
+transcript. `cf` passes `--fork-session`, so claude continues from the
+picked transcript under a new session id while the parent keeps running;
+the new record lists the parent under `FORKED FROM` in `agent list`. The
+picker of `cr` and `cf` lists exactly the rows `this agent list` prints.
 
 Anywhere else they fall through to a bare `claude --continue` /
-`claude --resume`, which is what they did before, so the aliases stay safe
-to use everywhere. Keep them as shell *aliases*: a `cc` binary on `$PATH`
-would shadow the C compiler for every subprocess.
+`claude --resume` / `claude --resume --fork-session`, which is what they
+did before, so the aliases stay safe to use everywhere. Keep them as shell
+*aliases*: a `cc` binary on `$PATH` would shadow the C compiler for every
+subprocess.
+
+## Several sessions on one ticket
+
+A ticket can host more than one live wrapper: a fork (`cf`), or a second
+`ticket agent <id>` on a bead that is already `in_progress`. The second
+coding agent does not claim the bead again and gets no kickoff prompt — it
+opens to a blank input, so say what it is for (or pass `--prompt`).
+
+Each wrapper relaunches its own claude by session id after `this dir
+worktree` / `this dir link`, so neither picks up the sibling's transcript.
+Running `this dir worktree <repo>` for a repo the ticket already has is a
+no-op that still triggers the relaunch, so a session can pick up a directory
+its sibling linked.
+
+Known limitation: the pid and signal files (`<env>/.claude.pid`,
+`<env>/.relaunch`) are per ticket, not per session. The relaunch kill lands
+on whichever claude started last, and when the older wrapper exits it
+removes the pid file, after which auto-relaunch is a no-op until a wrapper
+restarts.
 
 ## Customizing the agent system prompt
 

@@ -115,7 +115,7 @@ python3 /path/to/conversation.py <bead-id>
 
 See [`conversation.py`](./conversation.py) for the script. It prints only
 `mode=agent` conversations as plain text, filtering out noise entries
-("Ignore the kill, adding was successful. Continue" / "No response requested."). By default it shows only
+(the auto-relaunch kickoff prompt / "No response requested."). By default it shows only
 the last agent run, which is almost always what you want.
 
 The script already filters to `mode=agent` runs (the implementers). Only pass

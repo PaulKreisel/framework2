@@ -17,7 +17,12 @@ def format_conversation(agent, index=None):
         t = entry.get('type')
         if t == 'user':
             prompt = entry.get('prompt', '').strip()
-            if prompt == 'Ignore the kill, adding was successful. Continue':
+            # Auto-relaunch kickoff prompts (the current wording and the one
+            # older logs carry), not something a human typed.
+            if prompt in (
+                'Ignore the kill, adding was successful. Continue',
+                'Relaunched because a directory was added to this ticket, possibly from another session. Nothing was lost, continue.',
+            ):
                 continue
             lines.append(f"[user] {prompt}")
         elif t in ('assistant_comment', 'assistant_reply'):

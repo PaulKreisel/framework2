@@ -205,15 +205,22 @@ func TestRunLoopRelaunchesOnSignal(t *testing.T) {
 	counter := filepath.Join(workDir, "counter")
 
 	// Fake claude:
-	//   - appends one line per invocation: "CONT" if --continue is present
-	//     in argv (as its own arg, so the system-prompt text can't false-match),
-	//     "PLAIN" otherwise.
+	//   - appends one line per invocation: "RESUME <id>" if --resume is
+	//     present in argv (as its own arg, so the system-prompt text can't
+	//     false-match), "PLAIN" otherwise. The relaunch must resume the
+	//     wrapper's own session id, never `--continue`: with two wrappers
+	//     on one ticket `--continue` could pick the sibling's transcript.
 	//   - on the first run, writes the signal file (empty body → no extra
 	//     args) to ask for a relaunch
 	//   - exits 0
 	script := fmt.Sprintf(`
-if printf "%%s\n" "$@" | grep -q -- "^--continue$"; then
-  echo "CONT" >> %q
+resume=""
+while [ $# -gt 0 ]; do
+  if [ "$1" = "--resume" ]; then resume="$2"; fi
+  shift
+done
+if [ -n "$resume" ]; then
+  echo "RESUME $resume" >> %q
 else
   echo "PLAIN" >> %q
 fi
@@ -251,10 +258,17 @@ fi
 		t.Fatalf("counter has %d lines, want 2; body=%q", len(lines), string(body))
 	}
 	if lines[0] != "PLAIN" {
-		t.Errorf("first invocation = %q, want PLAIN (no --continue yet)", lines[0])
+		t.Errorf("first invocation = %q, want PLAIN (no --resume yet)", lines[0])
 	}
-	if lines[1] != "CONT" {
-		t.Errorf("second invocation = %q, want CONT (--continue present)", lines[1])
+	entries, err := agent.LoadAgents("", beadsDir, ticket)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("LoadAgents = %v, %v; want exactly one record", entries, err)
+	}
+	if want := "RESUME " + entries[0].SessionID; lines[1] != want {
+		t.Errorf("second invocation = %q, want %q (relaunch resumes the wrapper's own session)", lines[1], want)
+	}
+	if strings.Contains(string(body), "--continue") {
+		t.Errorf("relaunch must not pass --continue; counter body=%q", string(body))
 	}
 
 	if _, err := os.Stat(filepath.Join(envPath, agent.SignalFile)); !os.IsNotExist(err) {
@@ -798,7 +812,7 @@ func TestRunWithOptionsEmptyPromptFallsBack(t *testing.T) {
 // TestRunLoopRelaunchDoesNotInheritInitialPrompt asserts that the iter-2+
 // wrapper-loop relaunch path does NOT re-inject the original launch's
 // InitialPrompt — the signal file's extraArgs are the sole source of the
-// post-relaunch prompt (today's default: "Ignore the kill, adding was successful. Continue").
+// post-relaunch prompt (today's default: [agent.DefaultRelaunchPrompt]).
 func TestRunLoopRelaunchDoesNotInheritInitialPrompt(t *testing.T) {
 	beadsDir := testutil.TestDB(t)
 	ticket := testutil.CreateBeadFull(t, beadsDir, "agent-relaunch-prompt-inherit", "x", "")

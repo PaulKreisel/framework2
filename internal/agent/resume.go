@@ -46,10 +46,10 @@ var ExecPicker = func(table string, args []string) (string, error) {
 
 // ExecClaude replaces the current process with a bare [AgentCommand] launch —
 // no wrapper, no env folder, no agent record. It is the escape hatch for
-// `ticket agent continue` / `ticket agent resume` when the caller is not
-// inside a ticket env: the framework has nothing to resume there, so the
-// operator's plain `claude --continue` / `claude --resume` behaviour is
-// preserved verbatim.
+// `ticket agent continue` / `resume` / `fork` when the caller is not inside
+// a ticket env: the framework has nothing to resume there, so the operator's
+// plain `claude --continue` / `claude --resume` / `claude --resume
+// --fork-session` behaviour is preserved verbatim.
 //
 // Exported as a var so tests can stub it instead of being replaced by claude.
 var ExecClaude = func(args []string) error {
@@ -95,11 +95,33 @@ func ContinueLatest(db, beadsDir, ticketID string) error {
 // internal/next (which imports this package): feeding it verbatim is what
 // guarantees the picker shows exactly the rows `this agent list` shows.
 func PickAndResume(db, beadsDir, ticketID, table string) error {
+	sessionID, err := pickSession(ticketID, table)
+	if err != nil {
+		return err
+	}
+	return ResumeSession(db, beadsDir, ticketID, sessionID)
+}
+
+// PickAndFork is [PickAndResume] for `ticket agent fork`: same picker, same
+// rows, but the chosen session is forked via [ForkSession] instead of
+// resumed.
+func PickAndFork(db, beadsDir, ticketID, table string) error {
+	sessionID, err := pickSession(ticketID, table)
+	if err != nil {
+		return err
+	}
+	return ForkSession(db, beadsDir, ticketID, sessionID)
+}
+
+// pickSession runs the fzf picker over table and returns the SESSION ID
+// column of the chosen row. Shared by the resume and fork pickers so both
+// show exactly the same rows with the same keys.
+func pickSession(ticketID, table string) (string, error) {
 	if ticketID == "" {
-		return errors.New("ticket id required")
+		return "", errors.New("ticket id required")
 	}
 	if !hasSessionRows(table) {
-		return fmt.Errorf("ticket %s has no recorded agent sessions; launch `this agent` or `this spec` first", ticketID)
+		return "", fmt.Errorf("ticket %s has no recorded agent sessions; launch `this agent` or `this spec` first", ticketID)
 	}
 	line, err := ExecPicker(table, []string{
 		"--header-lines=1",
@@ -107,13 +129,13 @@ func PickAndResume(db, beadsDir, ticketID, table string) error {
 		"--prompt=session> ",
 	})
 	if err != nil {
-		return err
+		return "", err
 	}
 	sessionID := firstField(line)
 	if sessionID == "" {
-		return ErrPickCancelled
+		return "", ErrPickCancelled
 	}
-	return ResumeSession(db, beadsDir, ticketID, sessionID)
+	return sessionID, nil
 }
 
 // ResumeSession re-launches the wrapper against an existing transcript in the
@@ -124,6 +146,20 @@ func PickAndResume(db, beadsDir, ticketID, table string) error {
 // Lookup is strict — an unknown session id errors with the ticket's known ids,
 // matching [Attach].
 func ResumeSession(db, beadsDir, ticketID, sessionID string) error {
+	return runRecordedSession(db, beadsDir, ticketID, sessionID, false)
+}
+
+// ForkSession launches a new wrapper whose claude session continues from
+// sessionID's transcript under a fresh session id (`--fork-session`). The
+// parent record is untouched; the new record carries ForkedFrom. The mode
+// comes from the parent's record, exactly as for [ResumeSession].
+//
+// Lookup is strict — an unknown session id errors with the ticket's known ids.
+func ForkSession(db, beadsDir, ticketID, sessionID string) error {
+	return runRecordedSession(db, beadsDir, ticketID, sessionID, true)
+}
+
+func runRecordedSession(db, beadsDir, ticketID, sessionID string, fork bool) error {
 	if ticketID == "" {
 		return errors.New("ticket id required")
 	}
@@ -135,10 +171,14 @@ func ResumeSession(db, beadsDir, ticketID, sessionID string) error {
 		return err
 	}
 	for i := range entries {
-		if entries[i].SessionID == sessionID {
-			return RunWithOptions(db, beadsDir, ticketID, ParseMode(entries[i].Mode),
-				RunOptions{ResumeSessionID: sessionID})
+		if entries[i].SessionID != sessionID {
+			continue
 		}
+		opts := RunOptions{ResumeSessionID: sessionID}
+		if fork {
+			opts = RunOptions{ForkFromSessionID: sessionID}
+		}
+		return RunWithOptions(db, beadsDir, ticketID, ParseMode(entries[i].Mode), opts)
 	}
 	return unknownSessionError(ticketID, sessionID, entries)
 }

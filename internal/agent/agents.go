@@ -37,12 +37,17 @@ import (
 // conversation_store.go) and hydrated back onto this field by [LoadAgents].
 // Keeping the (unbounded) transcript out of the bead is what stops bd's
 // per-event bead snapshot from overflowing its store; see ai-vrc.80.
+//
+// ForkedFrom is set on records created by `ticket agent fork`: the session
+// id whose claude transcript the fork continued from. The fork's own
+// conversation log starts empty — the parent's is not copied.
 type AgentEntry struct {
 	SessionID              string      `json:"sessionId"`
 	PID                    int         `json:"pid"`
 	Mode                   string      `json:"mode"`
 	StartedAt              string      `json:"startedAt"`
 	Env                    string      `json:"env"`
+	ForkedFrom             string      `json:"forkedFrom,omitempty"`
 	Status                 string      `json:"status,omitempty"`
 	StatusUpdatedAt        string      `json:"statusUpdatedAt,omitempty"`
 	ContextTokens          int         `json:"contextTokens,omitempty"`
@@ -272,6 +277,17 @@ func FormatContextTokens(n int) string {
 	default:
 		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
 	}
+}
+
+// FormatForkedFrom renders [AgentEntry.ForkedFrom] for the compact list
+// view: the first 8 characters of the parent session id, or "" for a
+// session that is not a fork. The full id is in `agent list --json` and
+// `agent status`.
+func FormatForkedFrom(parent string) string {
+	if len(parent) > 8 {
+		return parent[:8]
+	}
+	return parent
 }
 
 // StateOf returns the hook-driven Status for an agent record (defaulting to

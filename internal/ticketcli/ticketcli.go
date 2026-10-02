@@ -113,13 +113,19 @@ subcommands:
                                           file whose generated header is gone.
   agent [<id>] [--prompt "<text>"] [--resume <session-id> | --dry-run]
                                           launch claude from a ticket's env folder
-                                          in coding mode. With --prompt, the
-                                          supplied text replaces the built-in
-                                          kickoff message ("Implement the
-                                          ticket, then set up pde and compile,
-                                          test and launch it ...") claude
-                                          auto-submits as turn 1 (empty
-                                          string behaves like an omitted flag).
+                                          in coding mode. Claims the bead; if it
+                                          is already in_progress the launch
+                                          joins it as a second coding agent
+                                          instead: no claim, no kickoff message,
+                                          claude opens to a blank input.
+                                          With --prompt, the supplied text
+                                          replaces the built-in kickoff message
+                                          ("Implement the ticket, then set up
+                                          pde and compile, test and launch it
+                                          ...") claude auto-submits as turn 1
+                                          (empty string behaves like an omitted
+                                          flag; on a second agent it is the
+                                          only way to get a turn 1).
                                           With --resume, claude reattaches to
                                           the named transcript instead of
                                           starting a fresh session; the existing
@@ -188,9 +194,22 @@ subcommands:
                                           no-op. Outside a ticket env it degrades to
                                           a plain ` + "`claude --resume`" + ` launch (the ` + "`cr`" + `
                                           alias).
+  agent fork [<id>]                       like ` + "`agent resume`" + ` but start a NEW session
+                                          that continues from the picked session's
+                                          transcript (claude --fork-session), in the
+                                          picked session's mode. The parent keeps
+                                          running; the new record shows the parent
+                                          under FORKED FROM. Does not claim the
+                                          bead. Outside a ticket env it degrades to
+                                          ` + "`claude --resume --fork-session`" + ` (the
+                                          ` + "`cf`" + ` alias).
   agent relaunch [<id>] [extra-args...]   from inside a session: ask the running
-                                          wrapper to re-exec claude with --continue
-                                          (use after a dir link/worktree)
+                                          wrapper to re-exec claude with
+                                          --resume <its session id> (use after a
+                                          dir link/worktree). The pid file is per
+                                          ticket, so with two sessions on one
+                                          ticket the kill lands on whichever
+                                          claude started last.
   agent --print-default-prompt            print the built-in default coding-mode
                                           prompt template (copy as a starting
                                           point for <BEADS_DIR>/agent-prompt.md)
@@ -613,7 +632,11 @@ func runDirWorktree(db, beadsDir, ticket string, args []string) error {
 	// Only the explicitly addressed ticket may have a live wrapper to
 	// refresh; cascade-created ancestor worktrees belong to tickets whose
 	// agents aren't running. Relaunch even after partial failure so the
-	// successfully added repos reach the refreshed prompt.
+	// successfully added repos reach the refreshed prompt. A repo that is
+	// already linked counts as added: dir.Worktree returns nil without
+	// creating anything, and the relaunch still fires so the calling
+	// session picks the directory up (it may have been linked by a sibling
+	// session on the same ticket).
 	if added > 0 {
 		if err := agent.RelaunchIfActive(beadsDir, id); err != nil {
 			errs = append(errs, err)
@@ -835,8 +858,9 @@ func runAgent(db, beadsDir, ticket string, args []string, mode agent.Mode, stdou
 		// ticket, no state filter (every row shows up).
 		return next.RunAgent(db, beadsDir, id, 0, 0, false, next.StateFilterNone, jsonOut, stdout)
 	}
-	if mode == agent.ModeAgent && len(args) > 0 && (args[0] == "continue" || args[0] == "resume") {
-		// `ticket agent continue [<id>]` / `ticket agent resume [<id>]`
+	if mode == agent.ModeAgent && len(args) > 0 && (args[0] == "continue" || args[0] == "resume" || args[0] == "fork") {
+		// `ticket agent continue [<id>]` / `ticket agent resume [<id>]` /
+		// `ticket agent fork [<id>]`
 		return runAgentContinue(db, beadsDir, ticket, args[0], args[1:])
 	}
 	if mode == agent.ModeAgent && len(args) > 0 && args[0] == "set-status" {
@@ -945,9 +969,10 @@ func runAgent(db, beadsDir, ticket string, args []string, mode agent.Mode, stdou
 // tmpdir instead of inheriting the test process's cwd.
 var CwdForDiscovery = os.Getwd
 
-// runAgentContinue handles `ticket agent continue [<id>]` (sub == "continue")
-// and `ticket agent resume [<id>]` (sub == "resume") — the two commands the
-// machine-wide `cc` / `cr` aliases point at.
+// runAgentContinue handles `ticket agent continue [<id>]` (sub == "continue"),
+// `ticket agent resume [<id>]` (sub == "resume") and `ticket agent fork
+// [<id>]` (sub == "fork") — the commands the machine-wide `cc` / `cr` / `cf`
+// aliases point at.
 //
 // Ticket resolution is deliberately laxer than every other subcommand: an
 // explicit --ticket / <id> wins, but with neither we fall back to the
@@ -971,7 +996,11 @@ func runAgentContinue(db, beadsDir, ticket, sub string, args []string) error {
 			return err
 		}
 		if discovered == "" {
-			// Not in a ticket env: be `claude --continue` / `claude --resume`.
+			// Not in a ticket env: be `claude --continue` / `claude --resume`
+			// / `claude --resume --fork-session`.
+			if sub == "fork" {
+				return agent.ExecClaude([]string{"--resume", "--fork-session"})
+			}
 			return agent.ExecClaude([]string{"--" + sub})
 		}
 		id = discovered
@@ -985,7 +1014,11 @@ func runAgentContinue(db, beadsDir, ticket, sub string, args []string) error {
 	if err := next.RunAgent(db, beadsDir, id, 0, 0, false, next.StateFilterNone, false, &table); err != nil {
 		return err
 	}
-	err = agent.PickAndResume(db, beadsDir, id, table.String())
+	if sub == "fork" {
+		err = agent.PickAndFork(db, beadsDir, id, table.String())
+	} else {
+		err = agent.PickAndResume(db, beadsDir, id, table.String())
+	}
 	if errors.Is(err, agent.ErrPickCancelled) {
 		return nil
 	}

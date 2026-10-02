@@ -18,11 +18,18 @@ import (
 const (
 	// SignalFile is touched by Relaunch to ask the wrapper to re-exec claude.
 	// Its contents (if any) are extra claude args, one per line, appended
-	// after the wrapper's automatic --continue.
+	// after the wrapper's automatic `--resume <own session id>`.
 	SignalFile = ".relaunch"
 	// PIDFile holds the pid of the currently running claude child of the
 	// wrapper. The wrapper writes it after launch and removes it after wait;
 	// Relaunch reads it to know whom to signal.
+	//
+	// Both files are per ticket, not per session. With two wrappers on one
+	// ticket (a fork or a second coding agent) the pid file holds whichever
+	// claude started last, so a relaunch may land on the sibling session;
+	// and when the older wrapper exits it removes the pid file, after which
+	// auto-relaunch is a no-op until a wrapper restarts. Per-session files
+	// are out of scope for now.
 	PIDFile = ".claude.pid"
 )
 
@@ -30,11 +37,15 @@ const (
 // agent relaunch` is invoked with no extra args. It gives the relaunched
 // session something to respond to so the user sees a visible signal that the
 // relaunch actually happened (and that any newly linked dirs are in scope).
-const DefaultRelaunchPrompt = "Ignore the kill, adding was successful. Continue"
+// Worded so it also reads right in a session that did not add anything
+// itself: with several sessions on one ticket, the relaunch may have been
+// triggered by a sibling.
+const DefaultRelaunchPrompt = "Relaunched because a directory was added to this ticket, possibly from another session. Nothing was lost, continue."
 
 // Relaunch asks a running `ticket agent` wrapper to re-exec claude with
-// `--continue` plus extraArgs. It writes [SignalFile] in the ticket's env
-// folder, then signals the claude process whose pid is in [PIDFile].
+// `--resume <its session id>` plus extraArgs. It writes [SignalFile] in the
+// ticket's env folder, then signals the claude process whose pid is in
+// [PIDFile].
 //
 // When extraArgs is empty, [DefaultRelaunchPrompt] is passed as the prompt
 // instead so the relaunched session has something to acknowledge.
