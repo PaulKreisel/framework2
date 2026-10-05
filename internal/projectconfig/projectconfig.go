@@ -20,6 +20,7 @@
 //	  bundle-pool: ~/pde/bundle-pool
 //	  extra-bundles: [~/repos/other/org.example.plugin]
 //	  vm-args: [-Dfoo=bar]
+//	  program-args: [-preferences, ~/knime/mountpoints.epf]
 //
 // Placeholders supported in templates:
 //
@@ -97,6 +98,11 @@ type PDEConfig struct {
 	ExtraBundles []string `yaml:"extra-bundles"`
 	// VMArgs are appended to the built-in launch preset's vmArgs.
 	VMArgs []string `yaml:"vm-args"`
+	// ProgramArgs are the launch preset's programArgs, i.e. application
+	// arguments such as `-preferences <file.epf>`, which seeds a fresh
+	// workspace with exported preferences (mountpoints, dialogs already
+	// answered). Entries that are paths get `~/` expanded.
+	ProgramArgs []string `yaml:"program-args"`
 }
 
 // Configured reports whether enough is set to generate a pde.yaml.

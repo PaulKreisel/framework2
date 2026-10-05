@@ -98,14 +98,19 @@ func Run(req Request, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
+	programArgs, err := expandAll(cfg.PDE.ProgramArgs)
+	if err != nil {
+		return err
+	}
 
 	body := Render(Options{
-		TicketID:   req.TicketID,
-		Target:     target,
-		BundlePool: pool,
-		Bundles:    bundles,
-		DataDir:    filepath.Join(envPath, ".ap-data"),
-		VMArgs:     append(cfg.PDE.VMArgs, req.VMArgs...),
+		TicketID:    req.TicketID,
+		Target:      target,
+		BundlePool:  pool,
+		Bundles:     bundles,
+		DataDir:     filepath.Join(envPath, ".ap-data"),
+		ProgramArgs: programArgs,
+		VMArgs:      append(cfg.PDE.VMArgs, req.VMArgs...),
 	})
 
 	if req.DryRun {
@@ -215,4 +220,18 @@ func Write(path string, body []byte, force bool) error {
 func isGenerated(body []byte) bool {
 	first, _, _ := strings.Cut(string(body), "\n")
 	return strings.Contains(first, GeneratedMarker)
+}
+
+// expandAll applies ExpandHome to every entry. Only `~/`-prefixed entries
+// change, so flags like `-preferences` pass through untouched.
+func expandAll(args []string) ([]string, error) {
+	out := make([]string, 0, len(args))
+	for _, a := range args {
+		expanded, err := projectconfig.ExpandHome(a)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, expanded)
+	}
+	return out, nil
 }

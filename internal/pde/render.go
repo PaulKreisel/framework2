@@ -97,6 +97,8 @@ type Options struct {
 	DataDir string
 	// VMArgs are appended after the built-in preset args.
 	VMArgs []string
+	// ProgramArgs are the preset's application arguments. Empty omits the key.
+	ProgramArgs []string
 }
 
 // Bundle is one `bundles:` entry plus the comment explaining where it came
@@ -159,6 +161,12 @@ func Render(o Options) []byte {
 		p("    # so workflows and preferences from the last run are gone. `pde launch --clean`\n")
 		p("    # rebuilds the OSGi state when a stale workspace misbehaves.\n")
 		p("    dataDir: %s\n", yamlString(o.DataDir))
+	}
+	if len(o.ProgramArgs) > 0 {
+		p("    programArgs:\n")
+		for _, a := range o.ProgramArgs {
+			p("      - %s\n", yamlString(a))
+		}
 	}
 	p("    vmArgs:\n")
 	for _, a := range VMArgs(o.VMArgs) {
