@@ -30,6 +30,7 @@ import (
 	"sync"
 	"time"
 
+	"framework2/internal/devserver"
 	"framework2/internal/env"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"gopkg.in/yaml.v3"
@@ -78,7 +79,7 @@ func Main(cwd string, stdout, stderr io.Writer) error {
 		InputSchema: json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`),
 	}, p.status)
 	if p.ticket != "" {
-		p.installTools(context.Background())
+		p.installTools(context.Background(), false)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -177,8 +178,11 @@ func listening(port int) bool {
 }
 
 // backend returns a session to the running instance, connecting when needed.
-// Caller holds p.mu.
-func (p *proxy) backend(ctx context.Context) (*mcp.ClientSession, Instance, error) {
+// With wait, a backend whose JVM is up but whose port is not open yet is
+// waited for (bounded by startingWait); without, it counts as not running.
+// Startup must not wait: Claude Code gives the MCP server a short time to
+// answer initialize. Caller holds p.mu.
+func (p *proxy) backend(ctx context.Context, wait bool) (*mcp.ClientSession, Instance, error) {
 	if p.session != nil {
 		return p.session, p.connected, nil
 	}
@@ -207,9 +211,54 @@ func (p *proxy) backend(ctx context.Context) (*mcp.ClientSession, Instance, erro
 		p.logger.Printf("connected to %s/%s on port %d", filepath.Base(inst.Config), inst.Preset, inst.Port)
 		return session, inst, nil
 	}
+	// Nothing listens. A backend JVM that was started with this port is still
+	// starting (20 to 60 s from launch to an open port): wait for it instead
+	// of failing, bounded well below the MCP client's tool timeout.
+	for _, inst := range instances {
+		if !wait {
+			break
+		}
+		pid := devserver.BackendPID(inst.Port)
+		if pid == 0 {
+			continue
+		}
+		p.logger.Printf("backend pid %d for port %d is starting; waiting up to %s", pid, inst.Port, startingWait)
+		deadline := time.Now().Add(startingWait)
+		for time.Now().Before(deadline) {
+			select {
+			case <-ctx.Done():
+				return nil, Instance{}, ctx.Err()
+			case <-time.After(time.Second):
+			}
+			if !listening(inst.Port) {
+				if devserver.BackendPID(inst.Port) == 0 {
+					return nil, Instance{}, fmt.Errorf("the backend of %s (pid %d) exited while starting; check the launch log in %s, then `pde launch devserver` again",
+						p.ticket, pid, p.envDir)
+				}
+				continue
+			}
+			cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			session, err := mcp.NewClient(&mcp.Implementation{Name: ServerName + "-proxy", Version: "1"}, nil).
+				Connect(cctx, &mcp.StreamableClientTransport{Endpoint: inst.Endpoint(), DisableStandaloneSSE: true}, nil)
+			cancel()
+			if err != nil {
+				continue // the port is open but the MCP server is not serving yet
+			}
+			p.session, p.connected = session, inst
+			p.logger.Printf("connected to %s/%s on port %d after waiting for the start", filepath.Base(inst.Config), inst.Preset, inst.Port)
+			return session, inst, nil
+		}
+		return nil, Instance{}, fmt.Errorf("the backend of %s is still starting (pid %d, port %d not serving after %s); call again in a moment, or wait for the `[backend] ready:` line of `pde launch devserver`",
+			p.ticket, pid, inst.Port, startingWait)
+	}
 	return nil, Instance{}, fmt.Errorf("no editor instance running for %s; run `pde launch devserver` in %s and retry. Checked: %s",
 		p.ticket, p.envDir, strings.Join(tried, "; "))
 }
+
+// startingWait bounds one tool call's wait for a backend that is starting.
+// Claude Code's MCP tool timeout can be as low as 60 s; a call that returns
+// "still starting" is retried by the agent, a timed-out one is not.
+const startingWait = 45 * time.Second
 
 // Caller holds p.mu.
 func (p *proxy) dropBackend() {
@@ -227,14 +276,14 @@ func (p *proxy) closeBackend() {
 
 // installTools registers the backend's tools, from the backend when one runs,
 // else from the cache. Tools already registered are kept.
-func (p *proxy) installTools(ctx context.Context) {
+func (p *proxy) installTools(ctx context.Context, wait bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.installed == nil {
 		p.installed = map[string]bool{}
 	}
 	var tools []*mcp.Tool
-	session, _, err := p.backend(ctx)
+	session, _, err := p.backend(ctx, wait)
 	if err == nil {
 		res, lerr := session.ListTools(ctx, nil)
 		if lerr != nil {
@@ -290,7 +339,7 @@ func (p *proxy) forward(ctx context.Context, name string, args json.RawMessage) 
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for attempt := 0; attempt < 2; attempt++ {
-		session, _, err := p.backend(ctx)
+		session, _, err := p.backend(ctx, true)
 		if err != nil {
 			return errorResult(err.Error()), nil
 		}
@@ -336,13 +385,15 @@ func (p *proxy) status(ctx context.Context, _ *mcp.CallToolRequest) (*mcp.CallTo
 		state := "down"
 		if listening(inst.Port) {
 			state = "running"
+		} else if pid := devserver.BackendPID(inst.Port); pid != 0 {
+			state = fmt.Sprintf("starting (backend pid %d, port not open yet; tool calls wait up to %s for it)", pid, startingWait)
 		}
 		fmt.Fprintf(&b, "%s preset %s: wf-mcp port %d, %s\n", filepath.Base(inst.Config), inst.Preset, inst.Port, state)
 	}
 	b.WriteString("start: cd <env> && pde compile && pde launch devserver")
 	// A status call is a good moment to pick up tools that were not
 	// available at session start.
-	go p.installTools(context.Background())
+	go p.installTools(context.Background(), true)
 	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: b.String()}}}, nil
 }
 

@@ -9,11 +9,13 @@
 package thiscli
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 
+	"framework2/internal/devserver"
 	"framework2/internal/env"
 	"framework2/internal/ticketcli"
 	"framework2/internal/wfmcp"
@@ -44,6 +46,21 @@ func RunFromWithOptions(opts ticketcli.Options, cwd string, args []string, stdou
 	if len(args) > 0 && args[0] == "wf-mcp-proxy" {
 		if err := wfmcp.Main(cwd, stdout, stderr); err != nil {
 			fmt.Fprintln(stderr, "this: wf-mcp-proxy:", err)
+			return 1
+		}
+		return 0
+	}
+	// The `backend` sidecar of the devserver preset: pde starts it next to the
+	// backend JVM, it blocks until the given ports accept connections and
+	// prints `ready: ...` (relayed by pde as `[backend] ready: ...`). No ticket
+	// needed, the ports are in the command line.
+	if len(args) > 0 && args[0] == "devserver-wait" {
+		ports, err := devserver.ParsePorts(args[1:])
+		if err == nil {
+			err = devserver.WaitPorts(context.Background(), ports, stdout)
+		}
+		if err != nil {
+			fmt.Fprintln(stderr, "this:", err)
 			return 1
 		}
 		return 0

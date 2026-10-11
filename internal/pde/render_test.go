@@ -22,6 +22,7 @@ func TestRenderDevserverPreset(t *testing.T) {
 		Bundles:    []Bundle{{Path: "/wt/org.knime.a", Note: "changed"}, {Path: "/ui/org.knime.ui.js", Note: "frontend"}},
 		VMArgs:     []string{"-Dextra=1"},
 		Devserver: &DevserverOptions{
+			ThisExe:     "/bin/this",
 			Block:       ports.Block{Start: 30010},
 			ContextPath: "/home/.config/knime/devserver/kn-1.workflowContextConfig.yaml",
 			DataDir:     "/env/.devserver-data",
@@ -69,10 +70,13 @@ func TestRenderDevserverPreset(t *testing.T) {
 			t.Errorf("vmArgs has desktop-only %s", unwanted)
 		}
 	}
-	if len(l.Sidecars) != 1 {
+	if len(l.Sidecars) != 2 {
 		t.Fatalf("sidecars: %+v", l.Sidecars)
 	}
-	s := l.Sidecars[0]
+	if b := l.Sidecars[0]; b.Name != "backend" || strings.Join(b.Command, " ") != "/bin/this devserver-wait 30010 30011" || b.ReadyPattern != `ready: (.*)` {
+		t.Fatalf("backend sidecar: %+v", b)
+	}
+	s := l.Sidecars[1]
 	if s.Name != "editor" || strings.Join(s.Command, " ") != "pnpm dev" || s.Cwd != "/ui/org.knime.ui.js" {
 		t.Fatalf("sidecar: %+v", s)
 	}

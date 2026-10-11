@@ -173,6 +173,7 @@ func Run(req Request, stdout io.Writer) error {
 		}
 		fmt.Fprintf(stdout, "Hub %s: would look up or create %s/<jira-id> and write the context yaml (--dry-run)\n", alias, ds.WorkflowFolder)
 		devOpts = &DevserverOptions{
+			ThisExe:     thisExe(),
 			Block:       block,
 			ContextPath: "<context yaml, written without --dry-run>",
 			DataDir:     filepath.Join(envPath, ".devserver-data"),
@@ -215,6 +216,7 @@ func Run(req Request, stdout io.Writer) error {
 		}
 		fmt.Fprintf(stdout, "Wrote %s\n", res.ContextPath)
 		devOpts = &DevserverOptions{
+			ThisExe:     thisExe(),
 			Block:       block,
 			ContextPath: res.ContextPath,
 			DataDir:     filepath.Join(envPath, ".devserver-data"),
@@ -267,7 +269,7 @@ func Run(req Request, stdout io.Writer) error {
 		launch = "pde launch --config " + req.configName() + " " + DevserverLaunchName
 	}
 	fmt.Fprintf(stdout, "Next: cd %s && pde compile && %s\n", envPath, launch)
-	fmt.Fprintln(stdout, "The launch prints the editor URL on its `[editor] ready:` line; the wf-mcp server talks to the running backend.")
+	fmt.Fprintln(stdout, "The launch prints `[backend] ready:` once the backend accepts connections (20-60 s) and the editor URL on `[editor] ready:`; wf-mcp calls made earlier wait for the backend.")
 	return nil
 }
 
@@ -407,4 +409,16 @@ func expandAll(args []string) ([]string, error) {
 		out = append(out, expanded)
 	}
 	return out, nil
+}
+
+// thisExe is the `this` binary for the `backend` sidecar: the running one,
+// falling back to a PATH lookup.
+func thisExe() string {
+	if exe, err := os.Executable(); err == nil {
+		if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+			return resolved
+		}
+		return exe
+	}
+	return "this"
 }

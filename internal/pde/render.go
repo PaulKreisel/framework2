@@ -139,6 +139,8 @@ type DevserverOptions struct {
 	HubAlias string
 	ItemPath string
 	Link     string
+	// ThisExe is the `this` binary the `backend` sidecar runs (`this devserver-wait`).
+	ThisExe string
 }
 
 // Bundle is one `bundles:` entry plus the comment explaining where it came
@@ -229,8 +231,8 @@ func renderAP(p func(string, ...any), o Options) {
 func renderDevserver(p func(string, ...any), o Options) {
 	d := o.Devserver
 	p("  # Browser editor: the headless gateway dev server (backend) plus the frontend dev\n")
-	p("  # server as a sidecar. `pde launch %s` starts both and prints the editor URL on\n", DevserverLaunchName)
-	p("  # its `[editor] ready:` line. The backend downloads the ticket workflow\n")
+	p("  # server as a sidecar. `pde launch %s` starts both; `[backend] ready:` says the backend\n", DevserverLaunchName)
+	p("  # accepts connections, `[editor] ready:` carries the editor URL. The backend downloads the ticket workflow\n")
 	p("  #   %s (hub %s)\n", d.ItemPath, d.HubAlias)
 	if d.Link != "" {
 		p("  #   %s\n", d.Link)
@@ -267,11 +269,17 @@ func renderDevserver(p func(string, ...any), o Options) {
 	p("    #       cwd: <knime-core-ui worktree>/org.knime.core.ui/js-src/packages/core-ui\n")
 	p("    #       env: { PORT: \"%d\" }   # check the package's vite config for the port variable\n", d.Block.SpareFirst())
 	p("    #       readyPattern: 'Local:\\s+(http\\S+)'\n")
+	p("    sidecars:\n")
+	p("      # `backend` only waits for the backend's ports and prints `[backend] ready: ...`: the\n")
+	p("      # signal that gateway and wf-mcp accept connections (20-60 s after launch). The\n")
+	p("      # frontend's `[editor] ready:` line comes earlier and does not mean the backend is up.\n")
+	p("      - name: backend\n")
+	p("        command: [%s, devserver-wait, %s, %s]\n", yamlString(d.ThisExe), yamlString(fmt.Sprint(d.Block.Gateway())), yamlString(fmt.Sprint(d.Block.WfMCP())))
+	p("        readyPattern: %s\n", yamlString(`ready: (.*)`))
 	if d.Frontend == nil {
-		p("    sidecars: []   # the editor sidecar is added once the frontend worktree exists\n")
+		p("      # the editor sidecar is added once the frontend worktree exists\n")
 		return
 	}
-	p("    sidecars:\n")
 	p("      - name: editor\n")
 	p("        command: [pnpm, dev]\n")
 	p("        cwd: %s\n", yamlString(d.Frontend.Dir))
