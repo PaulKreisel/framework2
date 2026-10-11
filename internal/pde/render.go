@@ -3,13 +3,20 @@ package pde
 import (
 	"fmt"
 	"runtime"
+	"slices"
 	"strings"
+
+	"framework2/internal/ports"
 )
 
-// LaunchName is the name of the generated launch preset. `pde launch` with no
-// argument picks the first entry, so the name only matters when a hand-added
-// second preset needs selecting: `pde launch AP`.
+// LaunchName is the name of the desktop AP preset, generated only when the
+// project has no `devserver:` block. `pde launch` with no argument picks the
+// first entry, so the name only matters when a hand-added second preset needs
+// selecting: `pde launch AP`.
 const LaunchName = "AP"
+
+// DevserverLaunchName is the name of the browser-editor preset.
+const DevserverLaunchName = "devserver"
 
 // GeneratedMarker appears on the first line of every generated pde.yaml. Its
 // absence is how [Write] recognizes a hand-written file it must not clobber.
@@ -21,6 +28,9 @@ const (
 	knimeProduct     = "org.knime.product.KNIME_PRODUCT"
 	knimeApplication = "org.knime.product.KNIME_APPLICATION"
 	knimeSplash      = "org.knime.product"
+	// devserverApplication is the headless gateway dev server: websocket +
+	// web-resource http server the browser editor connects to.
+	devserverApplication = "com.knime.gateway.executor.GATEWAY_DEV_SERVER_APPLICATION"
 )
 
 // baseVMArgs is the KNIME AP launch preset, transcribed from a released AP's
@@ -80,6 +90,16 @@ var macVMArgs = []string{
 	"-Dorg.eclipse.swt.internal.carbon.smallFonts",
 }
 
+// desktopOnlyVMArgs are the entries of baseVMArgs that only make sense with a
+// window: the headless dev server leaves them out.
+var desktopOnlyVMArgs = []string{
+	"-XX:+UnlockDiagnosticVMOptions",
+	"-Dsun.java2d.metal=false",
+	"-Dsun.java2d.d3d=false",
+	"-Dp2.trustedAuthorities=https://update.knime.com",
+	"--add-opens=java.desktop/javax.swing.plaf.basic=ALL-UNNAMED",
+}
+
 // Options is everything Render needs. All paths must be absolute and already
 // tilde-expanded: pde performs no `~` expansion of its own.
 type Options struct {
@@ -92,13 +112,33 @@ type Options struct {
 	BundlePool string
 	// Bundles are the workspace bundle directories, in the order to emit.
 	Bundles []Bundle
-	// DataDir is the launched application's workspace. Empty leaves pde's
-	// default, which is a fresh temporary directory per launch.
+	// DataDir is the desktop AP's workspace. Empty leaves pde's default, which
+	// is a fresh temporary directory per launch.
 	DataDir string
 	// VMArgs are appended after the built-in preset args.
 	VMArgs []string
-	// ProgramArgs are the preset's application arguments. Empty omits the key.
+	// ProgramArgs are the desktop AP preset's application arguments. Empty
+	// omits the key. Not used by the devserver preset.
 	ProgramArgs []string
+	// Devserver, when set, replaces the desktop AP preset with the
+	// browser-editor preset.
+	Devserver *DevserverOptions
+}
+
+// DevserverOptions describes the browser-editor preset.
+type DevserverOptions struct {
+	Block ports.Block
+	// ContextPath is the workflow context yaml (`-workflowContextConfig=`).
+	ContextPath string
+	// DataDir is the backend's workspace.
+	DataDir string
+	// Frontend is the checkout the `editor` sidecar runs in. Nil: no sidecar
+	// (dry run before the worktree exists).
+	Frontend *Frontend
+	// HubAlias, ItemPath and Link are recorded in comments.
+	HubAlias string
+	ItemPath string
+	Link     string
 }
 
 // Bundle is one `bundles:` entry plus the comment explaining where it came
@@ -122,8 +162,8 @@ func Render(o Options) []byte {
 	p("#\n")
 	p("# Re-running `ticket pde` overwrites this file, but only while this header is\n")
 	p("# intact — delete or edit the first line and regeneration refuses to clobber it.\n")
-	p("# Hand-editing is expected (extra bundles, extra vmArgs, a `tests:` block); see\n")
-	p("# the `pde` skill. Machine-wide settings belong in <beadsDir>/project.yaml.\n")
+	p("# Hand-editing is expected (extra bundles, extra vmArgs, sidecars, a `tests:`\n")
+	p("# block); see the `pde` skill. Machine-wide settings belong in <beadsDir>/project.yaml.\n")
 	p("#\n")
 	p("# `pde` finds this file by walking up from the working directory, so `pde compile`,\n")
 	p("# `pde launch` and `pde test` work from this env folder and anywhere below it.\n")
@@ -152,6 +192,16 @@ func Render(o Options) []byte {
 	p("\n")
 
 	p("launches:\n")
+	if o.Devserver != nil {
+		renderDevserver(p, o)
+	} else {
+		renderAP(p, o)
+	}
+	return []byte(b.String())
+}
+
+// renderAP writes the desktop AP preset.
+func renderAP(p func(string, ...any), o Options) {
 	p("  - name: %s\n", LaunchName)
 	p("    product: %s\n", knimeProduct)
 	p("    application: %s\n", knimeApplication)
@@ -172,10 +222,70 @@ func Render(o Options) []byte {
 	for _, a := range VMArgs(o.VMArgs) {
 		p("      - %s\n", yamlString(a))
 	}
-	return []byte(b.String())
 }
 
-// VMArgs returns the full vmArgs list for the generated preset: the built-in
+// renderDevserver writes the browser-editor preset: backend plus the frontend
+// dev server as a sidecar.
+func renderDevserver(p func(string, ...any), o Options) {
+	d := o.Devserver
+	p("  # Browser editor: the headless gateway dev server (backend) plus the frontend dev\n")
+	p("  # server as a sidecar. `pde launch %s` starts both and prints the editor URL on\n", DevserverLaunchName)
+	p("  # its `[editor] ready:` line. The backend downloads the ticket workflow\n")
+	p("  #   %s (hub %s)\n", d.ItemPath, d.HubAlias)
+	if d.Link != "" {
+		p("  #   %s\n", d.Link)
+	}
+	p("  # at startup and uploads every edit back into it (15 s after a change and on save), so\n")
+	p("  # whatever is built in the editor is already on the hub. The item and the credentials\n")
+	p("  # live in the context yaml below; never read or print that file.\n")
+	p("  # Hub unreachable: see the devserver-hub-down skill (`-workflowDir`).\n")
+	p("  #\n")
+	p("  # Ports: this ticket owns the block %d-%d (<beadsDir>/ports.yaml):\n", d.Block.Start, d.Block.SpareLast())
+	p("  #   %d gateway (backend), %d wf-mcp (workflow-building MCP inside the backend),\n", d.Block.Gateway(), d.Block.WfMCP())
+	p("  #   %d editor frontend, %d-%d spare for additional sidecars.\n", d.Block.Editor(), d.Block.SpareFirst(), d.Block.SpareLast())
+	p("  - name: %s\n", DevserverLaunchName)
+	p("    application: %s\n", devserverApplication)
+	p("    dataDir: %s\n", yamlString(d.DataDir))
+	p("    programArgs:\n")
+	p("      - \"-nosplash\"\n")
+	p("      - \"-consoleLog\"\n")
+	p("      - %s\n", yamlString(fmt.Sprintf("-port=%d", d.Block.Gateway())))
+	p("      - %s\n", yamlString("-workflowContextConfig="+d.ContextPath))
+	p("    vmArgs:\n")
+	for _, a := range DevserverVMArgs(d.Block, o.VMArgs) {
+		p("      - %s\n", yamlString(a))
+	}
+	p("    # Sidecars start after the backend and stop with it. Their output is relayed with a\n")
+	p("    # `[<name>] ` prefix; the first `readyPattern` match is logged as `[<name>] ready: ...`.\n")
+	p("    # knime-ui is only one frontend that can be served next to the backend. Another UI\n")
+	p("    # extension frontend is a further sidecar on a spare port plus the vmArg that points\n")
+	p("    # the backend at it, e.g. the node dialog:\n")
+	p("    #   vmArgs: - \"-Dorg.knime.ui.dev.node.dialog.url=http://localhost:%d/NodeDialog.js\"\n", d.Block.SpareFirst())
+	p("    #   sidecars:\n")
+	p("    #     - name: node-dialog\n")
+	p("    #       command: [pnpm, dev:NodeDialog]\n")
+	p("    #       cwd: <knime-core-ui worktree>/org.knime.core.ui/js-src/packages/core-ui\n")
+	p("    #       env: { PORT: \"%d\" }   # check the package's vite config for the port variable\n", d.Block.SpareFirst())
+	p("    #       readyPattern: 'Local:\\s+(http\\S+)'\n")
+	if d.Frontend == nil {
+		p("    sidecars: []   # the editor sidecar is added once the frontend worktree exists\n")
+		return
+	}
+	p("    sidecars:\n")
+	p("      - name: editor\n")
+	p("        command: [pnpm, dev]\n")
+	p("        cwd: %s\n", yamlString(d.Frontend.Dir))
+	p("        env:\n")
+	p("          KNIME_EDITOR_PORT: %s\n", yamlString(fmt.Sprint(d.Block.Editor())))
+	p("          KNIME_BROWSER_DEV_WS_URL: %s\n", yamlString(fmt.Sprintf("ws://localhost:%d", d.Block.Gateway())))
+	p("          KNIME_BROWSER_DEV_HTTP_URL: %s\n", yamlString(fmt.Sprintf("http://localhost:%d", d.Block.Gateway())))
+	p("        readyPattern: %s\n", yamlString(`Local:\s+(http\S+)`))
+	if d.Frontend.InstallWarning != "" {
+		p("        # pnpm install failed when this file was generated; run it in cwd before launching.\n")
+	}
+}
+
+// VMArgs returns the full vmArgs list for the desktop AP preset: the built-in
 // KNIME args for this OS, then extra.
 func VMArgs(extra []string) []string {
 	out := make([]string, 0, len(baseVMArgs)+len(macVMArgs)+len(extra))
@@ -183,6 +293,27 @@ func VMArgs(extra []string) []string {
 		out = append(out, macVMArgs...)
 	}
 	out = append(out, baseVMArgs...)
+	return append(out, extra...)
+}
+
+// DevserverVMArgs returns the vmArgs of the headless dev server: the base
+// list without the desktop-only entries, headless mode, the workflow MCP
+// started on its port, then extra.
+func DevserverVMArgs(block ports.Block, extra []string) []string {
+	out := make([]string, 0, len(baseVMArgs)+4+len(extra))
+	for _, a := range baseVMArgs {
+		if slices.Contains(desktopOnlyVMArgs, a) {
+			continue
+		}
+		out = append(out, a)
+		if a == "-ea" {
+			out = append(out, "-Djava.awt.headless=true")
+		}
+	}
+	out = append(out,
+		"-Dwf.mcp.autostart=true",
+		fmt.Sprintf("-Dwf.mcp.port=%d", block.WfMCP()),
+	)
 	return append(out, extra...)
 }
 

@@ -16,6 +16,7 @@ import (
 
 	"framework2/internal/env"
 	"framework2/internal/ticketcli"
+	"framework2/internal/wfmcp"
 )
 
 // Run is the convenience entrypoint that uses the process cwd.
@@ -37,6 +38,16 @@ func RunFrom(cwd string, args []string, stdout, stderr io.Writer) int {
 // RunFromWithOptions is like RunFrom but lets callers pin BEADS_DIR via
 // ticketcli.Options. Used by tests driving per-test .beads/ directories.
 func RunFromWithOptions(opts ticketcli.Options, cwd string, args []string, stdout, stderr io.Writer) int {
+	// The one subcommand that must run without a ticket: Claude Code starts
+	// the proxy in whatever folder a session opens, and a folder outside any
+	// ticket env must yield an empty tool list, not a failed server.
+	if len(args) > 0 && args[0] == "wf-mcp-proxy" {
+		if err := wfmcp.Main(cwd, stdout, stderr); err != nil {
+			fmt.Fprintln(stderr, "this: wf-mcp-proxy:", err)
+			return 1
+		}
+		return 0
+	}
 	id, _, err := Discover(cwd)
 	if err != nil {
 		fmt.Fprintln(stderr, "this:", err)

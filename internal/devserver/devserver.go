@@ -1,0 +1,198 @@
+// Package devserver prepares what the headless gateway dev server
+// (`GATEWAY_DEV_SERVER_APPLICATION`) needs before `pde launch devserver`: the
+// ticket workflow on the hub it binds its job to and syncs every edit into,
+// and the workflow context yaml that names the item and carries the
+// application password.
+//
+// The yaml is written under `<env-dir>/devserver/`, mode 0600, never inside
+// the ticket env or a repo, and no caller reads it back: the password only
+// ever flows env file -> yaml -> backend.
+package devserver
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"framework2/internal/hub"
+	"framework2/internal/projectconfig"
+)
+
+// Request is one preparation.
+type Request struct {
+	Cfg projectconfig.DevserverConfig
+	// Alias overrides Cfg.Hub (`ticket pde --hub-alias`). Empty: Cfg.Hub.
+	Alias string
+	// TicketID names the context yaml.
+	TicketID string
+	// ItemName is the workflow's name inside Cfg.WorkflowFolder (the Jira key,
+	// or the bead id when the ticket has none).
+	ItemName string
+}
+
+// Result is what the caller may print: ids, paths and the link. No secrets.
+type Result struct {
+	Alias string
+	// Default is true when Alias equals the configured hub, which decides the
+	// yaml's name.
+	Default        bool
+	ContextPath    string
+	ItemPath       string
+	ItemID         string
+	SpaceID        string
+	Link           string
+	Created        bool
+	LastUploadedOn string
+}
+
+// ContextPath is where the yaml for ticketID on alias lives. The configured
+// hub's yaml has no alias in its name so the plain preset keeps working when
+// project.yaml later changes the hub.
+func ContextPath(envDir, ticketID, alias string, isDefault bool) string {
+	name := ticketID
+	if !isDefault {
+		name += "." + alias
+	}
+	return filepath.Join(envDir, "devserver", name+".workflowContextConfig.yaml")
+}
+
+// Prepare resolves the hub, creates the ticket workflow when missing and
+// writes the context yaml. Progress lines go to stdout.
+func Prepare(ctx context.Context, req Request, stdout io.Writer) (Result, error) {
+	alias := req.Alias
+	if alias == "" {
+		alias = req.Cfg.Hub
+	}
+	hubsFile, err := projectconfig.ExpandHome(req.Cfg.HubsFile)
+	if err != nil {
+		return Result{}, err
+	}
+	envDir, err := projectconfig.ExpandHome(req.Cfg.EnvDir)
+	if err != nil {
+		return Result{}, err
+	}
+	h, err := hub.Load(hubsFile, alias)
+	if err != nil {
+		return Result{}, err
+	}
+	if req.Cfg.WebURL != "" && alias == req.Cfg.Hub {
+		h.WebURL = strings.TrimRight(req.Cfg.WebURL, "/")
+	}
+	creds, err := hub.LoadCredentials(envDir, h)
+	if err != nil {
+		return Result{}, err
+	}
+	client := hub.NewClient(h, creds)
+
+	identity, err := client.Identity(ctx)
+	if err != nil {
+		return Result{}, err
+	}
+	spacePath, err := spaceOf(req.Cfg.WorkflowFolder)
+	if err != nil {
+		return Result{}, err
+	}
+	space, ok, err := client.ItemByPath(ctx, spacePath)
+	if err != nil {
+		return Result{}, err
+	}
+	if !ok {
+		return Result{}, fmt.Errorf("space %s does not exist on %s", spacePath, alias)
+	}
+
+	folder := strings.TrimRight(req.Cfg.WorkflowFolder, "/")
+	itemPath := folder + "/" + req.ItemName
+	item, ok, err := client.ItemByPath(ctx, itemPath)
+	if err != nil {
+		return Result{}, err
+	}
+	created := false
+	if !ok {
+		if _, err := client.CreateFolder(ctx, folder); err != nil {
+			return Result{}, err
+		}
+		item, err = client.CreateWorkflow(ctx, itemPath)
+		if err != nil {
+			return Result{}, err
+		}
+		created = true
+	} else if item.Type != "" && !strings.EqualFold(item.Type, "Workflow") {
+		return Result{}, fmt.Errorf("%s exists on %s but is a %s, not a workflow", itemPath, alias, item.Type)
+	}
+
+	res := Result{
+		Alias:          alias,
+		Default:        alias == req.Cfg.Hub,
+		ItemPath:       itemPath,
+		ItemID:         item.ID,
+		SpaceID:        space.ID,
+		Link:           hub.FrontendURL(h.Web(), itemPath, item.ID),
+		Created:        created,
+		LastUploadedOn: item.LastUploadedOn,
+	}
+	res.ContextPath = ContextPath(envDir, req.TicketID, alias, res.Default)
+	if err := writeContext(res.ContextPath, client, item.ID, space.ID, spacePath, identity); err != nil {
+		return Result{}, err
+	}
+	return res, nil
+}
+
+// spaceOf returns `/Users/<team>/<space>` of a folder path below a space.
+func spaceOf(folder string) (string, error) {
+	segs := strings.Split(strings.Trim(folder, "/"), "/")
+	if len(segs) < 3 || segs[0] != "Users" {
+		return "", fmt.Errorf("devserver.workflow-folder must be /Users/<team>/<space>/..., got %q", folder)
+	}
+	return "/" + strings.Join(segs[:3], "/"), nil
+}
+
+// writeContext writes the yaml the backend reads (`-workflowContextConfig=`).
+// Mode 0600, directory 0700.
+func writeContext(path string, client *hub.Client, itemID, spaceID, spacePath string, who hub.Identity) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	id, secret := client.Credentials()
+	var b strings.Builder
+	b.WriteString("# GENERATED by `ticket pde` - holds an application password. Never read, print or commit.\n")
+	fmt.Fprintf(&b, "repositoryEndpoint: %s\n", quote(client.RepositoryEndpoint()))
+	fmt.Fprintf(&b, "itemId: %s\n", quote(itemID))
+	fmt.Fprintf(&b, "spaceId: %s\n", quote(spaceID))
+	fmt.Fprintf(&b, "spacePath: %s\n", quote(spacePath))
+	fmt.Fprintf(&b, "applicationPasswordID: %s\n", quote(id))
+	fmt.Fprintf(&b, "applicationPassword: %s\n", quote(secret))
+	fmt.Fprintf(&b, "userId: %s\n", quote(who.ID))
+	fmt.Fprintf(&b, "userName: %s\n", quote(who.Name))
+	return os.WriteFile(path, []byte(b.String()), 0o600)
+}
+
+func quote(s string) string {
+	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(s) + `"`
+}
+
+// RemoveContexts deletes every context yaml of ticketID (all aliases). Used by
+// teardown so no credential file outlives its ticket.
+func RemoveContexts(envDir, ticketID string) ([]string, error) {
+	dir := filepath.Join(envDir, "devserver")
+	patterns := []string{
+		filepath.Join(dir, ticketID+".workflowContextConfig.yaml"),
+		filepath.Join(dir, ticketID+".*.workflowContextConfig.yaml"),
+	}
+	var removed []string
+	for _, p := range patterns {
+		matches, err := filepath.Glob(p)
+		if err != nil {
+			return removed, err
+		}
+		for _, m := range matches {
+			if err := os.Remove(m); err != nil && !os.IsNotExist(err) {
+				return removed, err
+			}
+			removed = append(removed, m)
+		}
+	}
+	return removed, nil
+}

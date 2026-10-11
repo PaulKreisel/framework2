@@ -60,6 +60,41 @@ type-prefix:
 	}
 }
 
+func TestLoadDevserverBlock(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfg, err := projectconfig.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Devserver.Configured() {
+		t.Fatal("empty devserver block must not be configured")
+	}
+	if cfg.Devserver.HubsFile != projectconfig.DefaultHubsFile || cfg.Devserver.PortBase != projectconfig.DefaultPortBase || cfg.Devserver.EnvDir != projectconfig.DefaultEnvDir {
+		t.Fatalf("defaults: %+v", cfg.Devserver)
+	}
+	yaml := `
+devserver:
+  hub: dev_green
+  workflow-folder: "/Users/T/S/G"
+  frontend-repo: ~/repos/knime-ui.git
+  port-base: 40000
+`
+	if err := os.WriteFile(filepath.Join(dir, "project.yaml"), []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = projectconfig.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Devserver.Missing(); len(got) != 1 || got[0] != "frontend-dir" {
+		t.Fatalf("missing=%v", got)
+	}
+	if cfg.Devserver.PortBase != 40000 || cfg.Devserver.HubsFile != projectconfig.DefaultHubsFile {
+		t.Fatalf("partial: %+v", cfg.Devserver)
+	}
+}
+
 func TestLoadPartialFallsBackToDefaults(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

@@ -21,6 +21,15 @@
 //	  extra-bundles: [~/repos/other/org.example.plugin]
 //	  vm-args: [-Dfoo=bar]
 //	  program-args: [-preferences, ~/knime/mountpoints.epf]
+//	devserver:
+//	  hub: dev_green                      # alias in hubs-file
+//	  workflow-folder: "/Users/Sleek UX/Verification space/Ticket attachments"
+//	  hubs-file: ~/.config/knime/hubs.yaml   # optional
+//	  env-dir: ~/.config/knime               # optional
+//	  port-base: 30000                       # optional
+//	  web-url: https://hub.example.com       # optional
+//	  frontend-repo: ~/knime/repos/knime-ui.git
+//	  frontend-dir: org.knime.ui.js
 //
 // Placeholders supported in templates:
 //
@@ -77,6 +86,85 @@ type Config struct {
 	// PDE holds the machine-specific inputs `ticket pde` needs to write a
 	// pde.yaml. Absent means: `ticket pde` is not configured for this project.
 	PDE PDEConfig `yaml:"pde"`
+	// Devserver holds what `ticket pde` needs to write the browser-editor
+	// launch preset (headless gateway dev server + frontend sidecar). Absent
+	// means: the generated pde.yaml gets the desktop AP preset instead.
+	Devserver DevserverConfig `yaml:"devserver"`
+}
+
+// DevserverConfig configures the `devserver` launch preset of `ticket pde`.
+// Paths may start with `~/`.
+//
+// The hub is never named here directly: `Hub` is an alias into `HubsFile`,
+// the same file the hub MCP server reads, so the item `ticket pde` creates
+// and the hub the launched backend syncs into are always the same.
+type DevserverConfig struct {
+	// Hub is the alias in HubsFile the ticket workflow is created on and the
+	// backend connects to. Required.
+	Hub string `yaml:"hub"`
+	// WorkflowFolder is the hub folder (`/Users/<team>/<space>/<group...>`)
+	// that holds one workflow per ticket, named after the Jira key. Required.
+	WorkflowFolder string `yaml:"workflow-folder"`
+	// HubsFile maps aliases to API urls and credential variable names.
+	// Default: ~/.config/knime/hubs.yaml.
+	HubsFile string `yaml:"hubs-file"`
+	// EnvDir holds the `*.env` credential files named by HubsFile and the
+	// `devserver/` folder with the generated workflow context yamls.
+	// Default: ~/.config/knime.
+	EnvDir string `yaml:"env-dir"`
+	// PortBase is the first port of the first block handed out by the port
+	// registry. Default: 30000.
+	PortBase int `yaml:"port-base"`
+	// WebURL is the hub frontend for printed links. Default: the API url
+	// without its leading `api.` host label.
+	WebURL string `yaml:"web-url"`
+	// FrontendRepo is the bare repo of the browser editor frontend (a path,
+	// e.g. ~/knime/repos/knime-ui.git). `ticket pde` makes sure the ticket has
+	// a worktree of it. Required.
+	FrontendRepo string `yaml:"frontend-repo"`
+	// FrontendDir is the bundle directory inside that repo that is also the
+	// pnpm workspace root, e.g. org.knime.ui.js. Required.
+	FrontendDir string `yaml:"frontend-dir"`
+}
+
+// Defaults of the optional DevserverConfig keys.
+const (
+	DefaultHubsFile = "~/.config/knime/hubs.yaml"
+	DefaultEnvDir   = "~/.config/knime"
+	DefaultPortBase = 30000
+)
+
+// Missing returns the required `devserver:` keys that are unset, in
+// project.yaml spelling. Empty means configured.
+func (d DevserverConfig) Missing() []string {
+	var missing []string
+	add := func(key, value string) {
+		if strings.TrimSpace(value) == "" {
+			missing = append(missing, key)
+		}
+	}
+	add("hub", d.Hub)
+	add("workflow-folder", d.WorkflowFolder)
+	add("frontend-repo", d.FrontendRepo)
+	add("frontend-dir", d.FrontendDir)
+	return missing
+}
+
+// Configured reports whether every required key is present.
+func (d DevserverConfig) Configured() bool { return len(d.Missing()) == 0 }
+
+// withDefaults fills the optional keys.
+func (d DevserverConfig) withDefaults() DevserverConfig {
+	if d.HubsFile == "" {
+		d.HubsFile = DefaultHubsFile
+	}
+	if d.EnvDir == "" {
+		d.EnvDir = DefaultEnvDir
+	}
+	if d.PortBase == 0 {
+		d.PortBase = DefaultPortBase
+	}
+	return d
 }
 
 // PDEConfig configures `ticket pde`. Every path may start with `~/`.
@@ -131,6 +219,7 @@ func Defaults() Config {
 			Branch: DefaultBranchTemplate,
 			Path:   DefaultPathTemplate,
 		},
+		Devserver: DevserverConfig{}.withDefaults(),
 	}
 }
 
@@ -170,6 +259,7 @@ func Load(beadsDir string) (Config, error) {
 		cfg.SetupScript = loaded.SetupScript
 	}
 	cfg.PDE = loaded.PDE
+	cfg.Devserver = loaded.Devserver.withDefaults()
 	return cfg, nil
 }
 

@@ -51,7 +51,7 @@ const DescriptionFile = "description.md"
 // fresh launches. [ModeSpec] does not auto-submit a prompt — it opens to a
 // blank input and waits for the operator. Resumes/relaunches also skip this:
 // they already have a transcript.
-const InitialAgentPrompt = `Implement the ticket, then set up pde and compile, test and launch it (use the knime workflow building mcp to set up a workflow for me to try it)`
+const InitialAgentPrompt = `Implement the ticket, then set up pde, compile, test and launch the browser editor (use the wf-mcp workflow building tools to set up a workflow for me to try it in the editor)`
 
 // RunOptions carries optional knobs for [RunWithOptions]. The zero value
 // matches the historical fresh-launch shape ([Run]).

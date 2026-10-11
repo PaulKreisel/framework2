@@ -11,9 +11,15 @@
 // by walking up from the working directory. `pde compile` therefore works from
 // the env folder and from anywhere below it, including the `ticket agent`
 // sessions that already start there.
+//
+// With a `devserver:` block in project.yaml the launch preset is the browser
+// editor: the headless gateway dev server plus the frontend dev server as a
+// pde sidecar, on a port block reserved per ticket, bound to the ticket's
+// workflow on the hub. Without the block the preset is the desktop AP.
 package pde
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -22,8 +28,10 @@ import (
 	"path/filepath"
 	"strings"
 
+	"framework2/internal/devserver"
 	"framework2/internal/dir"
 	"framework2/internal/env"
+	"framework2/internal/ports"
 	"framework2/internal/projectconfig"
 )
 
@@ -44,14 +52,27 @@ type Request struct {
 	// SkipTargetInstall leaves the env folder without a p2 profile. Only useful
 	// offline: `pde compile` cannot resolve anything until one exists.
 	SkipTargetInstall bool
-	// DryRun prints the config that would be written and touches nothing.
+	// DryRun prints the config that would be written and touches nothing: no
+	// worktree, no port block, no hub item, no file.
 	DryRun bool
 	// Force overwrites a pde.yaml whose generated header is missing.
 	Force bool
+	// HubAlias writes `pde.<alias>.yaml` bound to that hub instead of the
+	// configured one. Same port block, own context yaml.
+	HubAlias string
+}
+
+// configName returns pde.yaml, or pde.<alias>.yaml for a hub override.
+func (r Request) configName() string {
+	if r.HubAlias == "" {
+		return ConfigName
+	}
+	return "pde." + r.HubAlias + ".yaml"
 }
 
 // Run performs the whole flow: locate the env folder, detect the ticket's
-// changed plugins, build their jars, and write the pde.yaml.
+// changed plugins, prepare the browser-editor preset, build the jars, and
+// write the pde.yaml.
 func Run(req Request, stdout io.Writer) error {
 	cfg, err := projectconfig.Load(req.BeadsDir)
 	if err != nil {
@@ -71,6 +92,11 @@ func Run(req Request, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
+	ds := cfg.Devserver
+	if req.HubAlias != "" && !ds.Configured() {
+		return fmt.Errorf("--hub-alias needs a `devserver:` block in %s (missing: %s)",
+			projectconfig.Filename, strings.Join(ds.Missing(), ", "))
+	}
 
 	envPath, err := env.Create(req.DB, req.BeadsDir, req.TicketID)
 	if err != nil {
@@ -81,7 +107,7 @@ func Run(req Request, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if len(entries) == 0 {
+	if len(entries) == 0 && !ds.Configured() {
 		return fmt.Errorf("ticket %s has no linked dirs; run `ticket dir worktree` first", req.TicketID)
 	}
 
@@ -94,16 +120,33 @@ func Run(req Request, stdout io.Writer) error {
 		fmt.Fprintf(stdout, "  %s\n", p.Path())
 	}
 
+	var frontend *Frontend
+	if ds.Configured() {
+		frontend, entries, err = ensureFrontend(req, ds, entries, stdout)
+		if err != nil {
+			return err
+		}
+		// The frontend worktree may carry changes of its own (a ticket that
+		// touches knime-ui); they are workspace bundles like any other.
+		plugins, err = Detect(entries, io.Discard)
+		if err != nil {
+			return err
+		}
+	}
+
 	bundles, err := bundleList(plugins, cfg.PDE.ExtraBundles)
 	if err != nil {
 		return err
+	}
+	if frontend != nil {
+		bundles = appendFrontendBundle(bundles, frontend)
 	}
 	programArgs, err := expandAll(cfg.PDE.ProgramArgs)
 	if err != nil {
 		return err
 	}
 
-	body := Render(Options{
+	opts := Options{
 		TicketID:    req.TicketID,
 		Target:      target,
 		BundlePool:  pool,
@@ -111,10 +154,85 @@ func Run(req Request, stdout io.Writer) error {
 		DataDir:     filepath.Join(envPath, ".ap-data"),
 		ProgramArgs: programArgs,
 		VMArgs:      append(cfg.PDE.VMArgs, req.VMArgs...),
-	})
+	}
+
+	var devOpts *DevserverOptions
+	switch {
+	case ds.Configured() && req.DryRun:
+		block, ok, err := ports.Lookup(req.BeadsDir, req.TicketID)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			fmt.Fprintf(stdout, "Ports: no block registered yet; would reserve one from %d (--dry-run)\n", ds.PortBase)
+			block = ports.Block{Start: ds.PortBase}
+		}
+		alias := req.HubAlias
+		if alias == "" {
+			alias = ds.Hub
+		}
+		fmt.Fprintf(stdout, "Hub %s: would look up or create %s/<jira-id> and write the context yaml (--dry-run)\n", alias, ds.WorkflowFolder)
+		devOpts = &DevserverOptions{
+			Block:       block,
+			ContextPath: "<context yaml, written without --dry-run>",
+			DataDir:     filepath.Join(envPath, ".devserver-data"),
+			Frontend:    frontend,
+			HubAlias:    alias,
+			ItemPath:    ds.WorkflowFolder + "/<jira-id>",
+		}
+	case ds.Configured():
+		block, err := ports.Allocate(req.BeadsDir, req.TicketID, ds.PortBase, stdout)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "Ports: block %d (gateway %d, wf-mcp %d, editor %d, spare %d-%d for additional sidecars, e.g. a UI extension frontend, see the comments in %s)\n",
+			block.Start, block.Gateway(), block.WfMCP(), block.Editor(), block.SpareFirst(), block.SpareLast(), req.configName())
+		itemName, err := dir.AncestorJiraID(req.DB, req.BeadsDir, req.TicketID)
+		if err != nil {
+			return err
+		}
+		if itemName == "" {
+			itemName = req.TicketID
+			fmt.Fprintf(stdout, "Hub: ticket has no Jira id, the workflow is named after the bead id (%s)\n", itemName)
+		}
+		res, err := devserver.Prepare(context.Background(), devserver.Request{
+			Cfg: ds, Alias: req.HubAlias, TicketID: req.TicketID, ItemName: itemName,
+		}, stdout)
+		if err != nil {
+			return err
+		}
+		state := "exists"
+		if res.Created {
+			state = "created"
+		}
+		fmt.Fprintf(stdout, "Hub %s: ticket workflow %s %s (id %s", res.Alias, res.ItemPath, state, res.ItemID)
+		if res.LastUploadedOn != "" {
+			fmt.Fprintf(stdout, ", last upload %s", res.LastUploadedOn)
+		}
+		fmt.Fprintln(stdout, ")")
+		if res.Link != "" {
+			fmt.Fprintf(stdout, "  %s\n", res.Link)
+		}
+		fmt.Fprintf(stdout, "Wrote %s\n", res.ContextPath)
+		devOpts = &DevserverOptions{
+			Block:       block,
+			ContextPath: res.ContextPath,
+			DataDir:     filepath.Join(envPath, ".devserver-data"),
+			Frontend:    frontend,
+			HubAlias:    res.Alias,
+			ItemPath:    res.ItemPath,
+			Link:        res.Link,
+		}
+	default:
+		fmt.Fprintf(stdout, "No browser-editor preset: %s has no complete `devserver:` block (missing: %s); writing the desktop AP preset instead.\n",
+			projectconfig.Filename, strings.Join(ds.Missing(), ", "))
+	}
+	opts.Devserver = devOpts
+
+	body := Render(opts)
 
 	if req.DryRun {
-		fmt.Fprintf(stdout, "\n# --dry-run: would write %s\n\n", filepath.Join(envPath, ConfigName))
+		fmt.Fprintf(stdout, "\n# --dry-run: would write %s\n\n", filepath.Join(envPath, req.configName()))
 		_, err := stdout.Write(body)
 		return err
 	}
@@ -129,7 +247,7 @@ func Run(req Request, stdout io.Writer) error {
 		}
 	}
 
-	configPath := filepath.Join(envPath, ConfigName)
+	configPath := filepath.Join(envPath, req.configName())
 	if err := Write(configPath, body, req.Force); err != nil {
 		return err
 	}
@@ -140,7 +258,16 @@ func Run(req Request, stdout io.Writer) error {
 			return err
 		}
 	}
-	fmt.Fprintf(stdout, "Next: cd %s && pde compile && pde launch\n", envPath)
+	if devOpts == nil {
+		fmt.Fprintf(stdout, "Next: cd %s && pde compile && pde launch\n", envPath)
+		return nil
+	}
+	launch := "pde launch " + DevserverLaunchName
+	if req.HubAlias != "" {
+		launch = "pde launch --config " + req.configName() + " " + DevserverLaunchName
+	}
+	fmt.Fprintf(stdout, "Next: cd %s && pde compile && %s\n", envPath, launch)
+	fmt.Fprintln(stdout, "The launch prints the editor URL on its `[editor] ready:` line; the wf-mcp server talks to the running backend.")
 	return nil
 }
 
@@ -171,14 +298,27 @@ func installTarget(envPath string, stdout io.Writer) error {
 // bundleList turns detected plugins plus the configured extras into `bundles:`
 // entries. Extras are appended last and de-duplicated against the detected set,
 // so a ticket that happens to change an extra bundle lists it once.
+//
+// The same plugin changed in two worktrees of one bare repo (a ticket branch
+// and its backport) is listed once, from the first worktree in path order:
+// pde keeps only the last workspace bundle of a symbolic name, silently, so
+// listing both would launch the backport. The dropped one is named in a
+// comment.
 func bundleList(plugins []Plugin, extras []string) ([]Bundle, error) {
 	seen := map[string]bool{}
+	byName := map[string]int{}
 	var out []Bundle
 	for _, p := range plugins {
 		if seen[p.Path()] {
 			continue
 		}
 		seen[p.Path()] = true
+		key := p.Bare + "|" + p.Name
+		if i, dup := byName[key]; dup && p.Bare != "" {
+			out[i].Note += "; also changed in " + filepath.Base(p.Worktree) + " (left out: same bundle id, pde keeps one)"
+			continue
+		}
+		byName[key] = len(out)
 		out = append(out, Bundle{Path: p.Path(), Note: "changed in " + filepath.Base(p.Worktree)})
 	}
 	for _, raw := range extras {
@@ -196,6 +336,39 @@ func bundleList(plugins []Plugin, extras []string) ([]Bundle, error) {
 		out = append(out, Bundle{Path: path, Note: "always included (project.yaml pde.extra-bundles)"})
 	}
 	return out, nil
+}
+
+// appendFrontendBundle adds the frontend bundle unless detection already
+// listed it (a ticket that changes the frontend), and drops the same bundle
+// from other frontend worktrees, which pde would otherwise silently override.
+func appendFrontendBundle(bundles []Bundle, fe *Frontend) []Bundle {
+	name := filepath.Base(fe.Dir)
+	var out []Bundle
+	listed := false
+	for _, b := range bundles {
+		if b.Path == fe.Dir {
+			listed = true
+			out = append(out, Bundle{Path: b.Path, Note: b.Note + "; browser editor frontend"})
+			continue
+		}
+		if filepath.Base(b.Path) == name && isUnder(b.Path, fe.Others) {
+			continue
+		}
+		out = append(out, b)
+	}
+	if !listed {
+		out = append(out, Bundle{Path: fe.Dir, Note: "browser editor frontend, always included (project.yaml devserver.frontend-dir)"})
+	}
+	return out
+}
+
+func isUnder(path string, worktrees []dir.Entry) bool {
+	for _, w := range worktrees {
+		if strings.HasPrefix(path, w.Path+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
 }
 
 // Write saves body to path. An existing file is overwritten only when it carries

@@ -21,6 +21,8 @@ type Plugin struct {
 	Name string
 	// Worktree is the absolute path of the linked dir the plugin lives in.
 	Worktree string
+	// Bare is the bare repo the worktree belongs to, "" for plain linked dirs.
+	Bare string
 }
 
 // Path is the absolute bundle directory.
@@ -54,7 +56,7 @@ func Detect(entries []dir.Entry, progress io.Writer) ([]Plugin, error) {
 			return nil, err
 		}
 		for _, n := range names {
-			found = append(found, Plugin{Name: n, Worktree: e.Path})
+			found = append(found, Plugin{Name: n, Worktree: e.Path, Bare: e.BareRepo})
 		}
 	}
 	slices.SortFunc(found, func(a, b Plugin) int {

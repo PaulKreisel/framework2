@@ -89,8 +89,8 @@ subcommands:
   env [<id>]                              create on-disk env folder for a ticket
   env syncback [<id>]                     push <env>/description.md back to the
                                           bead description (one-way file → bead)
-  pde [<id>] [--vm-arg <arg>]... [--no-fetch-jars] [--no-target-install]
-      [--dry-run] [--force]
+  pde [<id>] [--vm-arg <arg>]... [--hub-alias <alias>] [--no-fetch-jars]
+      [--no-target-install] [--dry-run] [--force]
                                           write <env>/pde.yaml so the headless
                                           pde CLI can compile/launch/test the
                                           plugins this ticket changed. Detects
@@ -100,17 +100,26 @@ subcommands:
                                           plugin's lib/fetch_jars Maven build,
                                           emits the target section, those
                                           bundles plus project.yaml's
-                                          pde.extra-bundles and one KNIME AP
-                                          launch preset, then provisions the
-                                          env's p2 profile on first run (needs
-                                          VPN). Requires pde.target in
+                                          pde.extra-bundles and the browser
+                                          editor frontend, and one launch
+                                          preset: "devserver" (headless gateway
+                                          backend + frontend sidecar on the
+                                          ticket's port block, bound to the
+                                          ticket workflow on the hub, created
+                                          when missing) when project.yaml has a
+                                          "devserver:" block, else the desktop
+                                          AP. Then provisions the env's p2
+                                          profile on first run (needs VPN).
+                                          Requires pde.target in
                                           <beadsDir>/project.yaml.
                                           pde finds the file by walking up, so
                                           "pde compile" works from the env
                                           folder down. --vm-arg appends to the
-                                          preset (repeatable); --dry-run prints
-                                          instead of writing; --force replaces a
-                                          file whose generated header is gone.
+                                          preset (repeatable); --hub-alias
+                                          writes pde.<alias>.yaml bound to that
+                                          hub instead; --dry-run prints instead
+                                          of writing; --force replaces a file
+                                          whose generated header is gone.
   agent [<id>] [--prompt "<text>"] [--resume <session-id> | --dry-run]
                                           launch claude from a ticket's env folder
                                           in coding mode. Claims the bead; if it
@@ -778,17 +787,30 @@ func runEnv(db, beadsDir, ticket string, args []string, stdout io.Writer) error 
 }
 
 func runPde(db, beadsDir, ticket string, args []string, stdout io.Writer) error {
-	const usage = "usage: ticket pde [<id>] [--vm-arg <arg>]... [--no-fetch-jars] [--no-target-install] [--dry-run] [--force]"
+	const usage = "usage: ticket pde [<id>] [--vm-arg <arg>]... [--hub-alias <alias>] [--no-fetch-jars] [--no-target-install] [--dry-run] [--force]"
 	req := pde.Request{DB: db, BeadsDir: beadsDir}
 	var positional []string
 	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--vm-arg":
+		switch {
+		case args[i] == "--vm-arg":
 			if i+1 >= len(args) {
 				return errors.New("--vm-arg needs a value\n" + usage)
 			}
 			req.VMArgs = append(req.VMArgs, args[i+1])
 			i++
+			continue
+		case args[i] == "--hub-alias":
+			if i+1 >= len(args) {
+				return errors.New("--hub-alias needs a value\n" + usage)
+			}
+			req.HubAlias = args[i+1]
+			i++
+			continue
+		case strings.HasPrefix(args[i], "--hub-alias="):
+			req.HubAlias = strings.TrimPrefix(args[i], "--hub-alias=")
+			continue
+		}
+		switch args[i] {
 		case "--no-fetch-jars":
 			req.SkipFetchJars = true
 		case "--no-target-install":

@@ -1,8 +1,9 @@
 // Package teardown implements `ticket teardown`: dismantle a ticket's
 // on-disk footprint without landing anything. Every linked worktree is
 // removed (uncommitted changes included, via --force), its dirs entry is
-// unlinked, the bead is closed if still open, and the env folder is
-// deleted. Branches are NOT deleted from the bare repo, so committed work
+// unlinked, the bead is closed if still open, the env folder is deleted,
+// the ticket's port block is freed and its workflow context yamls are
+// removed. Branches are NOT deleted from the bare repo, so committed work
 // stays recoverable.
 //
 // Unlike finish there is no rebase, no PR check, no pipeline run and no
@@ -21,8 +22,11 @@ import (
 	"strings"
 
 	"framework2/internal/bdcli"
+	"framework2/internal/devserver"
 	"framework2/internal/dir"
+	"framework2/internal/ports"
 	"framework2/internal/project"
+	"framework2/internal/projectconfig"
 )
 
 // Run tears down ticketID. Per-worktree failures are reported on stdout and
@@ -75,8 +79,38 @@ func Run(db, beadsDir, ticketID string, stdout io.Writer) error {
 	if err := os.RemoveAll(envPath); err != nil {
 		return fmt.Errorf("remove env folder %s: %w", envPath, err)
 	}
+	if err := ports.Free(beadsDir, ticketID); err != nil {
+		fmt.Fprintf(stdout, "warn: free port block of %s: %v\n", ticketID, err)
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	if err := removeDevserverContexts(beadsDir, ticketID, stdout); err != nil {
+		fmt.Fprintf(stdout, "warn: remove devserver context of %s: %v\n", ticketID, err)
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
 	fmt.Fprintf(stdout, "teardown %s: %d worktree(s) removed\n", ticketID, removed)
 	return firstErr
+}
+
+// removeDevserverContexts deletes the ticket's workflow context yamls (they
+// hold an application password) so none outlives the ticket.
+func removeDevserverContexts(beadsDir, ticketID string, stdout io.Writer) error {
+	cfg, err := projectconfig.Load(beadsDir)
+	if err != nil {
+		return err
+	}
+	envDir, err := projectconfig.ExpandHome(cfg.Devserver.EnvDir)
+	if err != nil {
+		return err
+	}
+	removed, err := devserver.RemoveContexts(envDir, ticketID)
+	for _, r := range removed {
+		fmt.Fprintf(stdout, "removed %s\n", r)
+	}
+	return err
 }
 
 // owningBare returns the git dir that owns path as a linked worktree, or ""
