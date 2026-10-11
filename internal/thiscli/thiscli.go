@@ -15,6 +15,7 @@ import (
 	"os"
 	"strings"
 
+	"framework2/internal/agentbrowser"
 	"framework2/internal/devserver"
 	"framework2/internal/env"
 	"framework2/internal/ticketcli"
@@ -54,6 +55,17 @@ func RunFromWithOptions(opts ticketcli.Options, cwd string, args []string, stdou
 	// backend JVM, it blocks until the given ports accept connections and
 	// prints `ready: ...` (relayed by pde as `[backend] ready: ...`). No ticket
 	// needed, the ports are in the command line.
+	// `--open <url>` afterwards waits for that URL's port too and opens it in
+	// the default browser.
+	// `this view`: show the ticket's browser-editor tab in the KNIME Agent
+	// Browser (the tab the ticket's Playwright sessions use as well).
+	if len(args) > 0 && args[0] == "view" {
+		if err := agentbrowser.View(cwd, stdout); err != nil {
+			fmt.Fprintln(stderr, "this: view:", err)
+			return 1
+		}
+		return 0
+	}
 	if len(args) > 0 && args[0] == "devserver-wait" {
 		ports, err := devserver.ParsePorts(args[1:])
 		if err == nil {

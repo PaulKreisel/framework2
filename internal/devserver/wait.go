@@ -11,14 +11,17 @@ import (
 	"time"
 )
 
-// Listening reports whether something accepts TCP connections on the port.
+// Listening reports whether something accepts TCP connections on the port,
+// on IPv4 or IPv6 loopback (vite binds to [::1] only on macOS).
 func Listening(port int) bool {
-	c, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 500*time.Millisecond)
-	if err != nil {
-		return false
+	for _, host := range []string{"127.0.0.1", "::1"} {
+		c, err := net.DialTimeout("tcp", net.JoinHostPort(host, strconv.Itoa(port)), 500*time.Millisecond)
+		if err == nil {
+			c.Close()
+			return true
+		}
 	}
-	c.Close()
-	return true
+	return false
 }
 
 // BackendPID returns the pid of a running backend JVM that was started with
