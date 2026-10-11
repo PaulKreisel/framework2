@@ -179,9 +179,8 @@ func listening(port int) bool {
 
 // backend returns a session to the running instance, connecting when needed.
 // With wait, a backend whose JVM is up but whose port is not open yet is
-// waited for (bounded by startingWait); without, it counts as not running.
-// Startup must not wait: Claude Code gives the MCP server a short time to
-// answer initialize. Caller holds p.mu.
+// reported as "starting" (a ps lookup); without, it counts as not running
+// (the startup tool install, which must stay quick). Caller holds p.mu.
 func (p *proxy) backend(ctx context.Context, wait bool) (*mcp.ClientSession, Instance, error) {
 	if p.session != nil {
 		return p.session, p.connected, nil
@@ -212,53 +211,20 @@ func (p *proxy) backend(ctx context.Context, wait bool) (*mcp.ClientSession, Ins
 		return session, inst, nil
 	}
 	// Nothing listens. A backend JVM that was started with this port is still
-	// starting (20 to 60 s from launch to an open port): wait for it instead
-	// of failing, bounded well below the MCP client's tool timeout.
-	for _, inst := range instances {
-		if !wait {
-			break
-		}
-		pid := devserver.BackendPID(inst.Port)
-		if pid == 0 {
-			continue
-		}
-		p.logger.Printf("backend pid %d for port %d is starting; waiting up to %s", pid, inst.Port, startingWait)
-		deadline := time.Now().Add(startingWait)
-		for time.Now().Before(deadline) {
-			select {
-			case <-ctx.Done():
-				return nil, Instance{}, ctx.Err()
-			case <-time.After(time.Second):
+	// starting (20 to 60 s from launch to an open port): say so at once, the
+	// agent waits for the `[backend] ready:` line of the launch instead of the
+	// tool blocking.
+	if wait {
+		for _, inst := range instances {
+			if pid := devserver.BackendPID(inst.Port); pid != 0 {
+				return nil, Instance{}, fmt.Errorf("the backend of %s is still starting (pid %d, port %d not serving yet); wait for the `[backend] ready:` line of `pde launch devserver` (20-60 s after launch), then retry",
+					p.ticket, pid, inst.Port)
 			}
-			if !listening(inst.Port) {
-				if devserver.BackendPID(inst.Port) == 0 {
-					return nil, Instance{}, fmt.Errorf("the backend of %s (pid %d) exited while starting; check the launch log in %s, then `pde launch devserver` again",
-						p.ticket, pid, p.envDir)
-				}
-				continue
-			}
-			cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			session, err := mcp.NewClient(&mcp.Implementation{Name: ServerName + "-proxy", Version: "1"}, nil).
-				Connect(cctx, &mcp.StreamableClientTransport{Endpoint: inst.Endpoint(), DisableStandaloneSSE: true}, nil)
-			cancel()
-			if err != nil {
-				continue // the port is open but the MCP server is not serving yet
-			}
-			p.session, p.connected = session, inst
-			p.logger.Printf("connected to %s/%s on port %d after waiting for the start", filepath.Base(inst.Config), inst.Preset, inst.Port)
-			return session, inst, nil
 		}
-		return nil, Instance{}, fmt.Errorf("the backend of %s is still starting (pid %d, port %d not serving after %s); call again in a moment, or wait for the `[backend] ready:` line of `pde launch devserver`",
-			p.ticket, pid, inst.Port, startingWait)
 	}
 	return nil, Instance{}, fmt.Errorf("no editor instance running for %s; run `pde launch devserver` in %s and retry. Checked: %s",
 		p.ticket, p.envDir, strings.Join(tried, "; "))
 }
-
-// startingWait bounds one tool call's wait for a backend that is starting.
-// Claude Code's MCP tool timeout can be as low as 60 s; a call that returns
-// "still starting" is retried by the agent, a timed-out one is not.
-const startingWait = 45 * time.Second
 
 // Caller holds p.mu.
 func (p *proxy) dropBackend() {
@@ -386,7 +352,7 @@ func (p *proxy) status(ctx context.Context, _ *mcp.CallToolRequest) (*mcp.CallTo
 		if listening(inst.Port) {
 			state = "running"
 		} else if pid := devserver.BackendPID(inst.Port); pid != 0 {
-			state = fmt.Sprintf("starting (backend pid %d, port not open yet; tool calls wait up to %s for it)", pid, startingWait)
+			state = fmt.Sprintf("starting (backend pid %d, port not open yet; wait for the `[backend] ready:` line of the launch)", pid)
 		}
 		fmt.Fprintf(&b, "%s preset %s: wf-mcp port %d, %s\n", filepath.Base(inst.Config), inst.Preset, inst.Port, state)
 	}

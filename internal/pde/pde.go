@@ -269,7 +269,7 @@ func Run(req Request, stdout io.Writer) error {
 		launch = "pde launch --config " + req.configName() + " " + DevserverLaunchName
 	}
 	fmt.Fprintf(stdout, "Next: cd %s && pde compile && %s\n", envPath, launch)
-	fmt.Fprintln(stdout, "The launch prints `[backend] ready:` once the backend accepts connections (20-60 s) and the editor URL on `[editor] ready:`; wf-mcp calls made earlier wait for the backend.")
+	fmt.Fprintln(stdout, "The launch prints `[backend] ready:` once the backend accepts connections (20-60 s) and the editor URL on `[editor] ready:`; wf-mcp calls made earlier answer \"still starting\".")
 	return nil
 }
 
