@@ -88,6 +88,9 @@ func Start(ctx context.Context) error {
 	if err := os.MkdirAll(DataDir(), 0o700); err != nil {
 		return err
 	}
+	if err := disableQuitWarning(); err != nil {
+		return err
+	}
 	cmd := exec.Command(exe, Args()...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	cmd.Stdout, cmd.Stderr = nil, nil
@@ -106,6 +109,36 @@ func Start(ctx context.Context) error {
 		}
 	}
 	return fmt.Errorf("%s did not open port %d within 20 s", AppName, Port)
+}
+
+// disableQuitWarning sets browser.confirm_to_quit=false in the profile's
+// Preferences (read at start). Chromium's default turns a short Cmd+Q into a
+// "Hold Cmd+Q to Quit" overlay, which reads as "cannot quit".
+func disableQuitWarning() error {
+	p := filepath.Join(DataDir(), "Default", "Preferences")
+	prefs := map[string]any{}
+	if b, err := os.ReadFile(p); err == nil {
+		if err := json.Unmarshal(b, &prefs); err != nil {
+			return fmt.Errorf("%s: %w", p, err)
+		}
+	}
+	browser, _ := prefs["browser"].(map[string]any)
+	if browser == nil {
+		browser = map[string]any{}
+	}
+	if v, ok := browser["confirm_to_quit"].(bool); ok && !v {
+		return nil
+	}
+	browser["confirm_to_quit"] = false
+	prefs["browser"] = browser
+	b, err := json.Marshal(prefs)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(p, b, 0o600)
 }
 
 type target struct {
