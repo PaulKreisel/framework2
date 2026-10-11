@@ -60,6 +60,10 @@ func Args() []string {
 		"--no-default-browser-check",
 		"--disable-search-engine-choice-screen",
 		"--no-startup-window",
+		// No keychain: Chromium otherwise asks for its "Safe Storage" password
+		// at every start, since the ad-hoc signature changes with each install.
+		"--use-mock-keychain",
+		"--password-store=basic",
 	}
 }
 

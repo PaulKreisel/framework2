@@ -28,6 +28,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"framework2/internal/agentbrowser"
 	"framework2/internal/devserver"
 	"framework2/internal/dir"
 	"framework2/internal/env"
@@ -188,6 +189,18 @@ func Run(req Request, stdout io.Writer) error {
 		}
 		fmt.Fprintf(stdout, "Ports: block %d (gateway %d, wf-mcp %d, editor %d, spare %d-%d for additional sidecars, e.g. a UI extension frontend, see the comments in %s)\n",
 			block.Start, block.Gateway(), block.WfMCP(), block.Editor(), block.SpareFirst(), block.SpareLast(), req.configName())
+		// Playwright sessions attach to the KNIME Agent Browser; start it here so the
+		// first browser step of a ticket finds it (no daemon keeps it running).
+		switch {
+		case agentbrowser.Running():
+			fmt.Fprintf(stdout, "Agent browser: running (DevTools %d)\n", agentbrowser.Port)
+		default:
+			if err := agentbrowser.Start(context.Background()); err != nil {
+				fmt.Fprintf(stdout, "Agent browser: not started (%v); Playwright needs it, `this view` starts it\n", err)
+			} else {
+				fmt.Fprintf(stdout, "Agent browser: started (DevTools %d)\n", agentbrowser.Port)
+			}
+		}
 		itemName, err := dir.AncestorJiraID(req.DB, req.BeadsDir, req.TicketID)
 		if err != nil {
 			return err
