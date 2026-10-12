@@ -172,7 +172,8 @@ func Run(req Request, stdout io.Writer) error {
 		if alias == "" {
 			alias = ds.Hub
 		}
-		fmt.Fprintf(stdout, "Hub %s: would look up or create %s/<jira-id> and write the context yaml (--dry-run)\n", alias, ds.WorkflowFolder)
+		folder := ds.WorkflowFolderFor(alias)
+		fmt.Fprintf(stdout, "Hub %s: would look up or create %s/<jira-id> and write the context yaml (--dry-run)\n", alias, folder)
 		devOpts = &DevserverOptions{
 			ThisExe:     thisExe(),
 			Block:       block,
@@ -180,7 +181,7 @@ func Run(req Request, stdout io.Writer) error {
 			DataDir:     filepath.Join(envPath, ".devserver-data"),
 			Frontend:    frontend,
 			HubAlias:    alias,
-			ItemPath:    ds.WorkflowFolder + "/<jira-id>",
+			ItemPath:    folder + "/<jira-id>",
 		}
 	case ds.Configured():
 		block, err := ports.Allocate(req.BeadsDir, req.TicketID, ds.PortBase, stdout)

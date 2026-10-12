@@ -24,6 +24,8 @@
 //	devserver:
 //	  hub: dev_green                      # alias in hubs-file
 //	  workflow-folder: "/Users/Sleek UX/Verification space/Ticket attachments"
+//	  workflow-folders:                      # optional, per alias; else workflow-folder
+//	    stage: "/Users/Team Sleek UX/Verification space/Ticket attachments"
 //	  hubs-file: ~/.config/knime/hubs.yaml   # optional
 //	  env-dir: ~/.config/knime               # optional
 //	  port-base: 30000                       # optional
@@ -105,6 +107,10 @@ type DevserverConfig struct {
 	// WorkflowFolder is the hub folder (`/Users/<team>/<space>/<group...>`)
 	// that holds one workflow per ticket, named after the Jira key. Required.
 	WorkflowFolder string `yaml:"workflow-folder"`
+	// WorkflowFolders overrides WorkflowFolder per hub alias, for hubs where
+	// the team or space is named differently. Aliases not listed use
+	// WorkflowFolder. Optional.
+	WorkflowFolders map[string]string `yaml:"workflow-folders"`
 	// HubsFile maps aliases to API urls and credential variable names.
 	// Default: ~/.config/knime/hubs.yaml.
 	HubsFile string `yaml:"hubs-file"`
@@ -152,6 +158,15 @@ func (d DevserverConfig) Missing() []string {
 
 // Configured reports whether every required key is present.
 func (d DevserverConfig) Configured() bool { return len(d.Missing()) == 0 }
+
+// WorkflowFolderFor returns the hub folder of the ticket workflows on alias:
+// its WorkflowFolders entry when there is one, else WorkflowFolder.
+func (d DevserverConfig) WorkflowFolderFor(alias string) string {
+	if folder := strings.TrimSpace(d.WorkflowFolders[alias]); folder != "" {
+		return folder
+	}
+	return d.WorkflowFolder
+}
 
 // withDefaults fills the optional keys.
 func (d DevserverConfig) withDefaults() DevserverConfig {

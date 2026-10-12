@@ -91,7 +91,8 @@ func Prepare(ctx context.Context, req Request, stdout io.Writer) (Result, error)
 	if err != nil {
 		return Result{}, err
 	}
-	spacePath, err := spaceOf(req.Cfg.WorkflowFolder)
+	folder := strings.TrimRight(req.Cfg.WorkflowFolderFor(alias), "/")
+	spacePath, err := spaceOf(folder)
 	if err != nil {
 		return Result{}, err
 	}
@@ -103,7 +104,6 @@ func Prepare(ctx context.Context, req Request, stdout io.Writer) (Result, error)
 		return Result{}, fmt.Errorf("space %s does not exist on %s", spacePath, alias)
 	}
 
-	folder := strings.TrimRight(req.Cfg.WorkflowFolder, "/")
 	itemPath := folder + "/" + req.ItemName
 	item, ok, err := client.ItemByPath(ctx, itemPath)
 	if err != nil {
@@ -144,7 +144,7 @@ func Prepare(ctx context.Context, req Request, stdout io.Writer) (Result, error)
 func spaceOf(folder string) (string, error) {
 	segs := strings.Split(strings.Trim(folder, "/"), "/")
 	if len(segs) < 3 || segs[0] != "Users" {
-		return "", fmt.Errorf("devserver.workflow-folder must be /Users/<team>/<space>/..., got %q", folder)
+		return "", fmt.Errorf("devserver.workflow-folder (or the workflow-folders entry of the hub) must be /Users/<team>/<space>/..., got %q", folder)
 	}
 	return "/" + strings.Join(segs[:3], "/"), nil
 }

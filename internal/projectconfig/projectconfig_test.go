@@ -77,6 +77,8 @@ func TestLoadDevserverBlock(t *testing.T) {
 devserver:
   hub: dev_green
   workflow-folder: "/Users/T/S/G"
+  workflow-folders:
+    stage: "/Users/Team T/S/G"
   frontend-repo: ~/repos/knime-ui.git
   port-base: 40000
 `
@@ -92,6 +94,12 @@ devserver:
 	}
 	if cfg.Devserver.PortBase != 40000 || cfg.Devserver.HubsFile != projectconfig.DefaultHubsFile {
 		t.Fatalf("partial: %+v", cfg.Devserver)
+	}
+	if got := cfg.Devserver.WorkflowFolderFor("stage"); got != "/Users/Team T/S/G" {
+		t.Fatalf("workflow-folders[stage]=%q", got)
+	}
+	if got := cfg.Devserver.WorkflowFolderFor("dev_green"); got != "/Users/T/S/G" {
+		t.Fatalf("unlisted alias must fall back to workflow-folder, got %q", got)
 	}
 }
 
