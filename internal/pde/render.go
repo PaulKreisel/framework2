@@ -265,7 +265,7 @@ func renderDevserver(p func(string, ...any), o Options) {
 	p("    #   vmArgs: - \"-Dorg.knime.ui.dev.node.dialog.url=http://localhost:%d/NodeDialog.js\"\n", d.Block.SpareFirst())
 	p("    #   sidecars:\n")
 	p("    #     - name: node-dialog\n")
-	p("    #       command: [pnpm, dev:NodeDialog]\n")
+	p("    #       command: command: [pnpm, _dev, NodeDialog, \"%d\"]\n", d.Block.SpareFirst())
 	p("    #       cwd: <knime-core-ui worktree>/org.knime.core.ui/js-src/packages/core-ui\n")
 	p("    #       env: { PORT: \"%d\" }   # check the package's vite config for the port variable\n", d.Block.SpareFirst())
 	p("    #       readyPattern: 'Local:\\s+(http\\S+)'\n")
