@@ -17,7 +17,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"framework2/internal/devserver"
@@ -50,8 +49,15 @@ func DataDir() string {
 	return filepath.Join(home, ".config", "knime", "agent-browser")
 }
 
-// Args are the Chromium arguments the agent browser is started with, by
-// launchd or by Start.
+// Args are the Chromium arguments the agent browser is started with. Start
+// appends the URL of the startup window.
+//
+// Not --no-startup-window: together with --remote-debugging-port that flag
+// makes Chromium hold a REMOTE_DEBUGGING keep-alive which only a DevTools
+// Browser.close releases (chrome_devtools_manager_delegate.cc, "controlled
+// entirely by the automation process"). Cmd+Q and the quit of a macOS
+// shutdown then set "trying to quit", close the windows and wait forever, and
+// the user cannot shut down the machine.
 func Args() []string {
 	return []string{
 		fmt.Sprintf("--remote-debugging-port=%d", Port),
@@ -59,7 +65,6 @@ func Args() []string {
 		"--no-first-run",
 		"--no-default-browser-check",
 		"--disable-search-engine-choice-screen",
-		"--no-startup-window",
 		// No keychain: Chromium otherwise asks for its "Safe Storage" password
 		// at every start, since the ad-hoc signature changes with each install.
 		"--use-mock-keychain",
@@ -78,9 +83,11 @@ func Running() bool {
 	return resp.StatusCode == 200
 }
 
-// Start launches the app bundle detached and waits for the DevTools port.
-// Normally launchd keeps the browser alive; this is the fallback.
-func Start(ctx context.Context) error {
+// Start launches the app bundle through LaunchServices without bringing it
+// to the front (`open -g`), with startURL in its startup window (about:blank
+// when empty), and waits for the DevTools port. Nothing keeps the browser
+// alive afterwards: Cmd+Q quits it.
+func Start(ctx context.Context, startURL string) error {
 	exe := filepath.Join(AppPath(), "Contents", "MacOS", "Google Chrome for Testing")
 	if _, err := os.Stat(exe); err != nil {
 		return fmt.Errorf("%s is not installed (%s); run the install script of the browser-editor-devserver skill", AppName, AppPath())
@@ -88,14 +95,16 @@ func Start(ctx context.Context) error {
 	if err := os.MkdirAll(DataDir(), 0o700); err != nil {
 		return err
 	}
-	if err := disableQuitWarning(); err != nil {
+	if err := markCleanExit(); err != nil {
 		return err
 	}
-	cmd := exec.Command(exe, Args()...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	cmd.Stdout, cmd.Stderr = nil, nil
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start %s: %w", AppName, err)
+	if startURL == "" {
+		startURL = "about:blank"
+	}
+	args := append([]string{"-g", "-a", AppPath(), "--args"}, Args()...)
+	args = append(args, startURL)
+	if out, err := exec.Command("open", args...).CombinedOutput(); err != nil {
+		return fmt.Errorf("start %s: %v: %s", AppName, err, strings.TrimSpace(string(out)))
 	}
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
@@ -108,13 +117,14 @@ func Start(ctx context.Context) error {
 		case <-time.After(500 * time.Millisecond):
 		}
 	}
-	return fmt.Errorf("%s did not open port %d within 20 s", AppName, Port)
+	return fmt.Errorf("%s did not open port %d within 20 s (an instance started without the DevTools flags, e.g. by double-click? quit it and retry)", AppName, Port)
 }
 
-// disableQuitWarning sets browser.confirm_to_quit=false in the profile's
-// Preferences (read at start). Chromium's default turns a short Cmd+Q into a
-// "Hold Cmd+Q to Quit" overlay, which reads as "cannot quit".
-func disableQuitWarning() error {
+// markCleanExit sets profile.exit_type=Normal in the profile's Preferences
+// so a start after a kill shows no "Restore pages?" bubble. (The "Hold Cmd+Q
+// to Quit" warning is a Local State pref that defaults to off; it was never
+// what blocked quitting, see Args.)
+func markCleanExit() error {
 	p := filepath.Join(DataDir(), "Default", "Preferences")
 	prefs := map[string]any{}
 	if b, err := os.ReadFile(p); err == nil {
@@ -122,15 +132,16 @@ func disableQuitWarning() error {
 			return fmt.Errorf("%s: %w", p, err)
 		}
 	}
-	browser, _ := prefs["browser"].(map[string]any)
-	if browser == nil {
-		browser = map[string]any{}
+	profile, _ := prefs["profile"].(map[string]any)
+	if profile == nil {
+		profile = map[string]any{}
 	}
-	if v, ok := browser["confirm_to_quit"].(bool); ok && !v {
+	if t, _ := profile["exit_type"].(string); t == "Normal" {
 		return nil
 	}
-	browser["confirm_to_quit"] = false
-	prefs["browser"] = browser
+	profile["exit_type"] = "Normal"
+	profile["exited_cleanly"] = true
+	prefs["profile"] = profile
 	b, err := json.Marshal(prefs)
 	if err != nil {
 		return err
@@ -241,17 +252,26 @@ func View(cwd string, stdout io.Writer) error {
 	if !devserver.Listening(editor) {
 		fmt.Fprintf(stdout, "editor frontend: not serving on %d yet\n", editor)
 	}
-	if !Running() {
-		fmt.Fprintf(stdout, "%s is not running; starting it\n", AppName)
-		if err := Start(context.Background()); err != nil {
-			return err
-		}
-	}
 	target := EditorURL(inst)
 	prefix := fmt.Sprintf("http://localhost:%d/", editor)
+	started := false
+	if !Running() {
+		fmt.Fprintf(stdout, "%s is not running; starting it with the editor tab\n", AppName)
+		if err := Start(context.Background(), target); err != nil {
+			return err
+		}
+		started = true
+	}
 	id, err := FindTab(prefix)
 	if err != nil {
 		return fmt.Errorf("agent browser: %w", err)
+	}
+	// The startup window of a fresh start may not be listed yet.
+	for i := 0; started && id == "" && i < 10; i++ {
+		time.Sleep(300 * time.Millisecond)
+		if id, err = FindTab(prefix); err != nil {
+			return fmt.Errorf("agent browser: %w", err)
+		}
 	}
 	if id == "" {
 		if id, err = OpenTab(target); err != nil {

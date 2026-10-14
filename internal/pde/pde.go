@@ -191,12 +191,14 @@ func Run(req Request, stdout io.Writer) error {
 		fmt.Fprintf(stdout, "Ports: block %d (gateway %d, wf-mcp %d, editor %d, spare %d-%d for additional sidecars, e.g. a UI extension frontend, see the comments in %s)\n",
 			block.Start, block.Gateway(), block.WfMCP(), block.Editor(), block.SpareFirst(), block.SpareLast(), req.configName())
 		// Playwright sessions attach to the KNIME Agent Browser; start it here so the
-		// first browser step of a ticket finds it (no daemon keeps it running).
+		// first browser step of a ticket finds it (no daemon keeps it running). It
+		// opens in the background with a blank tab: the backend is not up yet, and
+		// the ticket's first Playwright session adopts that tab as its page.
 		switch {
 		case agentbrowser.Running():
 			fmt.Fprintf(stdout, "Agent browser: running (DevTools %d)\n", agentbrowser.Port)
 		default:
-			if err := agentbrowser.Start(context.Background()); err != nil {
+			if err := agentbrowser.Start(context.Background(), ""); err != nil {
 				fmt.Fprintf(stdout, "Agent browser: not started (%v); Playwright needs it, `this view` starts it\n", err)
 			} else {
 				fmt.Fprintf(stdout, "Agent browser: started (DevTools %d)\n", agentbrowser.Port)
