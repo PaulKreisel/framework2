@@ -49,27 +49,22 @@ func DataDir() string {
 	return filepath.Join(home, ".config", "knime", "agent-browser")
 }
 
-// Args are the Chromium arguments the agent browser is started with. Start
-// appends the URL of the startup window.
+// launcher is the bundle's main executable, a script written by the install
+// script of the browser-editor-devserver skill. It adds the Chromium flags
+// (the DevTools Port, DataDir as the profile, the mock keychain) and execs
+// the real binary, so a start from the Dock or Spotlight carries the same
+// flags as one by Start. The flags are listed only there.
 //
-// Not --no-startup-window: together with --remote-debugging-port that flag
-// makes Chromium hold a REMOTE_DEBUGGING keep-alive which only a DevTools
+// Two flags matter beyond the port and the profile. --use-mock-keychain:
+// without it Chromium asks for "Chromium Safe Storage" in the keychain at
+// every start, since the ad-hoc signature changes with each install. And not
+// --no-startup-window: together with --remote-debugging-port that flag makes
+// Chromium hold a REMOTE_DEBUGGING keep-alive which only a DevTools
 // Browser.close releases (chrome_devtools_manager_delegate.cc, "controlled
 // entirely by the automation process"). Cmd+Q and the quit of a macOS
-// shutdown then set "trying to quit", close the windows and wait forever, and
-// the user cannot shut down the machine.
-func Args() []string {
-	return []string{
-		fmt.Sprintf("--remote-debugging-port=%d", Port),
-		"--user-data-dir=" + DataDir(),
-		"--no-first-run",
-		"--no-default-browser-check",
-		"--disable-search-engine-choice-screen",
-		// No keychain: Chromium otherwise asks for its "Safe Storage" password
-		// at every start, since the ad-hoc signature changes with each install.
-		"--use-mock-keychain",
-		"--password-store=basic",
-	}
+// shutdown then set "trying to quit", close the windows and wait forever.
+func launcher() string {
+	return filepath.Join(AppPath(), "Contents", "MacOS", AppName)
 }
 
 // Running reports whether the DevTools endpoint answers.
@@ -85,12 +80,12 @@ func Running() bool {
 
 // Start launches the app bundle through LaunchServices without bringing it
 // to the front (`open -g`), with startURL in its startup window (about:blank
-// when empty), and waits for the DevTools port. Nothing keeps the browser
-// alive afterwards: Cmd+Q quits it.
+// when empty), and waits for the DevTools port. The flags come from the
+// bundle's launcher. Nothing keeps the browser alive afterwards: Cmd+Q quits
+// it.
 func Start(ctx context.Context, startURL string) error {
-	exe := filepath.Join(AppPath(), "Contents", "MacOS", "Google Chrome for Testing")
-	if _, err := os.Stat(exe); err != nil {
-		return fmt.Errorf("%s is not installed (%s); run the install script of the browser-editor-devserver skill", AppName, AppPath())
+	if _, err := os.Stat(launcher()); err != nil {
+		return fmt.Errorf("%s is not installed with its launcher (%s); run the install script of the browser-editor-devserver skill", AppName, launcher())
 	}
 	if err := os.MkdirAll(DataDir(), 0o700); err != nil {
 		return err
@@ -101,8 +96,7 @@ func Start(ctx context.Context, startURL string) error {
 	if startURL == "" {
 		startURL = "about:blank"
 	}
-	args := append([]string{"-g", "-a", AppPath(), "--args"}, Args()...)
-	args = append(args, startURL)
+	args := []string{"-g", "-a", AppPath(), "--args", startURL}
 	if out, err := exec.Command("open", args...).CombinedOutput(); err != nil {
 		return fmt.Errorf("start %s: %v: %s", AppName, err, strings.TrimSpace(string(out)))
 	}
@@ -117,7 +111,7 @@ func Start(ctx context.Context, startURL string) error {
 		case <-time.After(500 * time.Millisecond):
 		}
 	}
-	return fmt.Errorf("%s did not open port %d within 20 s (an instance started without the DevTools flags, e.g. by double-click? quit it and retry)", AppName, Port)
+	return fmt.Errorf("%s did not open port %d within 20 s (an instance of an older install without the launcher? quit it, re-run the install script and retry)", AppName, Port)
 }
 
 // markCleanExit sets profile.exit_type=Normal in the profile's Preferences
